@@ -12,6 +12,8 @@
 #import <Foundation/Foundation.h>
 #import <Virtualization/Virtualization.h>
 
+@class AsbIvshmemTransport;
+
 NS_ASSUME_NONNULL_BEGIN
 
 /* The vsock port the guest agent listens on for SSH relay. Matches the
@@ -32,8 +34,14 @@ typedef void (^VmSshProxyLog)(NSString *line);
 /* Fires on main queue for diagnostic events (listen/bind/accept/relay). */
 @property (nonatomic, copy, nullable)  VmSshProxyLog        onLog;
 
+/* VZ path (macOS guest): relay TCP <-> guest vsock port 7 via a VZVirtioSocketDevice. */
 - (instancetype)initWithName:(NSString *)vmName
                 socketDevice:(VZVirtioSocketDevice *)device
+                 initialPort:(int)preferredPort;
+
+/* ivshmem path (Windows guest): relay TCP <-> guest ch7 via the shared-memory transport. */
+- (instancetype)initWithName:(NSString *)vmName
+            ivshmemTransport:(AsbIvshmemTransport *)transport
                  initialPort:(int)preferredPort;
 
 /* Bind loopback + start accept loop. Safe to call once. */

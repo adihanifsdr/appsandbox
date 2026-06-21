@@ -1,4 +1,5 @@
 #import "vm_agent_mac.h"
+#import "asb_ivshmem_transport.h"
 
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -19,6 +20,7 @@
     BOOL                        _cmdReady;
 }
 @property (nonatomic, strong) VZVirtioSocketDevice *socketDevice;
+@property (nonatomic, strong) AsbIvshmemTransport *ivshmemTransport;   /* set => Windows/ivshmem path */
 @property (nonatomic, copy)   NSString *vmName;
 @property (nonatomic, assign) BOOL online;
 @property (nonatomic, assign) uint64_t lastHeartbeatMs;
@@ -34,6 +36,19 @@
     if ((self = [super init])) {
         _vmName = [vmName copy];
         _socketDevice = device;
+        _sock = -1;
+        _cmdSeq = 0;
+        _queue = dispatch_queue_create("com.appsandbox.agent", DISPATCH_QUEUE_SERIAL);
+        _cmdCond = [[NSCondition alloc] init];
+    }
+    return self;
+}
+
+- (instancetype)initWithName:(NSString *)vmName
+             ivshmemTransport:(AsbIvshmemTransport *)transport {
+    if ((self = [super init])) {
+        _vmName = [vmName copy];
+        _ivshmemTransport = transport;
         _sock = -1;
         _cmdSeq = 0;
         _queue = dispatch_queue_create("com.appsandbox.agent", DISPATCH_QUEUE_SERIAL);
@@ -187,6 +202,11 @@
 }
 
 - (int)connectOnce {
+    /* Windows/ivshmem guest: claim+arm the ch1 agent slot and get a bridged fd. The connection
+     * loop + protocol above the fd are identical to the VZ path. */
+    if (self.ivshmemTransport) {
+        return [self.ivshmemTransport connectChannel:VM_AGENT_MAC_PORT timeoutMs:10000];
+    }
     if (!self.socketDevice) return -1;
 
     __block int fd = -1;
@@ -300,6 +320,15 @@
         /* Format: "ip:<iface>:<addr>" — reported by the agent on connect
          * so the user can SSH into the VM without guessing. */
         [self logFmt:@"[%@] IP %s", self.vmName, line + 3];
+        return;
+    }
+    if (strncmp(line, "idd_status:", 11) == 0) {
+        /* Windows guest: the VDD driver state, sent right after hello (and on change). Gates
+         * display_ready (= running && agentOnline && iddReady), mirroring Windows asb_vm_idd_ready. */
+        BOOL ready = (strcmp(line + 11, "ok") == 0);
+        [self logFmt:@"[%@] IDD driver: %s", self.vmName, line + 11];
+        VmAgentIddStatus cb = self.onIddStatusChange;
+        if (cb) dispatch_async(dispatch_get_main_queue(), ^{ cb(ready); });
         return;
     }
     if (strcmp(line, "ssh_ready") == 0 ||

@@ -33,6 +33,7 @@ Environment:
 #include <avrt.h>
 
 #include "Trace.h"
+#include "../transport/asb_transport.h"   /* AsbConn — host connection (AF_HYPERV on PC, ivshmem on Mac) */
 
 /* ============================================================================
  *  Display constants
@@ -193,10 +194,11 @@ typedef struct _VDD_SWAP_PROC {
     /* Staging texture for CPU readback (owned, per-swap-chain) */
     ID3D11Texture2D*    pStagingTex;
 
-    /* Direct HvSocket connection to host (replaces shared memory) */
+    /* Host connection via asb_transport — AF_HYPERV HvSocket on a Windows host, ivshmem stream
+       slot on a macOS host. One emit path, two backends. */
     HANDLE              hNetworkThread;     /* listener/accept thread */
-    volatile SOCKET     hClientSocket;      /* active client, owned by swap chain thread */
-    volatile SOCKET     hPendingSocket;     /* new client from network thread, picked up by swap chain */
+    AsbConn * volatile  hClientConn;        /* active client, owned by swap chain thread */
+    AsbConn * volatile  hPendingConn;       /* new client from network thread, picked up by swap chain */
     volatile BOOL       bStopNetwork;
     UINT64              frameSeq;
 

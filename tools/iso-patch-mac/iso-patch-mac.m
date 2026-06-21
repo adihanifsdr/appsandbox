@@ -32,10 +32,14 @@
 #include <grp.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <CommonCrypto/CommonKeyDerivation.h>
+#include "../transport/asb_shm_layout.h"   /* authoritative ivshmem region table + asb_shm_publish */
+#include "engine/win_disk.h"               /* from-scratch Windows-disk builder (apply WIM + stage) */
+#include "../provision/win_provision.h"    /* shared unattend/setup.cmd/SetupComplete.cmd generators */
 
 /* ---- stdout protocol helpers ---- */
 
@@ -1336,6 +1340,279 @@ static int cmd_install(int argc, char **argv) {
     return exitCode;
 }
 
+/* ---- "publish-shm" subcommand ----
+ * Write the asb_transport directory (region table + slot caps) into the ivshmem backing file
+ * before QEMU boots, so every guest service's asb_transport_init() sees ASB_SHM_DIR_MAGIC at start
+ * and selects the ivshmem backend. The VM launcher owns the directory; the viewer/host attach as
+ * consumers. The product QemuVm launcher calls asb_shm_publish() in-process from the same header;
+ * this subcommand is the equivalent for the raw-QEMU dev harness (and builds via Xcode, not clang). */
+static int cmd_publish_shm(int argc, char **argv) {
+    NSString *shmPath = nil;
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--shm") == 0 && i + 1 < argc)
+            shmPath = [NSString stringWithUTF8String:argv[++i]];
+    }
+    if (!shmPath) { emit_error(@"publish-shm: --shm <path> required"); return 2; }
+
+    int fd = open(shmPath.fileSystemRepresentation, O_RDWR);
+    if (fd < 0) {
+        emit_error([NSString stringWithFormat:@"open %@: %s", shmPath, strerror(errno)]);
+        return 3;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0) { close(fd); emit_error(@"fstat failed"); return 3; }
+    if ((uint64_t)st.st_size < ASB_P9_REGION_OFF + ASB_P9_REGION_SIZE) {
+        close(fd);
+        emit_error([NSString stringWithFormat:@"backing file too small: %lld bytes (need >= %llu)",
+                    (long long)st.st_size,
+                    (unsigned long long)(ASB_P9_REGION_OFF + ASB_P9_REGION_SIZE)]);
+        return 3;
+    }
+    void *bar = mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (bar == MAP_FAILED) { close(fd); emit_error(@"mmap failed"); return 3; }
+
+    asb_shm_publish((uint8_t *)bar, (uint64_t)st.st_size);
+    msync(bar, 4096, MS_SYNC);
+    munmap(bar, (size_t)st.st_size);
+    close(fd);
+    emit_log([NSString stringWithFormat:@"published %d regions to %@", ASB_SHM_N_REGIONS, shmPath]);
+    emit_done(shmPath);
+    return 0;
+}
+
+/* ======================================================================== *
+ *  "build-windows" subcommand
+ *
+ *  From-scratch Windows 11 ARM64 VM disk creation on macOS. Mirrors the Windows
+ *  VHDX-first deploy path (generate_unattend_vhdx + generate_vhdx_setup_cmd +
+ *  generate_vhdx_setupcomplete + generate_vhdx_manifest) but writes our OWN NTFS
+ *  via win_disk_build() instead of DISM:
+ *    1. mount the Microsoft ISO read-only -> sources/install.wim
+ *    2. generate unattend.xml + setup.cmd + SetupComplete.cmd into a temp dir
+ *    3. build a "<host-src>\t<guest-dest>" manifest: answer file at
+ *       \Windows\Panther, agent EXEs + test-signed drivers + devcon at
+ *       \Windows\AppSandbox[\drivers], SetupComplete.cmd at \Windows\Setup\Scripts
+ *    4. win_disk_build() applies the WIM image then stages our files at those
+ *       real guest paths (mkdir -p over the apply-built dir map)
+ *    5. unmount the ISO + remove the temp dir
+ *
+ *  The SetupComplete.cmd differs from the Windows one in one way: it also installs
+ *  the asb_ivshmem PCI driver (pnputil), since the Mac transport is ivshmem rather
+ *  than AF_HYPERV. testMode (Secure Boot off + test signing on) is mandatory: the
+ *  guest drivers are test-signed. ======================================================================== */
+
+/* Append "<src>\t<dest>\n" to the manifest if src exists on the host. */
+static int bw_manifest_add(FILE *mf, NSString *src, const char *dest) {
+    if (!src || ![[NSFileManager defaultManager] fileExistsAtPath:src]) return 0;
+    fprintf(mf, "%s\t%s\n", src.UTF8String, dest);
+    return 1;
+}
+
+/* ---- ISO mount lifecycle (read-only) ---- */
+typedef struct { NSString *diskDev; NSString *mountPt; } IsoMount;
+
+/* If this ISO is already attached — a Finder double-click auto-mounts a Windows ISO, or a prior build
+ * died before detaching — a fresh `hdiutil attach` fails with "Resource busy". Detach any existing
+ * attachment of this exact image first so the mount below is clean. */
+static void bw_detach_existing_iso(NSString *isoPath) {
+    NSString *want = [isoPath stringByStandardizingPath];
+    NSString *sout = nil;
+    if (run_tool(@"/usr/bin/hdiutil", @[@"info", @"-plist"], &sout, NULL) != 0 || !sout.length) return;
+    NSData *d = [sout dataUsingEncoding:NSUTF8StringEncoding];
+    id parsed = [NSPropertyListSerialization propertyListWithData:d options:0 format:NULL error:NULL];
+    NSArray *imgs = [parsed isKindOfClass:[NSDictionary class]] ? parsed[@"images"] : nil;
+    for (NSDictionary *img in imgs) {
+        NSString *ip = img[@"image-path"];
+        if (![ip isKindOfClass:[NSString class]]) continue;
+        if (![[ip stringByStandardizingPath] isEqualToString:want] && ![ip isEqualToString:isoPath]) continue;
+        /* Detach the whole-image dev node (the first system-entity, no s<N> partition suffix). */
+        NSString *dev = nil;
+        for (NSDictionary *e in img[@"system-entities"]) {
+            NSString *de = e[@"dev-entry"];
+            if (de) { dev = de; break; }
+        }
+        if (dev) (void)run_tool(@"/usr/bin/hdiutil", @[@"detach", @"-force", dev], NULL, NULL);
+    }
+}
+
+/* Attach the ISO read-only and locate the mount point that actually contains
+ * sources/install.wim (a Windows ISO exposes both ISO9660 and UDF volumes). */
+static BOOL bw_mount_iso(NSString *isoPath, IsoMount *out, NSString **errOut) {
+    out->diskDev = nil; out->mountPt = nil;
+    bw_detach_existing_iso(isoPath);   /* clear a stale/Finder attachment so attach won't be "Resource busy" */
+    NSString *sout = nil, *serr = nil;
+    int rc = run_tool(@"/usr/bin/hdiutil",
+                      @[@"attach", @"-readonly", @"-nobrowse", @"-plist", isoPath],
+                      &sout, &serr);
+    if (rc != 0) { if (errOut) *errOut = [NSString stringWithFormat:@"hdiutil attach failed (%d): %@", rc, serr]; return NO; }
+
+    NSData *d = [sout dataUsingEncoding:NSUTF8StringEncoding];
+    id parsed = [NSPropertyListSerialization propertyListWithData:d options:0 format:NULL error:NULL];
+    NSArray *ents = [parsed isKindOfClass:[NSDictionary class]] ? parsed[@"system-entities"] : nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSDictionary *e in ents) {
+        NSString *dev = e[@"dev-entry"];
+        /* the whole-image parent has no "s<N>" suffix: record it for detach */
+        if (dev && !out->diskDev &&
+            [dev rangeOfString:@"s" options:0 range:NSMakeRange(@"/dev/disk".length, dev.length-@"/dev/disk".length)].location == NSNotFound)
+            out->diskDev = dev;
+        NSString *mp = e[@"mount-point"];
+        if (mp.length) {
+            NSString *wim = [mp stringByAppendingPathComponent:@"sources/install.wim"];
+            if ([fm fileExistsAtPath:wim]) out->mountPt = mp;
+        }
+    }
+    /* Fallback for detach: first dev-entry. */
+    if (!out->diskDev && ents.count) out->diskDev = [ents firstObject][@"dev-entry"];
+    if (!out->mountPt) {
+        /* No install.wim found at any mount point; detach + fail. */
+        if (out->diskDev) (void)run_tool(@"/usr/bin/hdiutil", @[@"detach", @"-force", out->diskDev], NULL, NULL);
+        if (errOut) *errOut = @"ISO mounted but sources/install.wim not found";
+        return NO;
+    }
+    return YES;
+}
+
+static void bw_unmount_iso(IsoMount *m) {
+    if (m->diskDev) (void)run_tool(@"/usr/bin/hdiutil", @[@"detach", @"-force", m->diskDev], NULL, NULL);
+    m->diskDev = nil; m->mountPt = nil;
+}
+
+/* win_disk_build progress -> PROGRESS/STATUS lines. */
+static void bw_progress(int pct, const char *msg) {
+    emit_progress(pct, msg ? [NSString stringWithUTF8String:msg] : @"");
+}
+
+static int cmd_build_windows(int argc, char **argv) {
+    NSString *iso = nil, *out = nil, *payload = nil, *devcon = nil, *sshMsi = nil;
+    NSString *vmName = @"WIN11-VM", *user = @"user", *pass = @"test123", *lang = @"en-US";
+    int diskGb = 64, imageIdx = 1, testMode = 1;   /* testMode optional (mirrors Windows disk builder) */
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--iso") == 0 && i+1 < argc) iso = @(argv[++i]);
+        else if (strcmp(argv[i], "--out") == 0 && i+1 < argc) out = @(argv[++i]);
+        else if (strcmp(argv[i], "--payload") == 0 && i+1 < argc) payload = @(argv[++i]);
+        else if (strcmp(argv[i], "--devcon") == 0 && i+1 < argc) devcon = @(argv[++i]);
+        else if (strcmp(argv[i], "--ssh-msi") == 0 && i+1 < argc) sshMsi = @(argv[++i]);
+        else if (strcmp(argv[i], "--vm-name") == 0 && i+1 < argc) vmName = @(argv[++i]);
+        else if (strcmp(argv[i], "--user") == 0 && i+1 < argc) user = @(argv[++i]);
+        else if (strcmp(argv[i], "--pass") == 0 && i+1 < argc) pass = @(argv[++i]);
+        else if (strcmp(argv[i], "--lang") == 0 && i+1 < argc) lang = @(argv[++i]);
+        else if (strcmp(argv[i], "--disk-gb") == 0 && i+1 < argc) diskGb = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--image-index") == 0 && i+1 < argc) imageIdx = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--test-mode") == 0 && i+1 < argc) testMode = atoi(argv[++i]);
+    }
+    if (!iso || !out || !payload) {
+        emit_error(@"build-windows: --iso, --out and --payload required");
+        return 2;
+    }
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    /* 1) temp staging dir for the generated answer file + scripts */
+    NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                     [NSString stringWithFormat:@"asb-winbuild-%d", getpid()]];
+    [fm removeItemAtPath:tmp error:nil];
+    NSError *mkErr = nil;
+    if (![fm createDirectoryAtPath:tmp withIntermediateDirectories:YES attributes:nil error:&mkErr]) {
+        emit_error([NSString stringWithFormat:@"mkdir staging: %@", mkErr.localizedDescription]); return 3;
+    }
+    emit_progress(2, @"Generating answer file + setup scripts");
+    NSString *unattend = [tmp stringByAppendingPathComponent:@"unattend.xml"];
+    NSString *setupCmd = [tmp stringByAppendingPathComponent:@"setup.cmd"];
+    NSString *setupComplete = [tmp stringByAppendingPathComponent:@"SetupComplete.cmd"];
+    /* SSH MSI: staged to \Windows\AppSandbox\<basename>; SetupComplete installs it. */
+    NSString *sshMsiName = (sshMsi.length && [fm fileExistsAtPath:sshMsi]) ? sshMsi.lastPathComponent : nil;
+    /* Generate the provisioning files via the SHARED generator (same source the Windows backend uses
+     * -- no mac/pc fork). testMode is the caller's choice (mirrors the Windows disk builder, which
+     * passes config.test_mode): when on it bakes `bcdedit /set testsigning on` so the test-signed
+     * guest drivers load. arm64. */
+    BOOL scriptsOK = NO;
+    {
+        FILE *fu = fopen(unattend.fileSystemRepresentation, "wb");
+        FILE *fs = fopen(setupCmd.fileSystemRepresentation, "wb");
+        FILE *fc = fopen(setupComplete.fileSystemRepresentation, "wb");
+        if (fu && fs && fc) {
+            asb_provision_unattend(fu, vmName.UTF8String, user.UTF8String, pass.UTF8String,
+                                   "arm64", testMode, /*is_arm64=*/1, lang.UTF8String);
+            asb_provision_setup_cmd(fs);
+            asb_provision_setupcomplete(fc, sshMsiName.length ? sshMsiName.UTF8String : NULL);
+            scriptsOK = YES;
+        }
+        if (fu) fclose(fu);
+        if (fs) fclose(fs);
+        if (fc) fclose(fc);
+    }
+    if (!scriptsOK) {
+        [fm removeItemAtPath:tmp error:nil];
+        emit_error(@"failed to write staging scripts"); return 3;
+    }
+
+    /* 2) build the manifest: "<host-src>\t<guest-dest>" (mirrors generate_vhdx_manifest) */
+    NSString *manifest = [tmp stringByAppendingPathComponent:@"manifest.tsv"];
+    FILE *mf = fopen(manifest.fileSystemRepresentation, "w");
+    if (!mf) { [fm removeItemAtPath:tmp error:nil]; emit_error(@"cannot open manifest"); return 3; }
+    int n = 0;
+    n += bw_manifest_add(mf, unattend,      "\\Windows\\Panther\\unattend.xml");
+    n += bw_manifest_add(mf, setupCmd,      "\\Windows\\AppSandbox\\setup.cmd");
+    n += bw_manifest_add(mf, setupComplete, "\\Windows\\Setup\\Scripts\\SetupComplete.cmd");
+    /* agent + channel helper EXEs (existence-gated -- mirrors generate_vhdx_manifest's bin set;
+     * appsandbox-displays.exe is staged when present in the payload). */
+    const char *bins[] = { "appsandbox-agent.exe", "appsandbox-input.exe", "appsandbox-displays.exe",
+                           "appsandbox-clipboard.exe", "appsandbox-clipboard-reader.exe",
+                           "appsandbox-audio.exe" };
+    for (size_t i = 0; i < sizeof(bins)/sizeof(bins[0]); i++) {
+        NSString *src = [payload stringByAppendingPathComponent:@(bins[i])];
+        n += bw_manifest_add(mf, src, [NSString stringWithFormat:@"\\Windows\\AppSandbox\\%s", bins[i]].UTF8String);
+    }
+    /* test-signed drivers (VDD + VAD + ivshmem) + the test cert(s). Each is existence-gated. */
+    const char *drv[] = { "appsandboxvdd.inf", "AppSandboxVDD.dll", "AppSandboxVDD.cat", "AppSandboxVDD.cer",
+                          "AppSandboxVAD.inf", "appsandboxvad.sys", "AppSandboxVAD.cat", "AppSandboxVAD.cer",
+                          "asb_ivshmem.inf", "asb_ivshmem.sys", "asb_ivshmem.cat", "asb_ivshmem.cer",
+                          /* NetKVM (virtio-net) -- vendored from virtio-win (BSD-3-Clause; license file
+                             staged alongside). Mac payload only; never in the Windows-host manifest. */
+                          "netkvm.inf", "netkvm.sys", "netkvm.cat", "netkvmp.exe", "virtio-win_license.txt" };
+    NSString *drvDir = [payload stringByAppendingPathComponent:@"drivers"];
+    for (size_t i = 0; i < sizeof(drv)/sizeof(drv[0]); i++) {
+        NSString *src = [drvDir stringByAppendingPathComponent:@(drv[i])];
+        n += bw_manifest_add(mf, src, [NSString stringWithFormat:@"\\Windows\\AppSandbox\\drivers\\%s", drv[i]].UTF8String);
+    }
+    /* devcon.exe (ARM64) -- installs the root-enumerated VDD/VAD devnodes */
+    if (devcon) n += bw_manifest_add(mf, devcon, "\\Windows\\AppSandbox\\drivers\\devcon.exe");
+    /* OpenSSH MSI (downloaded at create) -- SetupComplete.cmd installs it for SSH-over-ivshmem ch7 */
+    if (sshMsiName)
+        n += bw_manifest_add(mf, sshMsi, [NSString stringWithFormat:@"\\Windows\\AppSandbox\\%@", sshMsiName].UTF8String);
+    fclose(mf);
+    emit_log([NSString stringWithFormat:@"manifest: %d file(s) to stage", n]);
+
+    /* 3) mount the ISO and locate install.wim */
+    emit_progress(4, @"Mounting ISO");
+    IsoMount iso_m = {0};
+    NSString *err = nil;
+    if (!bw_mount_iso(iso, &iso_m, &err)) {
+        [fm removeItemAtPath:tmp error:nil];
+        emit_error(err); return 4;
+    }
+    NSString *wim = [iso_m.mountPt stringByAppendingPathComponent:@"sources/install.wim"];
+    emit_log([NSString stringWithFormat:@"install.wim: %@", wim]);
+
+    /* 4) build the disk (apply WIM image -> NTFS -> stage our files -> ESP + BCD) */
+    emit_status(@"Building Windows disk");
+    int rc = win_disk_build(wim.fileSystemRepresentation,
+                            out.fileSystemRepresentation,
+                            (uint32_t)imageIdx,
+                            (uint64_t)(diskGb > 0 ? diskGb : 64),
+                            manifest.fileSystemRepresentation,
+                            bw_progress);
+
+    /* 5) unmount + cleanup */
+    bw_unmount_iso(&iso_m);
+    [fm removeItemAtPath:tmp error:nil];
+
+    if (rc != 0) { emit_error([NSString stringWithFormat:@"win_disk_build failed (%d)", rc]); return 5; }
+    emit_progress(100, @"Disk complete");
+    emit_done(out);
+    return 0;
+}
+
 /* ---- Entry ---- */
 
 static void print_usage(void) {
@@ -1354,6 +1631,16 @@ static void print_usage(void) {
         "  stage --disk <path> --manifest <path>\n"
         "      Mount the VM disk image, apply TSV manifest, unmount.\n"
         "      Must run as root (invoked via AEWP).\n"
+        "\n"
+        "  publish-shm --shm <path>\n"
+        "      Write the asb_transport directory into the ivshmem backing file\n"
+        "      before QEMU boots (launcher owns it; guest services then select ivshmem).\n"
+        "\n"
+        "  build-windows --iso <path> --out <disk.img> --payload <agent_win dir>\n"
+        "                [--devcon <devcon.exe>] [--ssh-msi <OpenSSH .msi>] [--vm-name <n>]\n"
+        "                [--user <u>] [--pass <p>] [--lang <bcp47>] [--disk-gb <n>] [--image-index <n>]\n"
+        "      From-scratch Windows VM disk: mount the ISO, apply install.wim with our\n"
+        "      own NTFS writer, and stage the answer file + agent + test-signed drivers.\n"
         "\n");
 }
 
@@ -1369,6 +1656,12 @@ int main(int argc, char *argv[]) {
         }
         if (strcmp(cmd, "install") == 0) {
             return cmd_install(argc - 2, argv + 2);
+        }
+        if (strcmp(cmd, "publish-shm") == 0) {
+            return cmd_publish_shm(argc - 2, argv + 2);
+        }
+        if (strcmp(cmd, "build-windows") == 0) {
+            return cmd_build_windows(argc - 2, argv + 2);
         }
         if (strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0) {
             print_usage();

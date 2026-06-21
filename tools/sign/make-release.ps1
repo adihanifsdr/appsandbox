@@ -60,6 +60,24 @@ $tsUrl   = if ($cfg -and $cfg.timestampUrl) { $cfg.timestampUrl } else { 'http:/
 function Find-MSBuild {
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     if (Test-Path $vswhere) {
+        # Prefer the MSBuild whose process architecture matches the HOST. The WDK's post-build
+        # ApiValidator (and its aitstatic helper) is invoked at the msbuild process architecture;
+        # the x86 validator returns exit 193 (ERROR_BAD_EXE_FORMAT) when checking a driver on an
+        # ARM64 host. The 32-bit MSBuild\Current\Bin\MSBuild.exe (which `-find ... | First 1`
+        # returns) is x86, so a driver build (e.g. AppSandboxVAD.sys) fails ApiValidation even
+        # though it compiled. Selecting the native msbuild makes the native ApiValidator run -
+        # exactly what the VS IDE does (which is why a GUI build of the same solution succeeds).
+        $root = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath | Select-Object -First 1
+        if ($root) {
+            $cands = @()
+            switch ($env:PROCESSOR_ARCHITECTURE) {
+                'ARM64' { $cands += "$root\MSBuild\Current\Bin\arm64\MSBuild.exe"; $cands += "$root\MSBuild\Current\Bin\amd64\MSBuild.exe" }
+                'AMD64' { $cands += "$root\MSBuild\Current\Bin\amd64\MSBuild.exe" }
+            }
+            $cands += "$root\MSBuild\Current\Bin\MSBuild.exe"   # x86 fallback
+            foreach ($c in $cands) { if (Test-Path $c) { return $c } }
+        }
+        # Last resort: original vswhere -find (may be x86).
         $mb = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
         if ($mb) { return $mb }
     }

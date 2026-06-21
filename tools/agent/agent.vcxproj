@@ -157,6 +157,7 @@ xcopy /Y "$(TargetPath)" "$(SolutionDir)release\resources\"</Command>
   <ItemGroup>
     <ClCompile Include="agent.c" />
     <ClCompile Include="p9copy.c" />
+    <ClCompile Include="..\transport\asb_transport.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="p9copy.h" />

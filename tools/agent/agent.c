@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include "p9copy.h"
+#include "../transport/asb_transport.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -70,14 +71,13 @@ static const GUID AGENT_SERVICE_GUID =
 static SERVICE_STATUS        g_status;
 static SERVICE_STATUS_HANDLE g_status_handle;
 static HANDLE                g_stop_event;
-static SOCKET                g_listen_sock = INVALID_SOCKET;
-static SOCKET                g_client_sock = INVALID_SOCKET; /* Active persistent connection */
+static AsbConn *             g_client_sock = NULL; /* Active persistent connection */
 static volatile BOOL         g_os_shutting_down = FALSE;
 static CRITICAL_SECTION      g_send_cs;     /* Protects send_line from concurrent callers */
 
 /* ---- Logging ---- */
 
-static int send_line(SOCKET s, const char *msg);
+static int send_line(AsbConn *s, const char *msg);
 
 static void agent_log(const char *fmt, ...)
 {
@@ -105,7 +105,7 @@ static void agent_log_to_host(const char *fmt, ...)
     char line[1040];
     va_list ap;
 
-    if (g_client_sock == INVALID_SOCKET) return;
+    if (g_client_sock == NULL) return;
 
     va_start(ap, fmt);
     vsnprintf(msg, sizeof(msg), fmt, ap);
@@ -152,14 +152,14 @@ typedef struct {
 typedef struct {
     GpuShareInfo shares[MAX_GPU_SHARES];
     int          count;
-    SOCKET       notify_sock;    /* Socket to send progress/done to host */
+    AsbConn *    notify_sock;    /* Socket to send progress/done to host */
     volatile BOOL copying;
 } GpuCopyState;
 
 static GpuCopyState g_gpu_copy = {0};
 
 /* Forward declarations — defined later but needed by GPU copy */
-static int recv_line(SOCKET s, char *buf, int buf_size);
+static int recv_line(AsbConn *s, char *buf, int buf_size);
 static BOOL enable_privilege(LPCWSTR priv_name);
 
 /* ---- GPU copy background thread ---- */
@@ -221,13 +221,13 @@ static BOOL check_gpu_error43(void)
     return found_error43;
 }
 
-static void disable_hyperv_video(SOCKET notify_sock);
+static void disable_hyperv_video(AsbConn *notify_sock);
 
 
 /* Disable and re-enable vrd.inf display devices.
    If only_error43 is TRUE, only cycles devices with problem code 43.
    If FALSE, cycles all vrd.inf devices (used at preshutdown). */
-static void cycle_gpu_devices(SOCKET notify_sock, BOOL only_error43)
+static void cycle_gpu_devices(AsbConn *notify_sock, BOOL only_error43)
 {
     HDEVINFO devs;
     SP_DEVINFO_DATA dev_info;
@@ -263,13 +263,13 @@ static void cycle_gpu_devices(SOCKET notify_sock, BOOL only_error43)
 
         agent_log("GPU cycle: disabling %ls...", dev_id);
         sprintf_s(msg, sizeof(msg), "gpu_device_status:disabling %ls", dev_id);
-        if (notify_sock != INVALID_SOCKET) send_line(notify_sock, msg);
+        if (notify_sock != NULL) send_line(notify_sock, msg);
 
         cr = CM_Disable_DevNode(dev_info.DevInst, 0);
         if (cr != CR_SUCCESS) {
             agent_log("GPU cycle: CM_Disable_DevNode failed (%lu).", cr);
             sprintf_s(msg, sizeof(msg), "gpu_device_status:disable failed (%lu)", cr);
-            if (notify_sock != INVALID_SOCKET) send_line(notify_sock, msg);
+            if (notify_sock != NULL) send_line(notify_sock, msg);
             continue;
         }
 
@@ -277,19 +277,19 @@ static void cycle_gpu_devices(SOCKET notify_sock, BOOL only_error43)
 
         agent_log("GPU cycle: re-enabling %ls...", dev_id);
         sprintf_s(msg, sizeof(msg), "gpu_device_status:re-enabling %ls", dev_id);
-        if (notify_sock != INVALID_SOCKET) send_line(notify_sock, msg);
+        if (notify_sock != NULL) send_line(notify_sock, msg);
 
         cr = CM_Enable_DevNode(dev_info.DevInst, 0);
         if (cr != CR_SUCCESS) {
             agent_log("GPU cycle: CM_Enable_DevNode failed (%lu).", cr);
             sprintf_s(msg, sizeof(msg), "gpu_device_status:enable failed (%lu)", cr);
-            if (notify_sock != INVALID_SOCKET) send_line(notify_sock, msg);
+            if (notify_sock != NULL) send_line(notify_sock, msg);
             continue;
         }
 
         agent_log("GPU cycle: device %ls re-enabled.", dev_id);
         sprintf_s(msg, sizeof(msg), "gpu_device_status:re-enabled %ls", dev_id);
-        if (notify_sock != INVALID_SOCKET) send_line(notify_sock, msg);
+        if (notify_sock != NULL) send_line(notify_sock, msg);
     }
 
     SetupDiDestroyDeviceInfoList(devs);
@@ -301,7 +301,7 @@ static void cycle_gpu_devices(SOCKET notify_sock, BOOL only_error43)
 /* Wait for a real user to log in (not defaultuser0 or SYSTEM).
    Polls WTS sessions every 2 seconds up to timeout_ms.
    Returns the session ID, or 0xFFFFFFFF on timeout. */
-static DWORD wait_for_user_login(SOCKET notify_sock, int timeout_ms,
+static DWORD wait_for_user_login(AsbConn *notify_sock, int timeout_ms,
                                   const char *notify_msg)
 {
     typedef BOOL (WINAPI *PFN_WTSQuerySessionInformationW)(
@@ -329,7 +329,7 @@ static DWORD wait_for_user_login(SOCKET notify_sock, int timeout_ms,
     }
 
     agent_log("Waiting for user login...");
-    if (notify_sock != INVALID_SOCKET && notify_msg)
+    if (notify_sock != NULL && notify_msg)
         send_line(notify_sock, notify_msg);
 
     start = GetTickCount();
@@ -590,7 +590,7 @@ static DWORD WINAPI gpu_copy_thread(LPVOID param)
 
         /* Send progress to host */
         sprintf_s(msg, sizeof(msg), "gpu_copy_progress:%d/%d", i + 1, state->count);
-        if (state->notify_sock != INVALID_SOCKET)
+        if (state->notify_sock != NULL)
             send_line(state->notify_sock, msg);
     }
 
@@ -628,7 +628,7 @@ static DWORD WINAPI gpu_copy_thread(LPVOID param)
                   failed_shares, state->count);
     }
 
-    if (state->notify_sock != INVALID_SOCKET)
+    if (state->notify_sock != NULL)
         send_line(state->notify_sock, msg);
 
     state->copying = FALSE;
@@ -638,7 +638,7 @@ static DWORD WINAPI gpu_copy_thread(LPVOID param)
 /* Parse gpu_query_response and start background copy.
    Format: "gpu_query_response:N" followed by N lines of "share|dest|filter"
    (filter may be empty). */
-static void handle_gpu_query_response(SOCKET client, int share_count)
+static void handle_gpu_query_response(AsbConn *client, int share_count)
 {
     int i;
     HANDLE thread;
@@ -717,12 +717,12 @@ static void handle_gpu_query_response(SOCKET client, int share_count)
 
 /* ---- Line I/O ---- */
 
-static int recv_line(SOCKET s, char *buf, int buf_size)
+static int recv_line(AsbConn *s, char *buf, int buf_size)
 {
     int pos = 0;
     while (pos < buf_size - 1) {
         char c;
-        int n = recv(s, &c, 1, 0);
+        int n = asb_recv(s, &c, 1);
         if (n <= 0) return n;
         if (c == '\n') break;
         if (c != '\r') buf[pos++] = c;
@@ -731,13 +731,13 @@ static int recv_line(SOCKET s, char *buf, int buf_size)
     return pos;
 }
 
-static int send_line(SOCKET s, const char *msg)
+static int send_line(AsbConn *s, const char *msg)
 {
     int len = (int)strlen(msg);
     int n;
     EnterCriticalSection(&g_send_cs);
-    n = send(s, msg, len, 0);
-    if (n > 0) n = send(s, "\n", 1, 0);
+    n = asb_send(s, msg, len);
+    if (n > 0) n = asb_send(s, "\n", 1);
     LeaveCriticalSection(&g_send_cs);
     return n;
 }
@@ -1353,7 +1353,7 @@ static void stop_audio_monitor(void)
      error:<N>   — device present but has problem code N
      not_found   — no device with Root\AppSandboxVDD hardware ID found
 */
-static void report_idd_status(SOCKET client)
+static void report_idd_status(AsbConn *client)
 {
     char output[4096];
     wchar_t cmd[MAX_PATH];
@@ -1520,7 +1520,7 @@ static void ensure_vdd_running(void)
 
 #define HYPERV_VIDEO_HWID L"*DA0A7802*"
 
-static void ensure_hyperv_video_disabled(SOCKET notify)
+static void ensure_hyperv_video_disabled(AsbConn *notify)
 {
     char output[4096];
     DWORD exit_code = 0;
@@ -1543,7 +1543,7 @@ static void ensure_hyperv_video_disabled(SOCKET notify)
         return;
     }
 
-    if (notify != INVALID_SOCKET)
+    if (notify != NULL)
         send_line(notify, "hyperv_video:disabled");
     agent_log("Hyper-V Video disable (exit=%lu): %.400s", exit_code, output);
 }
@@ -1553,7 +1553,7 @@ static void ensure_hyperv_video_disabled(SOCKET notify)
 /* Spawn appsandbox-displays.exe in the interactive session and capture its
    stdout.  The helper prints "N,WxH,WxH,..." and exits.  We use the same
    token-dup + SetTokenInformation pattern as spawn_input_in_session(). */
-static void report_displays(SOCKET notify)
+static void report_displays(AsbConn *notify)
 {
     HANDLE cur_token = NULL, dup_token = NULL;
     HANDLE hReadPipe = NULL, hWritePipe = NULL;
@@ -1574,7 +1574,7 @@ static void report_displays(SOCKET notify)
         /* No interactive user session — skip display enumeration.
            Session 0 is the services session (no desktop).
            0xFFFFFFFF means no console session at all. */
-        if (notify != INVALID_SOCKET) send_line(notify, "displays:0,");
+        if (notify != NULL) send_line(notify, "displays:0,");
         return;
     }
 
@@ -1586,7 +1586,7 @@ static void report_displays(SOCKET notify)
 
     if (GetFileAttributesW(exe_path) == INVALID_FILE_ATTRIBUTES) {
         agent_log("report_displays: %ls not found.", exe_path);
-        if (notify != INVALID_SOCKET) send_line(notify, "displays:0,");
+        if (notify != NULL) send_line(notify, "displays:0,");
         return;
     }
 
@@ -1596,7 +1596,7 @@ static void report_displays(SOCKET notify)
     sa.lpSecurityDescriptor = NULL;
     if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
         agent_log("report_displays: CreatePipe failed (%lu).", GetLastError());
-        if (notify != INVALID_SOCKET) send_line(notify, "displays:0,");
+        if (notify != NULL) send_line(notify, "displays:0,");
         return;
     }
     SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
@@ -1605,14 +1605,14 @@ static void report_displays(SOCKET notify)
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &cur_token)) {
         agent_log("report_displays: OpenProcessToken failed (%lu).", GetLastError());
         CloseHandle(hReadPipe); CloseHandle(hWritePipe);
-        if (notify != INVALID_SOCKET) send_line(notify, "displays:0,");
+        if (notify != NULL) send_line(notify, "displays:0,");
         return;
     }
     if (!DuplicateTokenEx(cur_token, TOKEN_ALL_ACCESS, NULL,
                            SecurityImpersonation, TokenPrimary, &dup_token)) {
         agent_log("report_displays: DuplicateTokenEx failed (%lu).", GetLastError());
         CloseHandle(cur_token); CloseHandle(hReadPipe); CloseHandle(hWritePipe);
-        if (notify != INVALID_SOCKET) send_line(notify, "displays:0,");
+        if (notify != NULL) send_line(notify, "displays:0,");
         return;
     }
     CloseHandle(cur_token);
@@ -1622,7 +1622,7 @@ static void report_displays(SOCKET notify)
         agent_log("report_displays: SetTokenInformation(session=%lu) failed (%lu).",
                    session_id, GetLastError());
         CloseHandle(dup_token); CloseHandle(hReadPipe); CloseHandle(hWritePipe);
-        if (notify != INVALID_SOCKET) send_line(notify, "displays:0,");
+        if (notify != NULL) send_line(notify, "displays:0,");
         return;
     }
 
@@ -1639,7 +1639,7 @@ static void report_displays(SOCKET notify)
                                TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
         agent_log("report_displays: CreateProcessAsUserW failed (%lu).", GetLastError());
         CloseHandle(dup_token); CloseHandle(hReadPipe); CloseHandle(hWritePipe);
-        if (notify != INVALID_SOCKET) send_line(notify, "displays:0,");
+        if (notify != NULL) send_line(notify, "displays:0,");
         return;
     }
     CloseHandle(dup_token);
@@ -1678,13 +1678,13 @@ static void report_displays(SOCKET notify)
 
     snprintf(msg, sizeof(msg), "displays:%s", output);
     agent_log("Displays: %s", output);
-    if (notify != INVALID_SOCKET) send_line(notify, msg);
+    if (notify != NULL) send_line(notify, msg);
 }
 
 /* ---- IDD connect: respawn helpers in console session ---- */
 
 /* Send a response, prepending the sequence tag if present */
-static void send_reply(SOCKET s, const char *tag, const char *msg)
+static void send_reply(AsbConn *s, const char *tag, const char *msg)
 {
     if (tag[0]) {
         char rb[512];
@@ -1695,7 +1695,7 @@ static void send_reply(SOCKET s, const char *tag, const char *msg)
     }
 }
 
-static void handle_idd_connect(SOCKET client, const char *tag)
+static void handle_idd_connect(AsbConn *client, const char *tag)
 {
     DWORD new_console = WTSGetActiveConsoleSessionId();
 
@@ -1725,7 +1725,7 @@ static void handle_idd_connect(SOCKET client, const char *tag)
 /* Disable the Hyper-V synthetic video adapter (if present).
    Hardware ID: VMBUS\{da0a7802-e377-4aac-8e77-0558eb1073f8}
    Silently does nothing if the device doesn't exist. */
-static void disable_hyperv_video(SOCKET notify_sock)
+static void disable_hyperv_video(AsbConn *notify_sock)
 {
     HDEVINFO devs;
     SP_DEVINFO_DATA dev_info;
@@ -1754,20 +1754,20 @@ static void disable_hyperv_video(SOCKET notify_sock)
         cr = CM_Get_DevNode_Status(&dev_status, &dev_problem, dev_info.DevInst, 0);
         if (cr == CR_SUCCESS && !(dev_status & DN_STARTED) && (dev_problem == CM_PROB_DISABLED)) {
             agent_log("Hyper-V Video adapter already disabled: %ls", hw_id);
-            if (notify_sock != INVALID_SOCKET)
+            if (notify_sock != NULL)
                 send_line(notify_sock, "hyperv_video:already_disabled");
             SetupDiDestroyDeviceInfoList(devs);
             return;
         }
 
         agent_log("Disabling Hyper-V Video adapter: %ls (status=0x%lX problem=%lu)", hw_id, dev_status, dev_problem);
-        if (notify_sock != INVALID_SOCKET)
+        if (notify_sock != NULL)
             send_line(notify_sock, "hyperv_video:disabling");
 
         cr = CM_Disable_DevNode(dev_info.DevInst, 0);
         if (cr == CR_SUCCESS) {
             agent_log("Hyper-V Video adapter disabled.");
-            if (notify_sock != INVALID_SOCKET)
+            if (notify_sock != NULL)
                 send_line(notify_sock, "hyperv_video:disabled");
         } else {
             agent_log("Hyper-V Video disable failed (%lu).", cr);
@@ -1777,15 +1777,15 @@ static void disable_hyperv_video(SOCKET notify_sock)
     }
 
     agent_log("Hyper-V Video adapter not found (enumerated %lu devices).", idx);
-    if (notify_sock != INVALID_SOCKET)
+    if (notify_sock != NULL)
         send_line(notify_sock, "hyperv_video:not_found");
     SetupDiDestroyDeviceInfoList(devs);
 }
 
 /* Forward declaration — defined after SSH proxy section */
-static void handle_ssh_enable(SOCKET client, const char *tag);
+static void handle_ssh_enable(AsbConn *client, const char *tag);
 
-static void handle_client(SOCKET client)
+static void handle_client(AsbConn *client)
 {
     char buf[256];
     int n;
@@ -1797,17 +1797,14 @@ static void handle_client(SOCKET client)
     agent_log("Client connected.");
     g_client_sock = client;
 
-    /* Set socket timeouts so recv/send don't block forever if host disconnects */
-    {
-        DWORD timeout = 10000; /* 10 seconds */
-        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
-        setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout));
-    }
+    /* Set timeouts so recv/send don't block forever if host disconnects (no-op on ivshmem) */
+    asb_set_timeout(client, 10000, 10000);
 
     /* Send hello */
     if (send_line(client, "hello") <= 0) {
         agent_log("Failed to send hello.");
-        closesocket(client);
+        asb_close(client);
+        g_client_sock = NULL;
         return;
     }
 
@@ -1823,17 +1820,10 @@ static void handle_client(SOCKET client)
 
     /* Persistent connection loop */
     while (WaitForSingleObject(g_stop_event, 0) != WAIT_OBJECT_0) {
-        fd_set rfds;
-        struct timeval tv;
         int ret;
         DWORD now;
 
-        FD_ZERO(&rfds);
-        FD_SET(client, &rfds);
-        tv.tv_sec = 1;
-        tv.tv_usec = 0;
-
-        ret = select(0, &rfds, NULL, NULL, &tv);
+        ret = asb_poll(client, 1000);   /* 1s: 1=data, 0=timeout, <0=closed/error */
         if (ret < 0) break;
 
         /* Send heartbeat if interval elapsed */
@@ -2036,7 +2026,7 @@ static void handle_client(SOCKET client)
     if (g_gpu_copy.copying) {
         agent_log("Waiting for GPU copy thread to finish...");
         /* Invalidate notify socket so it doesn't try to send on closed socket */
-        g_gpu_copy.notify_sock = INVALID_SOCKET;
+        g_gpu_copy.notify_sock = NULL;
         {
             int wait;
             for (wait = 0; wait < 10000 && g_gpu_copy.copying; wait += 500)
@@ -2044,8 +2034,8 @@ static void handle_client(SOCKET client)
         }
     }
 
-    g_client_sock = INVALID_SOCKET;
-    closesocket(client);
+    g_client_sock = NULL;
+    asb_close(client);
     agent_log("Client handler exiting.");
 }
 
@@ -2053,73 +2043,32 @@ static void handle_client(SOCKET client)
 
 static DWORD WINAPI listener_thread(LPVOID param)
 {
-    WSADATA wsa;
-    SOCKADDR_HV addr;
-    SOCKET client;
-    fd_set fds;
-    struct timeval tv;
-
+    AsbListener *l;
     (void)param;
 
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        agent_log("WSAStartup failed: %d", WSAGetLastError());
+    if (asb_transport_init() != 0) {
+        agent_log("asb_transport_init failed.");
         return 1;
     }
 
     while (WaitForSingleObject(g_stop_event, 0) != WAIT_OBJECT_0) {
-        g_listen_sock = socket(AF_HYPERV, SOCK_STREAM, 1 /* HV_PROTOCOL_RAW */);
-        if (g_listen_sock == INVALID_SOCKET) {
-            agent_log("socket(AF_HYPERV) failed: %d, retrying in 3s", WSAGetLastError());
+        l = asb_listen(ASB_CH_AGENT);
+        if (!l) {
+            agent_log("asb_listen(ASB_CH_AGENT) failed, retrying in 3s");
             if (WaitForSingleObject(g_stop_event, 3000) == WAIT_OBJECT_0) break;
             continue;
         }
+        agent_log("Listening on agent control channel (transport=%s)",
+                  asb_transport_is_ivshmem() ? "ivshmem" : "hyperv");
 
-        memset(&addr, 0, sizeof(addr));
-        addr.Family = AF_HYPERV;
-        addr.VmId = HV_GUID_WILDCARD;
-        addr.ServiceId = AGENT_SERVICE_GUID;
-
-        if (bind(g_listen_sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-            agent_log("bind failed: %d, retrying in 3s", WSAGetLastError());
-            closesocket(g_listen_sock);
-            g_listen_sock = INVALID_SOCKET;
-            if (WaitForSingleObject(g_stop_event, 3000) == WAIT_OBJECT_0) break;
-            continue;
-        }
-
-        if (listen(g_listen_sock, 4) != 0) {
-            agent_log("listen failed: %d, retrying in 3s", WSAGetLastError());
-            closesocket(g_listen_sock);
-            g_listen_sock = INVALID_SOCKET;
-            if (WaitForSingleObject(g_stop_event, 3000) == WAIT_OBJECT_0) break;
-            continue;
-        }
-
-        agent_log("Listening on AF_HYPERV (service GUID a5b0cafe-0001-4000-8000-000000000001)");
-
-        /* Accept loop — breaks out on error to retry socket creation */
+        /* Accept loop — one client at a time */
         while (WaitForSingleObject(g_stop_event, 0) != WAIT_OBJECT_0) {
-            FD_ZERO(&fds);
-            FD_SET(g_listen_sock, &fds);
-            tv.tv_sec = 1;
-            tv.tv_usec = 0;
-
-            if (select(0, &fds, NULL, NULL, &tv) > 0) {
-                client = accept(g_listen_sock, NULL, NULL);
-                if (client != INVALID_SOCKET)
-                    handle_client(client);
-            }
+            AsbConn *client = asb_accept(l, 1000);   /* 1s timeout so we re-check g_stop_event */
+            if (client) handle_client(client);
         }
-
-        closesocket(g_listen_sock);
-        g_listen_sock = INVALID_SOCKET;
+        asb_close_listener(l);
     }
 
-    if (g_listen_sock != INVALID_SOCKET) {
-        closesocket(g_listen_sock);
-        g_listen_sock = INVALID_SOCKET;
-    }
-    WSACleanup();
     agent_log("Listener stopped.");
     return 0;
 }
@@ -2138,43 +2087,68 @@ static volatile BOOL g_ssh_waiting = FALSE;
 #define SSH_RELAY_BUF 8192
 
 typedef struct SshRelayCtx {
-    SOCKET hv_sock;
-    SOCKET tcp_sock;
+    AsbConn *hv;        /* transport connection to the host (AF_HYPERV on PC, ivshmem on Mac) */
+    SOCKET   tcp_sock;  /* localhost:22 (sshd) */
 } SshRelayCtx;
 
 static DWORD WINAPI ssh_relay_thread(LPVOID param)
 {
     SshRelayCtx *ctx = (SshRelayCtx *)param;
     char buf[SSH_RELAY_BUF];
-    fd_set rfds;
-    struct timeval tv;
     int n;
+    SOCKET hv = (SOCKET)asb_conn_socket_u64(ctx->hv);
 
-    for (;;) {
-        FD_ZERO(&rfds);
-        FD_SET(ctx->hv_sock, &rfds);
-        FD_SET(ctx->tcp_sock, &rfds);
-        tv.tv_sec  = 5;
-        tv.tv_usec = 0;
+    if (hv != INVALID_SOCKET) {
+        /* PC (AF_HYPERV): the dual-fd select() relay, identical to the socket implementation. */
+        fd_set rfds;
+        struct timeval tv;
+        for (;;) {
+            FD_ZERO(&rfds);
+            FD_SET(hv, &rfds);
+            FD_SET(ctx->tcp_sock, &rfds);
+            tv.tv_sec  = 5;
+            tv.tv_usec = 0;
 
-        n = select(0, &rfds, NULL, NULL, &tv);
-        if (n < 0) break;
-        if (n == 0) continue;
+            n = select(0, &rfds, NULL, NULL, &tv);
+            if (n < 0) break;
+            if (n == 0) continue;
 
-        if (FD_ISSET(ctx->hv_sock, &rfds)) {
-            n = recv(ctx->hv_sock, buf, SSH_RELAY_BUF, 0);
-            if (n <= 0) break;
-            if (send(ctx->tcp_sock, buf, n, 0) != n) break;
+            if (FD_ISSET(hv, &rfds)) {
+                n = recv(hv, buf, SSH_RELAY_BUF, 0);
+                if (n <= 0) break;
+                if (send(ctx->tcp_sock, buf, n, 0) != n) break;
+            }
+            if (FD_ISSET(ctx->tcp_sock, &rfds)) {
+                n = recv(ctx->tcp_sock, buf, SSH_RELAY_BUF, 0);
+                if (n <= 0) break;
+                if (send(hv, buf, n, 0) != n) break;
+            }
         }
-
-        if (FD_ISSET(ctx->tcp_sock, &rfds)) {
-            n = recv(ctx->tcp_sock, buf, SSH_RELAY_BUF, 0);
-            if (n <= 0) break;
-            if (send(ctx->hv_sock, buf, n, 0) != n) break;
+    } else {
+        /* ivshmem: the connection has no fd to select() on, so relay each direction separately —
+           poll the transport with a short timeout, non-blocking-check the TCP side. */
+        fd_set rfds;
+        struct timeval tv;
+        for (;;) {
+            int pr = asb_poll(ctx->hv, 5);
+            if (pr < 0) break;
+            if (pr > 0) {
+                n = asb_recv(ctx->hv, buf, SSH_RELAY_BUF);
+                if (n <= 0) break;
+                { int off = 0; while (off < n) { int s = send(ctx->tcp_sock, buf + off, n - off, 0);
+                    if (s <= 0) goto relay_done; off += s; } }
+            }
+            FD_ZERO(&rfds); FD_SET(ctx->tcp_sock, &rfds);
+            tv.tv_sec = 0; tv.tv_usec = 0;
+            if (select(0, &rfds, NULL, NULL, &tv) > 0) {
+                n = recv(ctx->tcp_sock, buf, SSH_RELAY_BUF, 0);
+                if (n <= 0) break;
+                if (asb_send(ctx->hv, buf, n) != n) break;
+            }
         }
     }
-
-    closesocket(ctx->hv_sock);
+relay_done:
+    asb_close(ctx->hv);
     closesocket(ctx->tcp_sock);
     free(ctx);
     return 0;
@@ -2233,58 +2207,26 @@ static BOOL ensure_sshd_running(void)
 /* HV proxy listener — runs after sshd is confirmed running */
 static DWORD WINAPI ssh_proxy_thread(LPVOID param)
 {
-    SOCKET listen_s, client_s, tcp_s;
-    SOCKADDR_HV addr;
+    AsbListener *l;
     struct sockaddr_in tcp_addr;
-    fd_set fds;
-    struct timeval tv;
-
     (void)param;
 
-    listen_s = socket(AF_HYPERV, SOCK_STREAM, 1 /* HV_PROTOCOL_RAW */);
-    if (listen_s == INVALID_SOCKET) {
-        agent_log("SSH proxy: socket() failed: %d", WSAGetLastError());
+    l = asb_listen(ASB_CH_SSH);
+    if (!l) {
+        agent_log("SSH proxy: asb_listen(ASB_CH_SSH) failed.");
         return 1;
     }
-
-    memset(&addr, 0, sizeof(addr));
-    addr.Family = AF_HYPERV;
-    addr.VmId = HV_GUID_WILDCARD;
-    addr.ServiceId = SSH_SERVICE_GUID;
-
-    if (bind(listen_s, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        agent_log("SSH proxy: bind() failed: %d", WSAGetLastError());
-        closesocket(listen_s);
-        return 1;
-    }
-
-    if (listen(listen_s, 4) != 0) {
-        agent_log("SSH proxy: listen() failed: %d", WSAGetLastError());
-        closesocket(listen_s);
-        return 1;
-    }
-
-    agent_log("SSH proxy: listening on AF_HYPERV :0007");
+    agent_log("SSH proxy: listening on ssh channel (transport=%s)",
+              asb_transport_is_ivshmem() ? "ivshmem" : "hyperv");
 
     while (g_ssh_proxy_running) {
-        FD_ZERO(&fds);
-        FD_SET(listen_s, &fds);
-        tv.tv_sec  = 1;
-        tv.tv_usec = 0;
-
-        if (select(0, &fds, NULL, NULL, &tv) <= 0)
-            continue;
-
-        client_s = accept(listen_s, NULL, NULL);
-        if (client_s == INVALID_SOCKET)
-            continue;
+        AsbConn *client = asb_accept(l, 1000);   /* 1s so we re-check g_ssh_proxy_running */
+        SOCKET tcp_s;
+        if (!client) continue;
 
         /* Connect to local sshd */
         tcp_s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (tcp_s == INVALID_SOCKET) {
-            closesocket(client_s);
-            continue;
-        }
+        if (tcp_s == INVALID_SOCKET) { asb_close(client); continue; }
 
         memset(&tcp_addr, 0, sizeof(tcp_addr));
         tcp_addr.sin_family = AF_INET;
@@ -2294,7 +2236,7 @@ static DWORD WINAPI ssh_proxy_thread(LPVOID param)
         if (connect(tcp_s, (struct sockaddr *)&tcp_addr, sizeof(tcp_addr)) != 0) {
             agent_log("SSH proxy: connect to localhost:22 failed: %d", WSAGetLastError());
             closesocket(tcp_s);
-            closesocket(client_s);
+            asb_close(client);
             continue;
         }
 
@@ -2303,19 +2245,19 @@ static DWORD WINAPI ssh_proxy_thread(LPVOID param)
             SshRelayCtx *ctx = (SshRelayCtx *)malloc(sizeof(SshRelayCtx));
             if (ctx) {
                 HANDLE t;
-                ctx->hv_sock  = client_s;
+                ctx->hv       = client;
                 ctx->tcp_sock = tcp_s;
                 t = CreateThread(NULL, 0, ssh_relay_thread, ctx, 0, NULL);
                 if (t) CloseHandle(t);  /* detached — relay cleans up itself */
-                else { free(ctx); closesocket(client_s); closesocket(tcp_s); }
+                else { free(ctx); asb_close(client); closesocket(tcp_s); }
             } else {
-                closesocket(client_s);
+                asb_close(client);
                 closesocket(tcp_s);
             }
         }
     }
 
-    closesocket(listen_s);
+    asb_close_listener(l);
     agent_log("SSH proxy: stopped.");
     return 0;
 }
@@ -2361,7 +2303,7 @@ static DWORD WINAPI ssh_wait_thread(LPVOID param)
             agent_log("SSH: sshd is running (after %d seconds).", attempts);
             start_ssh_proxy();
             EnterCriticalSection(&g_send_cs);
-            if (g_client_sock != INVALID_SOCKET)
+            if (g_client_sock != NULL)
                 send_line(g_client_sock, "ssh_ready");
             LeaveCriticalSection(&g_send_cs);
             g_ssh_waiting = FALSE;
@@ -2371,7 +2313,7 @@ static DWORD WINAPI ssh_wait_thread(LPVOID param)
 
     agent_log("SSH: sshd did not start within timeout.");
     EnterCriticalSection(&g_send_cs);
-    if (g_client_sock != INVALID_SOCKET)
+    if (g_client_sock != NULL)
         send_line(g_client_sock, "ssh_failed");
     LeaveCriticalSection(&g_send_cs);
     g_ssh_waiting = FALSE;
@@ -2380,7 +2322,7 @@ static DWORD WINAPI ssh_wait_thread(LPVOID param)
 
 /* Handle "ssh_enable" command from host.
    sshd is installed by SetupComplete.cmd (MSI). Agent just detects + proxies. */
-static void handle_ssh_enable(SOCKET client, const char *tag)
+static void handle_ssh_enable(AsbConn *client, const char *tag)
 {
     /* Already running? */
     if (is_sshd_running()) {
@@ -2434,7 +2376,7 @@ static DWORD WINAPI service_ctrl_ex(DWORD ctrl, DWORD event_type, LPVOID event_d
             g_os_shutting_down = TRUE;
 
         /* Notify host */
-        if (g_client_sock != INVALID_SOCKET) {
+        if (g_client_sock != NULL) {
             if (ctrl == SERVICE_CONTROL_SHUTDOWN)
                 send_line(g_client_sock, "os_shutdown");
             else
@@ -2460,7 +2402,7 @@ static DWORD WINAPI service_ctrl_ex(DWORD ctrl, DWORD event_type, LPVOID event_d
                and prevents IddCx from completing the handoff. */
 
             /* Disable Hyper-V Video after logoff (may have been re-enabled) */
-            ensure_hyperv_video_disabled(INVALID_SOCKET);
+            ensure_hyperv_video_disabled(NULL);
         }
         if (event_type == WTS_SESSION_LOGON || event_type == WTS_SESSION_UNLOCK) {
             DWORD sid = sn ? sn->dwSessionId : WTSGetActiveConsoleSessionId();
@@ -2524,7 +2466,7 @@ static void WINAPI service_main(DWORD argc, LPSTR *argv)
     ensure_vdd_running();
 
     /* Ensure Hyper-V Video adapter is disabled (VDD replaces it) */
-    ensure_hyperv_video_disabled(INVALID_SOCKET);
+    ensure_hyperv_video_disabled(NULL);
 
     /* Wait until stop is signaled */
     WaitForSingleObject(g_stop_event, INFINITE);
@@ -2546,8 +2488,8 @@ static void WINAPI service_main(DWORD argc, LPSTR *argv)
     agent_log("Stopping input monitor...");
     stop_input_monitor();
     agent_log("Input monitor stopped.");
-    if (g_listen_sock != INVALID_SOCKET)
-        closesocket(g_listen_sock);
+    /* The control listener is owned by listener_thread (asb_close_listener); its accept loop
+       polls g_stop_event every 1s and exits on its own. Nothing socket-level to close here. */
     if (thread) {
         agent_log("Waiting for listener thread...");
         WaitForSingleObject(thread, 5000);

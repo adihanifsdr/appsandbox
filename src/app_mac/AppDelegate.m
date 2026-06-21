@@ -82,7 +82,11 @@
     for (int i = 0; i < count; i++) {
         AsbVmMac *vm = asb_mac_vm_get(i);
         if (!vm) continue;
-        if (!vm->install_complete && vm->install_progress >= 0) {
+        /* Warn only while the host disk-build is in flight (iso-patch owns the disk;
+           quitting orphans the child + a half-built disk). Once disk_built, a Windows
+           VM may still be "installing" its first boot, but quitting just stops QEMU
+           normally — no warning needed. Matches vm_installing in headless.m. */
+        if (!vm->disk_built && vm->install_progress >= 0) {
             [inProgress addObject:[NSString stringWithUTF8String:vm->name]];
         }
     }
@@ -110,6 +114,17 @@
         asb_mac_vm_delete(name.UTF8String);
     }
     return NSTerminateNow;
+}
+
+/* Fires after applicationShouldTerminate: returns NSTerminateNow, on the main
+ * thread, just before exit. A running VZ guest dies on its own when its
+ * in-process VZVirtualMachine is released at process teardown, but a Windows
+ * guest's QEMU is an external child that would otherwise orphan (and keep the
+ * instance lock). asb_mac_cleanup stops QEMU + the channel helpers so every VM
+ * dies with the app, matching the macOS-guest behavior. */
+- (void)applicationWillTerminate:(NSNotification *)notification {
+    (void)notification;
+    asb_mac_cleanup();
 }
 
 @end

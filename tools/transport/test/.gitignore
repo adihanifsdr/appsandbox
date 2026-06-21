@@ -1,0 +1,4 @@
+# build artifacts
+asb_viewer
+*.o
+*.dSYM/

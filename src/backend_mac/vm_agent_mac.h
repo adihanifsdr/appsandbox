@@ -13,9 +13,11 @@
 #import <Foundation/Foundation.h>
 #import <Virtualization/Virtualization.h>
 
+@class AsbIvshmemTransport;
+
 NS_ASSUME_NONNULL_BEGIN
 
-#define VM_AGENT_MAC_PORT 1
+#define VM_AGENT_MAC_PORT 1     /* == ASB_CH_AGENT for the ivshmem path */
 
 typedef void (^VmAgentOnlineChange)(BOOL online);
 typedef void (^VmAgentLog)(NSString *line);
@@ -23,6 +25,9 @@ typedef void (^VmAgentLog)(NSString *line);
 typedef void (^VmAgentSshStateChange)(int state);
 /* Fires on main queue with the guest's ssh_key_deployed / ssh_key_failed reply. */
 typedef void (^VmAgentKeyDeployed)(BOOL ok);
+/* Fires on main queue from the guest's idd_status: line (VDD driver state). Windows guest only;
+ * gates display_ready (= running && agentOnline && iddReady), mirroring Windows asb_vm_idd_ready. */
+typedef void (^VmAgentIddStatus)(BOOL ready);
 
 @interface VmAgentMac : NSObject
 
@@ -54,8 +59,17 @@ typedef void (^VmAgentKeyDeployed)(BOOL ok);
 @property (nonatomic, copy, nullable)     NSString *deployKeyLine;
 @property (nonatomic, copy, nullable)     VmAgentKeyDeployed onKeyDeployed;
 
+/* Fires on main queue from the guest's idd_status: line (Windows guest / ivshmem path). */
+@property (nonatomic, copy, nullable)     VmAgentIddStatus onIddStatusChange;
+
+/* VZ path (macOS guest): reach the agent over a VZVirtioSocketDevice. */
 - (instancetype)initWithName:(NSString *)vmName
                 socketDevice:(VZVirtioSocketDevice *)device;
+
+/* ivshmem path (Windows guest): reach the agent over the shared-memory transport (ch1). The two
+ * inits are mutually exclusive; the connection loop and protocol above the fd are identical. */
+- (instancetype)initWithName:(NSString *)vmName
+             ivshmemTransport:(AsbIvshmemTransport *)transport;
 
 /* Start the persistent connection thread. Safe to call once. */
 - (void)start;

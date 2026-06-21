@@ -18,6 +18,9 @@
 #import "vm_clipboard_mac.h"
 #import "iso_patch_mac.h"
 #import "host_info.h"
+#import "qemu_vm.h"                 /* Windows guest: launch via QEMU+HVF instead of VZ */
+#import "asb_ivshmem_transport.h"  /* Windows guest: channel helpers ride ivshmem, not vsock */
+#import "idd_display.h"            /* Windows guest: host display window over ivshmem ch2+ch3 */
 
 #include "asb_types.h"
 
@@ -42,6 +45,15 @@ static id g_display_refs[ASB_MAX_VMS];
 static id g_agent_refs[ASB_MAX_VMS];
 static id g_ssh_proxy_refs[ASB_MAX_VMS];
 static id g_clipboard_refs[ASB_MAX_VMS];
+/* Windows-guest backend: QemuVm (the VzVm peer) + its ivshmem transport, per VM. */
+static id g_qemu_refs[ASB_MAX_VMS];
+static id g_transport_refs[ASB_MAX_VMS];
+
+/* A Windows guest is launched via QEMU+ivshmem; macOS (and future Linux) use VZ. */
+static BOOL vm_is_windows_idx(int idx) {
+    return idx >= 0 && idx < g_vm_count &&
+           strcasecmp(g_vms[idx].os_type, "Windows") == 0;
+}
 
 /* ---- Helpers ---- */
 
@@ -181,6 +193,8 @@ static void save_vm_list(void) {
         fprintf(f, "CpuCores=%d\n", g_vms[i].cpu_cores);
         fprintf(f, "GpuMode=%d\n", g_vms[i].gpu_mode);
         fprintf(f, "NetworkMode=%d\n", g_vms[i].network_mode);
+        if (g_vms[i].test_mode)
+            fprintf(f, "TestMode=1\n");
         if (g_vms[i].admin_user[0])
             fprintf(f, "AdminUser=%s\n", g_vms[i].admin_user);
         /* admin_pass intentionally NOT persisted — matches Windows. */
@@ -194,6 +208,8 @@ static void save_vm_list(void) {
             fprintf(f, "SshPubKey=%s\n", g_vms[i].ssh_pubkey);
         if (g_vms[i].install_complete)
             fprintf(f, "InstallComplete=1\n");
+        if (g_vms[i].disk_built)
+            fprintf(f, "DiskBuilt=1\n");
         fprintf(f, "\n");
     }
 
@@ -253,6 +269,8 @@ static void load_vm_list(void) {
             vm->gpu_mode = atoi(line + 8);
         else if (strncmp(line, "NetworkMode=", 12) == 0)
             vm->network_mode = atoi(line + 12);
+        else if (strncmp(line, "TestMode=", 9) == 0)
+            vm->test_mode = (atoi(line + 9) != 0);
         else if (strncmp(line, "AdminUser=", 10) == 0)
             strlcpy(vm->admin_user, line + 10, sizeof(vm->admin_user));
         else if (strncmp(line, "SshEnabled=", 11) == 0)
@@ -263,8 +281,16 @@ static void load_vm_list(void) {
             vm->ssh_deploy_key = (atoi(line + 13) != 0);
         else if (strncmp(line, "SshPubKey=", 10) == 0)
             strlcpy(vm->ssh_pubkey, line + 10, sizeof(vm->ssh_pubkey));
-        else if (strncmp(line, "InstallComplete=", 16) == 0)
+        else if (strncmp(line, "InstallComplete=", 16) == 0) {
             vm->install_complete = (atoi(line + 16) != 0);
+            /* Migration: configs written before disk_built existed only stored
+               InstallComplete (which then meant "disk built"). A provisioned VM is
+               necessarily built, so seed disk_built too — otherwise an existing VM
+               would fail the start gate. An explicit DiskBuilt line reaffirms it. */
+            if (vm->install_complete) vm->disk_built = YES;
+        }
+        else if (strncmp(line, "DiskBuilt=", 10) == 0)
+            vm->disk_built = (atoi(line + 10) != 0);
     }
 
     fclose(f);
@@ -279,6 +305,8 @@ void asb_mac_init(void) {
     memset(g_agent_refs, 0, sizeof(g_agent_refs));
     memset(g_ssh_proxy_refs, 0, sizeof(g_ssh_proxy_refs));
     memset(g_clipboard_refs, 0, sizeof(g_clipboard_refs));
+    memset(g_qemu_refs, 0, sizeof(g_qemu_refs));
+    memset(g_transport_refs, 0, sizeof(g_transport_refs));
     g_vm_count = 0;
     load_vm_list();
 }
@@ -291,6 +319,15 @@ void asb_mac_cleanup(void) {
         g_ssh_proxy_refs[i] = nil;
         if (g_agent_refs[i]) [(VmAgentMac *)g_agent_refs[i] stop];
         g_agent_refs[i] = nil;
+        /* Windows guest: QEMU is an external child process, so (unlike a VZ
+         * guest, whose in-process VZVirtualMachine dies when its ref is
+         * released below) it must be told to exit or it orphans and keeps the
+         * instance lock. [stop] sends HMP `quit` over the loopback monitor
+         * (works whether QEMU runs as us or elevated), terminating it. */
+        if (g_qemu_refs[i]) [(QemuVm *)g_qemu_refs[i] stop];
+        g_qemu_refs[i] = nil;
+        if (g_transport_refs[i]) [(AsbIvshmemTransport *)g_transport_refs[i] close];
+        g_transport_refs[i] = nil;
         g_vz_refs[i] = nil;
         g_display_refs[i] = nil;
     }
@@ -340,6 +377,46 @@ static NSString *agent_resource_directory(void) {
     return nil;
 }
 
+/* Locate the Windows guest payload directory (agent EXEs + drivers/ subdir).
+ * Bundle first (<App>/Contents/Resources/agent_win), then dev fallback
+ * (walk up to tools/agent_win). Mirrors agent_resource_directory. */
+static NSString *windows_payload_directory(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *bundle = [[NSBundle mainBundle].resourcePath
+                          stringByAppendingPathComponent:@"agent_win"];
+    if (bundle &&
+        [fm fileExistsAtPath:[bundle stringByAppendingPathComponent:@"appsandbox-agent.exe"]])
+        return bundle;
+    NSString *cur = [NSBundle mainBundle].bundlePath;
+    for (int i = 0; i < 6 && cur.length > 1; i++) {
+        NSString *cand = [cur stringByAppendingPathComponent:@"tools/agent_win"];
+        if ([fm fileExistsAtPath:[cand stringByAppendingPathComponent:@"appsandbox-agent.exe"]])
+            return cand;
+        cur = [cur stringByDeletingLastPathComponent];
+    }
+    return nil;
+}
+
+/* Locate the ARM64 devcon.exe (installs the root-enumerated VDD/VAD devnodes).
+ * Bundle (Resources/agent_win/drivers/devcon.exe) first, then dev fallback
+ * (vendor/devcon/arm64/devcon.exe). Returns nil if unavailable (build proceeds;
+ * SetupComplete.cmd's devcon steps are guarded by `if exist`). */
+static NSString *devcon_exe_path(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *payload = windows_payload_directory();
+    if (payload) {
+        NSString *p = [payload stringByAppendingPathComponent:@"drivers/devcon.exe"];
+        if ([fm fileExistsAtPath:p]) return p;
+    }
+    NSString *cur = [NSBundle mainBundle].bundlePath;
+    for (int i = 0; i < 6 && cur.length > 1; i++) {
+        NSString *cand = [cur stringByAppendingPathComponent:@"vendor/devcon/arm64/devcon.exe"];
+        if ([fm fileExistsAtPath:cand]) return cand;
+        cur = [cur stringByDeletingLastPathComponent];
+    }
+    return nil;
+}
+
 /* ---- Agent lifecycle ---- */
 
 static void stop_ssh_proxy_for(int idx) {
@@ -366,6 +443,7 @@ static void start_clipboard_for(int idx) {
        and serves the host pasteboard -- a daemon must not touch it. */
     if (g_headless) return;
     if (g_clipboard_refs[idx]) return;
+    if (vm_is_windows_idx(idx)) return;   /* Windows clipboard over ivshmem: wired in P3 */
     VzVm *vzvm = g_vz_refs[idx];
     if (!vzvm || !vzvm.machine) return;
     VZVirtioSocketDevice *vsock = nil;
@@ -403,19 +481,26 @@ static void start_ssh_proxy_for(int idx) {
     if (!g_vms[idx].ssh_enabled) return;
     if (g_ssh_proxy_refs[idx]) return;
 
-    VzVm *vzvm = g_vz_refs[idx];
-    if (!vzvm || !vzvm.machine) return;
-
-    VZVirtioSocketDevice *vsock = nil;
-    for (id d in vzvm.machine.socketDevices) {
-        if ([d isKindOfClass:[VZVirtioSocketDevice class]]) { vsock = d; break; }
-    }
-    if (!vsock) return;
-
     NSString *nsName = [NSString stringWithUTF8String:g_vms[idx].name];
-    VmSshProxyMac *proxy = [[VmSshProxyMac alloc] initWithName:nsName
-                                                   socketDevice:vsock
-                                                    initialPort:g_vms[idx].ssh_port];
+    VmSshProxyMac *proxy;
+    if (vm_is_windows_idx(idx)) {
+        AsbIvshmemTransport *t = g_transport_refs[idx];
+        if (!t) return;
+        proxy = [[VmSshProxyMac alloc] initWithName:nsName
+                                   ivshmemTransport:t
+                                        initialPort:g_vms[idx].ssh_port];
+    } else {
+        VzVm *vzvm = g_vz_refs[idx];
+        if (!vzvm || !vzvm.machine) return;
+        VZVirtioSocketDevice *vsock = nil;
+        for (id d in vzvm.machine.socketDevices) {
+            if ([d isKindOfClass:[VZVirtioSocketDevice class]]) { vsock = d; break; }
+        }
+        if (!vsock) return;
+        proxy = [[VmSshProxyMac alloc] initWithName:nsName
+                                       socketDevice:vsock
+                                        initialPort:g_vms[idx].ssh_port];
+    }
     proxy.onPortAssigned = ^(int port) {
         int i = vm_index_of(nsName.UTF8String);
         if (i < 0) return;
@@ -435,24 +520,53 @@ static void start_ssh_proxy_for(int idx) {
     [proxy start];
 }
 
+/* Open the Windows guest's IDD display window. Trigger is agent-online (VDD/IDD up), not QEMU-running.
+ * Main-queue only (NSWindow). No-op: headless, non-Windows, already open, or no transport yet. */
+static void open_idd_display_for(int idx) {
+    if (idx < 0 || idx >= g_vm_count) return;
+    if (g_headless) return;
+    if (!vm_is_windows_idx(idx)) return;
+    if (g_display_refs[idx]) return;
+    AsbIvshmemTransport *t = g_transport_refs[idx];
+    if (!t) return;
+    NSString *nsName = [NSString stringWithUTF8String:g_vms[idx].name];
+    IddDisplayWindow *display = [[IddDisplayWindow alloc] initWithName:nsName transport:t];
+    g_display_refs[idx] = display;
+    g_vms[idx].display = (VzDisplayWindow *)display;   /* API-compatible surface (window/userClosed/showDisplay) */
+    [display showDisplay];
+}
+
 static void start_agent_for(int idx) {
     if (idx < 0 || idx >= g_vm_count) return;
     if (g_agent_refs[idx]) return;
-    VzVm *vzvm = g_vz_refs[idx];
-    if (!vzvm || !vzvm.machine) return;
-    NSArray *devs = vzvm.machine.socketDevices;
-    VZVirtioSocketDevice *vsock = nil;
-    for (id d in devs) {
-        if ([d isKindOfClass:[VZVirtioSocketDevice class]]) { vsock = d; break; }
-    }
-    if (!vsock) {
-        post_log("[%s] No VZVirtioSocketDevice on VM; agent not started", g_vms[idx].name);
-        return;
-    }
 
     NSString *nsName = [NSString stringWithUTF8String:g_vms[idx].name];
-    VmAgentMac *agent = [[VmAgentMac alloc] initWithName:nsName
-                                            socketDevice:vsock];
+    VmAgentMac *agent;
+    if (vm_is_windows_idx(idx)) {
+        /* Windows guest: reach the agent over ivshmem ch1 (no vsock). */
+        AsbIvshmemTransport *t = g_transport_refs[idx];
+        if (!t) { post_log("[%s] No ivshmem transport; agent not started", g_vms[idx].name); return; }
+        agent = [[VmAgentMac alloc] initWithName:nsName ivshmemTransport:t];
+        agent.onIddStatusChange = ^(BOOL ready) {
+            int i = vm_index_of(nsName.UTF8String);
+            if (i < 0) return;
+            g_vms[i].idd_ready = ready;   /* gates display_ready for the Windows guest */
+            post_diag("[%s] IDD driver %s", g_vms[i].name, ready ? "ready" : "not ready");
+            post_list_changed();
+        };
+    } else {
+        VzVm *vzvm = g_vz_refs[idx];
+        if (!vzvm || !vzvm.machine) return;
+        VZVirtioSocketDevice *vsock = nil;
+        for (id d in vzvm.machine.socketDevices) {
+            if ([d isKindOfClass:[VZVirtioSocketDevice class]]) { vsock = d; break; }
+        }
+        if (!vsock) {
+            post_log("[%s] No VZVirtioSocketDevice on VM; agent not started", g_vms[idx].name);
+            return;
+        }
+        agent = [[VmAgentMac alloc] initWithName:nsName socketDevice:vsock];
+    }
     agent.sshEnabled = g_vms[idx].ssh_enabled;
     agent.onOnlineChange = ^(BOOL online) {
         int i = vm_index_of(nsName.UTF8String);
@@ -473,6 +587,16 @@ static void start_agent_for(int idx) {
         /* Clipboard is always-on — start when the agent comes up. */
         if (online) start_clipboard_for(i);
         else        stop_clipboard_for(i);
+
+        /* Windows guest: open the IDD display window now (and only now) that the agent reports online —
+         * its VDD/IDD driver is up, so ch2 has frames to show. Not opened at QEMU-Running (would be a
+         * dark window). Main-queue only; no-op if headless / already open. */
+        if (online && vm_is_windows_idx(i)) {
+            run_on_main(^{
+                int j = vm_index_of(nsName.UTF8String);
+                if (j >= 0) open_idd_display_for(j);
+            });
+        }
 
         /* Catch-up: the display window may have been opened before the
          * agent was reachable. showDisplay fires once at window-open and
@@ -598,6 +722,52 @@ static void handle_vm_state_change(int idx, VZVirtualMachineState state) {
     }
 }
 
+/* ---- QEMU (Windows guest) state change ---- *
+ * The QemuVm peer of handle_vm_state_change: on Running we capture the ivshmem transport and bring
+ * the agent up (which, on ssh_ready, starts the ssh proxy + deploys the key — same callbacks as VZ);
+ * on Stopped we tear the helpers down and drop the transport. On Running we also open the host display
+ * window (IddDisplayWindow over ch2 frames + ch3 input); on Stopped we close it before the transport. */
+static void handle_qemu_state_change(int idx, QemuVmState st) {
+    if (idx < 0 || idx >= g_vm_count) return;
+    if (st == QemuVmStateStopping) {
+        g_vms[idx].shutting_down = YES;
+        post_list_changed();
+    } else if (st == QemuVmStateStopped) {
+        g_vms[idx].shutting_down = NO;
+        g_vms[idx].running = NO;
+        g_vms[idx].idd_ready = NO;
+        g_vms[idx].ssh_key_deployed = NO;   /* re-deployed each boot (matches VZ + Windows) */
+        stop_agent_for(idx);                 /* also stops the ssh proxy + clipboard */
+
+        /* Tear the display window down (mirrors the VZ Stopped path). g_display_refs holds a
+           IddDisplayWindow* here; closing it fires windowWillClose: which joins its ch2/ch3
+           reader threads BEFORE the transport below is dropped (it reads them via the fds). */
+        if (g_display_refs[idx]) {
+            IddDisplayWindow *display = g_display_refs[idx];
+            [display.window close];
+            g_display_refs[idx] = nil;
+            g_vms[idx].display = nil;
+        }
+
+        g_transport_refs[idx] = nil;
+        g_qemu_refs[idx] = nil;
+        post_event(CORE_VM_EVENT_STATE_CHANGED, g_vms[idx].name, 0, NULL);
+        post_list_changed();
+    } else if (st == QemuVmStateRunning) {
+        g_vms[idx].shutting_down = NO;
+        g_vms[idx].running = YES;
+        QemuVm *q = g_qemu_refs[idx];
+        g_transport_refs[idx] = q.transport;   /* the ivshmem transport the channel helpers ride */
+
+        /* NOTE: the IDD display window is NOT opened here. It opens only once the guest agent reports
+           online (open_idd_display_for, fired from start_agent_for's onOnlineChange) — the VDD's IDD
+           driver isn't up at QEMU-Running, so opening now would just show a dark window. */
+        start_agent_for(idx);
+        post_event(CORE_VM_EVENT_STATE_CHANGED, g_vms[idx].name, 1, NULL);
+        post_list_changed();
+    }
+}
+
 /* ---- Install flow ---- */
 
 static void update_install_progress(int idx, double frac, NSString *stage) {
@@ -673,9 +843,9 @@ static void finish_install(int idx, NSError *error) {
     }
 
     /* macOS install succeeded, but we haven't staged the agent yet.
-     * Leave install_complete = NO so the UI's Start guard blocks the user
-     * from trying to start while hdiutil has the disk attached for stage.
-     * install_complete flips to YES in the stage completion below. */
+     * Leave disk_built = NO so the Start guard blocks the user from trying to
+     * start while hdiutil has the disk attached for stage. disk_built (and, for
+     * macOS, install_complete) flip to YES in the stage completion below. */
     strlcpy(g_vms[idx].install_status, "Staging guest agent",
             sizeof(g_vms[idx].install_status));
     post_log("[%s] macOS install complete; staging guest agent...", g_vms[idx].name);
@@ -689,6 +859,9 @@ static void finish_install(int idx, NSError *error) {
         post_log("[%s] Agent resources not found; skipping agent stage", g_vms[idx].name);
         /* Wipe the plaintext admin password from memory before returning. */
         memset(g_vms[idx].admin_pass, 0, sizeof(g_vms[idx].admin_pass));
+        /* macOS has no separate first-boot install phase — once the disk is built
+           it boots straight to ready, so mark both flags now. */
+        g_vms[idx].disk_built = YES;
         g_vms[idx].install_complete = YES;
         save_vm_list();
         post_event(CORE_VM_EVENT_INSTALL_STATUS, g_vms[idx].name, 100, "Install complete");
@@ -731,8 +904,10 @@ static void finish_install(int idx, NSError *error) {
         /* Zero out the in-memory password buffer now that stage is done
          * (matches Windows' SecureZeroMemory behavior). */
         memset(g_vms[i].admin_pass, 0, sizeof(g_vms[i].admin_pass));
-        /* Flip install_complete regardless of stage outcome — the VM is
-         * usable either way; a stage failure just means no agent. */
+        /* Disk is built + staged → bootable. macOS has no separate first-boot
+         * install phase, so mark install_complete now too (a stage failure just
+         * means no agent; the VM is still usable). */
+        g_vms[i].disk_built = YES;
         g_vms[i].install_complete = YES;
         strlcpy(g_vms[i].install_status, "Install complete",
                 sizeof(g_vms[i].install_status));
@@ -743,6 +918,108 @@ static void finish_install(int idx, NSError *error) {
     }];
 
     post_list_changed();
+}
+
+/* ---- Windows from-scratch create (mount ISO -> our NTFS writer -> stage) ----
+ * Mirrors the Windows VHDX-first create path but uses iso-patch-mac build-windows
+ * (no DISM). On success the disk boots via QemuVm (testMode); the FirstLogonCommand
+ * + SetupComplete.cmd we staged bring the agent + drivers online. */
+static void start_windows_build_flow(int idx, NSURL *isoURL) {
+    NSString *nsName = [NSString stringWithUTF8String:g_vms[idx].name];
+    NSURL *vmDir = [VmDir directoryForVm:nsName];
+    NSURL *diskURL = [VmDir diskImageURLFor:nsName];
+    int diskGb = g_vms[idx].hdd_gb;
+
+    NSString *payload = windows_payload_directory();
+    if (!payload) {
+        post_log("[%s] Windows guest payload (agent_win) not found; cannot build disk.",
+                 g_vms[idx].name);
+        post_alert(g_vms[idx].name, "Windows guest payload not found");
+        finish_install(idx, [NSError errorWithDomain:@"AsbCore" code:1
+            userInfo:@{NSLocalizedDescriptionKey:@"agent_win payload not found"}]);
+        return;
+    }
+    NSString *devcon = devcon_exe_path();
+    if (!devcon)
+        post_log("[%s] devcon.exe not found; VDD/VAD install steps will be skipped in guest.",
+                 g_vms[idx].name);
+
+    /* The OpenSSH MSI and the 789 MB NetKVM/virtio-win download are BLOCKING; they MUST NOT run on the
+       main thread or the GUI freezes for the whole first-create download (cache hits are instant).
+       Capture per-VM state here on the main queue (g_vms is main-owned), download on a background
+       queue, then hop back to main to kick off the (already-async) disk build. */
+    BOOL sshEnabled     = g_vms[idx].ssh_enabled;
+    BOOL testMode       = g_vms[idx].test_mode;
+    NSString *adminUser = [NSString stringWithUTF8String:g_vms[idx].admin_user];
+    NSString *adminPass = [NSString stringWithUTF8String:g_vms[idx].admin_pass];
+    (void)vmDir;
+
+    post_log("[%s] Caching guest drivers (OpenSSH + NetKVM)...", g_vms[idx].name);
+    post_event(CORE_VM_EVENT_INSTALL_STATUS, g_vms[idx].name, 0, "Downloading guest drivers");
+    post_list_changed();
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        /* Off-main: blocks until the download finishes (or returns instantly on a cache hit).
+           NetKVM is NOT downloaded — it's vendored in the payload's drivers/ and staged by the builder. */
+        NSString *sshMsi = sshEnabled ? [IsoPatchMac ensureOpenSSHMsiCached] : nil;
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            int i = vm_index_of(nsName.UTF8String);
+            if (i < 0) return;   /* VM deleted while downloading */
+            if (sshEnabled && !sshMsi)
+                post_log("[%s] OpenSSH MSI download failed; VM will build without SSH server.", g_vms[i].name);
+
+            post_log("[%s] Building Windows disk from ISO (%d GB) ...", g_vms[i].name, diskGb);
+            post_event(CORE_VM_EVENT_INSTALL_STATUS, g_vms[i].name, 0, "Building Windows disk");
+            post_list_changed();
+
+            [IsoPatchMac buildWindowsDiskWithISO:isoURL
+                                        outDisk:diskURL
+                                     payloadDir:payload
+                                      devconExe:devcon
+                                     sshMsiPath:sshMsi
+                                         vmName:nsName
+                                      adminUser:adminUser
+                                      adminPass:adminPass
+                                           lang:nil
+                                         diskGb:diskGb
+                                       testMode:testMode
+                                       progress:^(double frac, NSString *step) {
+                int j = vm_index_of(nsName.UTF8String);
+                if (j >= 0) update_install_progress(j, frac, step);
+            }
+                                     completion:^(NSError * _Nullable err) {
+                int j = vm_index_of(nsName.UTF8String);
+                if (j < 0) return;
+                /* Wipe the in-memory admin password now that the answer file is written. */
+                memset(g_vms[j].admin_pass, 0, sizeof(g_vms[j].admin_pass));
+                if (err) {
+                    post_log("[%s] Windows disk build failed: %s",
+                             g_vms[j].name, err.localizedDescription.UTF8String);
+                    post_alert(g_vms[j].name, "Windows disk build failed: %s",
+                               err.localizedDescription.UTF8String);
+                    g_vms[j].install_progress = -1;
+                    g_vms[j].install_status[0] = '\0';
+                    post_list_changed();
+                    return;
+                }
+                post_log("[%s] Windows disk built; booting to finish install in the guest.", g_vms[j].name);
+                /* Disk is built + bootable, but the guest still has to run its first boot
+                   (OOBE + SetupComplete + driver/agent install) — THAT is the "installing"
+                   window. So mark disk_built (gates start) but leave install_complete NO; it
+                   flips when the guest agent first connects (onOnlineChange), exactly like
+                   Windows-on-Windows, which stays "installing" until the agent is up. Progress
+                   goes indeterminate (-1) — the first-boot install has no host-side percentage. */
+                g_vms[j].disk_built = YES;
+                g_vms[j].install_progress = -1;
+                strlcpy(g_vms[j].install_status, "Installing Windows", sizeof(g_vms[j].install_status));
+                save_vm_list();
+                post_event(CORE_VM_EVENT_INSTALL_STATUS, g_vms[j].name, 0, "Installing Windows");
+                post_list_changed();
+                autostart_after_install(nsName, [VmDir diskImageURLFor:nsName]);
+            }];
+        });
+    });
 }
 
 static void start_install_flow(int idx, NSURL *restoreURL) {
@@ -782,7 +1059,8 @@ int asb_mac_vm_create(const char *name, const char *os_type,
                        const char *admin_user,
                        const char *admin_pass,
                        BOOL ssh_enabled,
-                       BOOL ssh_deploy_key) {
+                       BOOL ssh_deploy_key,
+                       BOOL test_mode) {
     if (!name || !os_type) return BACKEND_ERR_INVALID_ARG;
     if (vm_index_of(name) >= 0) {
         post_alert(name, "A VM named '%s' already exists", name);
@@ -795,12 +1073,16 @@ int asb_mac_vm_create(const char *name, const char *os_type,
 
     /* Prompt for admin up front so the user isn't blocked 20 minutes into
      * the install. Token is cached for the process lifetime; subsequent
-     * VM creations reuse it silently. */
-    NSError *authErr = nil;
-    if (![IsoPatchMac preauthorize:&authErr]) {
-        post_alert(name, "Admin authorization required to create VM: %s",
-                   authErr.localizedDescription.UTF8String ?: "user cancelled");
-        return BACKEND_ERR_FAILED;
+     * VM creations reuse it silently. Windows-on-Mac has no privileged step
+     * (build-windows + QEMU/HVF run unprivileged), so skip the prompt. */
+    BOOL isWindows = (os_type && strcasecmp(os_type, "Windows") == 0);
+    if (!isWindows) {
+        NSError *authErr = nil;
+        if (![IsoPatchMac preauthorize:&authErr]) {
+            post_alert(name, "Admin authorization required to create VM: %s",
+                       authErr.localizedDescription.UTF8String ?: "user cancelled");
+            return BACKEND_ERR_FAILED;
+        }
     }
 
     int idx = g_vm_count;
@@ -813,6 +1095,7 @@ int asb_mac_vm_create(const char *name, const char *os_type,
     vm->cpu_cores = cpu_cores > 0 ? cpu_cores : 4;
     vm->gpu_mode = gpu_mode;
     vm->network_mode = network_mode;
+    vm->test_mode = test_mode;   /* honored at start (Windows guest); not forced */
     strlcpy(vm->admin_user,
             (admin_user && admin_user[0]) ? admin_user : "user",
             sizeof(vm->admin_user));
@@ -854,6 +1137,25 @@ int asb_mac_vm_create(const char *name, const char *os_type,
 
     NSString *imagePath = (image_path && image_path[0])
         ? [NSString stringWithUTF8String:image_path] : nil;
+
+    /* ---- Windows guest: from-scratch create from a Microsoft ISO. The user
+       picks a .iso; we apply install.wim with our own NTFS writer + stage the
+       agent/drivers, then boot via QEMU (always testMode). No IPSW, no DISM. ---- */
+    if (vm->os_type[0] && strcasecmp(vm->os_type, "Windows") == 0) {
+        if (imagePath.length == 0) {
+            post_alert(name, "A Windows ISO must be selected to create a Windows VM");
+            g_vm_count--;
+            memset(&g_vms[idx], 0, sizeof(g_vms[idx]));
+            save_vm_list();
+            post_list_changed();
+            return BACKEND_ERR_INVALID_ARG;
+        }
+        run_on_main(^{
+            int i = vm_index_of(nsName.UTF8String);
+            if (i >= 0) start_windows_build_flow(i, [NSURL fileURLWithPath:imagePath]);
+        });
+        return BACKEND_OK;
+    }
 
     if (imagePath.length > 0) {
         if (image_path) strlcpy(g_last_ipsw_path, image_path, sizeof(g_last_ipsw_path));
@@ -904,10 +1206,45 @@ int asb_mac_vm_start(const char *name) {
     if (!name) return BACKEND_ERR_INVALID_ARG;
     int idx = vm_index_of(name);
     if (idx < 0) return BACKEND_ERR_NOT_FOUND;
-    if (!g_vms[idx].install_complete) {
-        post_alert(name, "Cannot start: install has not completed");
+    if (!g_vms[idx].disk_built) {
+        post_alert(name, "Cannot start: disk is not built yet");
         return BACKEND_ERR_FAILED;
     }
+
+    /* ---- Windows guest: launch via QEMU+HVF + ivshmem (not VZ). testMode (Secure Boot off + test
+       signing on) is the create-time choice in g_vms[].test_mode — NOT forced. Our guest drivers are
+       test-signed, so a VM created with testMode off won't load them, but the user owns that call. ---- */
+    if (vm_is_windows_idx(idx)) {
+        if (g_vms[idx].running || g_qemu_refs[idx]) return BACKEND_ERR_ALREADY_RUNNING;
+        NSString *nsName = [NSString stringWithUTF8String:name];
+        NSURL *vmDir = [VmDir directoryForVm:nsName];
+        QemuVm *qvm = [[QemuVm alloc] initWithName:nsName
+                                             vmDir:vmDir
+                                             ramMb:g_vms[idx].ram_mb
+                                          cpuCores:g_vms[idx].cpu_cores
+                                          testMode:g_vms[idx].test_mode];
+        g_qemu_refs[idx] = qvm;
+        qvm.onLog = ^(NSString *l) { post_diag("[%s] qemu: %s", nsName.UTF8String, l.UTF8String); };
+        qvm.onStateChange = ^(QemuVmState st) {
+            run_on_main(^{ int i = vm_index_of(nsName.UTF8String); if (i >= 0) handle_qemu_state_change(i, st); });
+        };
+        post_log("[%s] Launching Windows VM via QEMU...", name);
+        [qvm startWithCompletion:^(NSError * _Nullable startErr) {
+            run_on_main(^{
+                int i = vm_index_of(nsName.UTF8String);
+                if (i < 0) return;
+                if (startErr) {
+                    g_qemu_refs[i] = nil;
+                    post_log("[%s] Start failed: %s", g_vms[i].name, startErr.localizedDescription.UTF8String);
+                    post_alert(g_vms[i].name, "Start failed: %s", startErr.localizedDescription.UTF8String);
+                    post_event(CORE_VM_EVENT_STATE_CHANGED, g_vms[i].name, 0, NULL);
+                    post_list_changed();
+                }
+            });
+        }];
+        return BACKEND_OK;
+    }
+
     /* Idempotent against an in-flight start: a VZ machine exists (vz_handle set)
        from the moment loadVmNamed runs until the Stopped transition, but
        g_vms[].running only flips true on the later Running transition. Guarding
@@ -1018,6 +1355,29 @@ int asb_mac_open_display(const char *name) {
         g_display_refs[idx] = nil;
         g_vms[idx].display  = nil;
     }
+
+    /* Windows guest: the display rides ivshmem ch2 (VDD frames) + ch3 (input), opened/focused as a
+       IddDisplayWindow on the VM's transport. Readiness is running && agent_online && idd_ready —
+       the VDD only emits ch2 frames once its IDD driver is up (idd_ready, set by the agent's
+       onIddStatusChange). The IddDisplayWindow exposes the same window/userClosed/showDisplay
+       surface as VzDisplayWindow, so the reap/focus/store sites below it stay uniform. */
+    if (vm_is_windows_idx(idx)) {
+        if (!g_vms[idx].running)         return BACKEND_ERR_NOT_RUNNING;
+        if (!g_vms[idx].agent_online || !g_vms[idx].idd_ready) return BACKEND_ERR_NOT_READY;
+        AsbIvshmemTransport *t = g_transport_refs[idx];
+        if (!t)                          return BACKEND_ERR_NOT_RUNNING;
+        if (g_display_refs[idx]) {   /* already open -> focus */
+            [[(IddDisplayWindow *)g_display_refs[idx] window] makeKeyAndOrderFront:nil];
+            return BACKEND_OK;
+        }
+        NSString *nsName = [NSString stringWithUTF8String:name];
+        IddDisplayWindow *display = [[IddDisplayWindow alloc] initWithName:nsName transport:t];
+        g_display_refs[idx] = display;
+        g_vms[idx].display  = (VzDisplayWindow *)display;
+        [display showDisplay];
+        return BACKEND_OK;
+    }
+
     if (!g_vms[idx].running || !g_vms[idx].vz_handle) return BACKEND_ERR_NOT_RUNNING;
     if (!g_vms[idx].agent_online)                     return BACKEND_ERR_NOT_READY;
     if (g_display_refs[idx]) {   /* already open -> focus */
@@ -1046,6 +1406,36 @@ int asb_mac_vm_stop(const char *name, int force) {
     if (!name) return BACKEND_ERR_INVALID_ARG;
     int idx = vm_index_of(name);
     if (idx < 0) return BACKEND_ERR_NOT_FOUND;
+
+    /* Windows guest: stop via QemuVm. Graceful = agent `shutdown` (guest InitiateSystemShutdownExW)
+       with an ACPI power-down fallback; force = QMP quit. */
+    if (vm_is_windows_idx(idx)) {
+        QemuVm *qvm = g_qemu_refs[idx];
+        if (!qvm) return BACKEND_ERR_NOT_RUNNING;
+        NSString *wName = [NSString stringWithUTF8String:name];
+        if (force) { [qvm stop]; return BACKEND_OK; }
+        VmAgentMac *wagent = g_agent_refs[idx];
+        if (wagent && g_vms[idx].agent_online) {
+            post_log("[%s] Requesting graceful shutdown via agent...", name);
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                NSString *resp = [wagent sendCommand:@"shutdown" timeout:5.0];
+                run_on_main(^{
+                    int i = vm_index_of(wName.UTF8String);
+                    if (i < 0) return;
+                    QemuVm *q = g_qemu_refs[i];
+                    if ([resp isEqualToString:@"ok"]) {
+                        g_vms[i].shutting_down = YES; post_list_changed();
+                    } else if (q) {
+                        post_log("[%s] Agent shutdown unresponsive; ACPI power-down.", g_vms[i].name);
+                        [q requestStop];
+                    }
+                });
+            });
+        } else {
+            [qvm requestStop];
+        }
+        return BACKEND_OK;
+    }
 
     VzVm *vm = g_vms[idx].vz_handle;
     if (!vm) return BACKEND_ERR_NOT_RUNNING;
@@ -1116,7 +1506,33 @@ int asb_mac_vm_delete(const char *name) {
     NSString *nsName = [NSString stringWithUTF8String:name];
     [IsoPatchMac cancelFetchForVm:nsName];
 
-    if (g_vms[idx].running && g_vms[idx].vz_handle) {
+    /* Stop the backend before removing files. A Windows guest runs on QEMU+ivshmem (vz_handle is
+       NULL), so the old vz_handle-gated block skipped it entirely — leaving QEMU running on a disk
+       we then deleted and an ivshmem transport mmap'd to a backing file we then removed, whose
+       async exit callback later crashed the daemon. Tear the Windows backend down here, synchronously
+       and before VmDir deleteVm, mirroring handle_qemu_state_change's Stopped path. */
+    if (vm_is_windows_idx(idx)) {
+        if (g_qemu_refs[idx] || g_transport_refs[idx]) {
+            post_log("[%s] Stopping Windows VM before delete...", name);
+            QemuVm *qvm = g_qemu_refs[idx];
+            if (qvm) [qvm stop];                 /* force quit (QMP quit / terminate) */
+            stop_agent_for(idx);                 /* stop agent + ssh proxy + clipboard helpers */
+            /* Close the display window first: its ch2/ch3 reader threads hold this transport's fds
+               (and may call connectChannel on it), so they must be joined BEFORE [t close] unmaps. */
+            if (g_display_refs[idx]) {
+                IddDisplayWindow *display = g_display_refs[idx];
+                [display.window close];          /* fires windowWillClose: -> joins reader threads */
+                g_display_refs[idx] = nil;
+                g_vms[idx].display = nil;
+            }
+            AsbIvshmemTransport *t = g_transport_refs[idx];
+            if (t) [t close];                    /* munmap + join pumps BEFORE the backing file is removed */
+            g_transport_refs[idx] = nil;
+            g_qemu_refs[idx] = nil;
+        }
+        g_vms[idx].running = NO;
+        g_vms[idx].shutting_down = NO;
+    } else if (g_vms[idx].running && g_vms[idx].vz_handle) {
         post_log("[%s] Stopping VM before delete...", name);
         [g_vms[idx].vz_handle stopWithCompletion:^(NSError * _Nullable err) { (void)err; }];
         g_vms[idx].running = NO;
@@ -1146,6 +1562,8 @@ int asb_mac_vm_delete(const char *name) {
         g_agent_refs[i] = g_agent_refs[i + 1];
         g_ssh_proxy_refs[i] = g_ssh_proxy_refs[i + 1];
         g_clipboard_refs[i] = g_clipboard_refs[i + 1];
+        g_qemu_refs[i] = g_qemu_refs[i + 1];
+        g_transport_refs[i] = g_transport_refs[i + 1];
     }
     g_vm_count--;
     memset(&g_vms[g_vm_count], 0, sizeof(AsbVmMac));
@@ -1154,6 +1572,8 @@ int asb_mac_vm_delete(const char *name) {
     g_agent_refs[g_vm_count] = nil;
     g_ssh_proxy_refs[g_vm_count] = nil;
     g_clipboard_refs[g_vm_count] = nil;
+    g_qemu_refs[g_vm_count] = nil;
+    g_transport_refs[g_vm_count] = nil;
 
     save_vm_list();
     post_log("[%s] VM deleted", name);

@@ -65,23 +65,22 @@ var hostBridge = (function() {
 
 function sendCmd(action, data) { hostBridge.send(action, data); }
 
-/* Hide Windows-only form fields when running on macOS.
- * On macOS we also hide both image-source rows (.needs-iso for Windows,
- * .needs-linux-version for Linux) — macOS uses .ipsw via its own
- * picker, not a path input here. */
+/* On a macOS host, hide the Windows-*host*-only features (templates, snapshots,
+ * test-mode, build-template — none supported when the host is a Mac) and the
+ * dormant Linux-version row. The OS-type dropdown stays ENABLED so the user can
+ * pick Windows (built from a Microsoft ISO via QEMU) or macOS (VZ restore image).
+ * Per-OS field visibility — including the .needs-iso picker — is driven by
+ * applyOsTypeUI(), which runs on both hosts. */
 if (hostBridge.isMac) {
-    var hide = document.querySelectorAll('.win-only, .needs-iso, .needs-linux-version');
+    var hide = document.querySelectorAll('.win-only, .needs-linux-version');
     for (var i = 0; i < hide.length; i++) hide[i].style.display = 'none';
-    var osSelect = document.getElementById('os-type');
-    osSelect.value = 'macOS';
-    osSelect.disabled = true;
 }
 
 /* OS Type dropdown: drop guest types that aren't available on this host.
  * Windows host: macOS unavailable (Apple Virtualization is Mac-only).
- * macOS host:   Windows and Linux unavailable (HCS-only path). */
+ * macOS host:   Linux unavailable (Windows IS supported — QEMU+ivshmem). */
 {
-    var unavailable = hostBridge.isMac ? ['Windows', 'Linux'] : ['macOS'];
+    var unavailable = hostBridge.isMac ? ['Linux'] : ['macOS'];
     unavailable.forEach(function(v) {
         var opt = document.querySelector('#os-type option[value="' + v + '"]');
         if (opt) opt.remove();
@@ -97,14 +96,20 @@ if (hostBridge.isMac) {
  * Windows. The version-dropdown / cloud-image flow is preserved in
  * asb_core.c under #if 0 in case we need to bring it back. */
 function applyOsTypeUI() {
-    if (hostBridge.isMac) return;
     var osType = document.getElementById('os-type').value;
     var isWindows = osType === 'Windows';
     var isLinux = osType === 'Linux';
     var winOnly = document.querySelectorAll('.win-only');
     var needsIso = document.querySelectorAll('.needs-iso');
+    var needsWindows = document.querySelectorAll('.needs-windows');
     var needsLinuxVersion = document.querySelectorAll('.needs-linux-version');
-    for (var i = 0; i < winOnly.length; i++) winOnly[i].style.display = isWindows ? '' : 'none';
+    /* .win-only = template/snapshot features that exist only on a Windows *host*;
+       never shown on a Mac host, even for a Windows guest. */
+    for (var i = 0; i < winOnly.length; i++)
+        winOnly[i].style.display = (!hostBridge.isMac && isWindows) ? '' : 'none';
+    /* .needs-windows = Windows-*guest* options (Test Mode); shown for a Windows
+       guest on EITHER host (a Windows-on-Mac VM uses it too), hidden otherwise. */
+    for (var w = 0; w < needsWindows.length; w++) needsWindows[w].style.display = isWindows ? '' : 'none';
     /* ISO picker shows for both Windows and Linux now. */
     for (var j = 0; j < needsIso.length; j++) needsIso[j].style.display = (isWindows || isLinux) ? '' : 'none';
     /* Linux distribution dropdown is dormant — kept in the DOM but always
@@ -341,10 +346,14 @@ function onBrowseResult(path) {
 
 function updateCreateButtons() {
     var osType = document.getElementById('os-type').value;
-    /* Same ISO-required check for Windows and Linux now. */
     var hasImage = (document.getElementById('image-path').value.trim() !== '');
     var hasTpl = document.getElementById('template-select').value !== '';
-    document.getElementById('btn-create').disabled = hostBridge.isMac ? false : !(hasImage || hasTpl);
+    /* macOS guests auto-download their restore image (no path needed). Windows
+       and Linux guests build from a user-picked ISO — or, on a Windows host, a
+       saved template. Holds on both hosts: on a Mac the template UI is hidden so
+       hasTpl stays false and a Windows guest genuinely requires the ISO. */
+    var createOk = (osType === 'macOS') ? true : (hasImage || hasTpl);
+    document.getElementById('btn-create').disabled = !createOk;
     /* Templates are Windows-only; disabling create-as-template for Linux
        (and macOS) is fine since hasImage is the only signal we check. */
     document.getElementById('btn-create-template').disabled = (osType !== 'Windows') || !hasImage;
@@ -585,8 +594,9 @@ function openCreateModal() {
     document.getElementById('ssh-enabled').checked = false;
     document.getElementById('ssh-deploy-key').checked = false;
     onSshToggle();   /* re-grey "Deploy SSH key" to match the cleared SSH checkbox */
-    /* Reset OS type to Windows on each open (skip on macOS host — it's locked) */
-    if (!hostBridge.isMac) document.getElementById('os-type').value = 'Windows';
+    /* Reset OS type to Windows on each open. Valid on both hosts (a Mac host
+       supports Windows via QEMU); the user can switch to macOS on a Mac. */
+    document.getElementById('os-type').value = 'Windows';
 
     /* Smart defaults (RAM/cores) from latest host info */
     if (lastHostInfo) applySmartDefaults(lastHostInfo);

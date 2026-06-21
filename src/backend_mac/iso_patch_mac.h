@@ -61,6 +61,30 @@ typedef void (^IsoPatchCompletion)(NSError * _Nullable error);
                        progress:(nullable IsoPatchProgress)progress
                      completion:(IsoPatchCompletion)completion;
 
+/* Build a from-scratch Windows VM disk (unprivileged): mount the ISO, apply
+ * install.wim with our own NTFS writer, and stage the answer file + agent +
+ * test-signed drivers. Mirrors the Windows VHDX-first create path. payloadDir
+ * holds the guest EXEs + a drivers/ subdir; devconExe is the ARM64 devcon that
+ * installs the root-enumerated VDD/VAD devnodes (may be nil). */
++ (void)buildWindowsDiskWithISO:(NSURL *)isoURL
+                        outDisk:(NSURL *)outDiskURL
+                     payloadDir:(NSString *)payloadDir
+                      devconExe:(nullable NSString *)devconExe
+                     sshMsiPath:(nullable NSString *)sshMsiPath
+                         vmName:(NSString *)vmName
+                      adminUser:(NSString *)adminUser
+                      adminPass:(NSString *)adminPass
+                           lang:(nullable NSString *)lang
+                         diskGb:(int)diskGb
+                       testMode:(BOOL)testMode
+                       progress:(nullable IsoPatchProgress)progress
+                     completion:(IsoPatchCompletion)completion;
+
+/* Ensure the OpenSSH ARM64 MSI is cached locally (downloads it on first use, mirroring the Windows
+ * ensure_ssh_msi_cached). Returns the cached path, or nil on failure. Blocking; call off-main.
+ * (NetKVM/virtio-net is NOT downloaded — it is vendored in the payload's drivers/ dir.) */
++ (nullable NSString *)ensureOpenSSHMsiCached;
+
 /* Free cached AuthorizationRef. Call from asb_mac_cleanup. */
 + (void)releaseAuthorization;
 

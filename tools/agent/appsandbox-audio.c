@@ -30,6 +30,7 @@
 #include <wtsapi32.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include "../transport/asb_transport.h"   /* AF_HYPERV on PC, ivshmem on Mac */
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -118,17 +119,9 @@ static void audio_log(const char *fmt, ...)
 
 /* ---- Reliable send ---- */
 
-static BOOL send_all(SOCKET s, const void *buf, int len)
+static BOOL send_all(AsbConn *c, const void *buf, int len)
 {
-    const char *p = (const char *)buf;
-    int remaining = len;
-    while (remaining > 0) {
-        int n = send(s, p, remaining, 0);
-        if (n <= 0) return FALSE;
-        p += n;
-        remaining -= n;
-    }
-    return TRUE;
+    return asb_send(c, buf, len) == len;
 }
 
 /* ---- Find the VAD render endpoint by friendly name ---- */
@@ -292,7 +285,7 @@ static void teardown_capture(IAudioClient *pClient,
 
 /* ---- Stream loop: drain packets, send over socket ---- */
 
-static BOOL stream_loop(SOCKET s,
+static BOOL stream_loop(AsbConn *s,
                         IAudioCaptureClient *pCapture,
                         const WAVEFORMATEX *pwfx)
 {
@@ -304,6 +297,13 @@ static BOOL stream_loop(SOCKET s,
         HRESULT hr;
 
         Sleep(AUDIO_POLL_MS);
+
+        /* ivshmem only: detect a host disconnect while idle. During silence there is no PCM to send,
+           so the send_all calls below never fire; asb_poll reports when the host has dropped the slot
+           so we fall back to the accept loop. On a Windows host disconnects surface through send_all,
+           exactly as before, so this check is skipped to leave that path untouched. */
+        if (asb_transport_is_ivshmem() && asb_poll(s, 0) < 0)
+            return FALSE;
 
         /* Drain everything that's queued right now. */
         for (;;) {
@@ -359,7 +359,7 @@ static BOOL stream_loop(SOCKET s,
 
 /* ---- Handle one connected host ---- */
 
-static void handle_client(SOCKET s)
+static void handle_client(AsbConn *s)
 {
     IMMDevice *pDevice = NULL;
     IAudioClient *pClient = NULL;
@@ -408,78 +408,43 @@ static void handle_client(SOCKET s)
 
 int main(void)
 {
-    WSADATA wsa;
-    SOCKET listen_s;
-    SOCKADDR_HV addr;
     HRESULT hr;
+    AsbListener *l;
 
     audio_log("Starting (PID=%lu, session=%lu).",
               GetCurrentProcessId(),
               WTSGetActiveConsoleSessionId());
 
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        audio_log("WSAStartup failed (%d).", WSAGetLastError());
-        return 1;
-    }
-
     hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         audio_log("CoInitializeEx failed (0x%08lx).", hr);
-        WSACleanup();
         return 1;
     }
 
-    listen_s = socket(AF_HYPERV, SOCK_STREAM, 1 /* HV_PROTOCOL_RAW */);
-    if (listen_s == INVALID_SOCKET) {
-        audio_log("socket(AF_HYPERV) failed (%d).", WSAGetLastError());
+    if (asb_transport_init() != 0) {
+        audio_log("asb_transport_init failed.");
         CoUninitialize();
-        WSACleanup();
         return 1;
     }
 
-    memset(&addr, 0, sizeof(addr));
-    addr.Family    = AF_HYPERV;
-    addr.VmId      = HV_GUID_WILDCARD;
-    addr.ServiceId = AUDIO_SERVICE_GUID;
-
-    {
-        int tries;
-        for (tries = 0; tries < 10; tries++) {
-            if (bind(listen_s, (struct sockaddr *)&addr, sizeof(addr)) == 0)
-                break;
-            audio_log("bind attempt %d failed (%d), retrying...",
-                      tries + 1, WSAGetLastError());
-            Sleep(500);
-        }
-        if (tries == 10) {
-            audio_log("bind failed after 10 attempts, exiting.");
-            closesocket(listen_s);
-            CoUninitialize();
-            WSACleanup();
-            return 1;
-        }
-    }
-
-    if (listen(listen_s, 2) != 0) {
-        audio_log("listen failed (%d).", WSAGetLastError());
-        closesocket(listen_s);
+    l = asb_listen(ASB_CH_AUDIO);
+    if (!l) {
+        audio_log("asb_listen(ASB_CH_AUDIO) failed.");
         CoUninitialize();
-        WSACleanup();
         return 1;
     }
-
-    audio_log("Listening on GUID a5b0cafe-0004-4000-8000-000000000001.");
+    audio_log("Listening on audio channel (transport=%s).",
+              asb_transport_is_ivshmem() ? "ivshmem" : "hyperv");
 
     for (;;) {
-        SOCKET client_s = accept(listen_s, NULL, NULL);
-        if (client_s == INVALID_SOCKET) {
-            audio_log("accept failed (%d).", WSAGetLastError());
-            Sleep(1000);
+        AsbConn *c = asb_accept(l, -1);
+        if (!c) {
+            Sleep(100);
             continue;
         }
         audio_log("Host connected.");
-        handle_client(client_s);
-        closesocket(client_s);
+        handle_client(c);
+        asb_close(c);
         audio_log("Host disconnected.");
     }
 }

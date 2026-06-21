@@ -107,6 +107,10 @@ int asb_instance_lock_acquire(void) {
     NSString *path = [support_dir() stringByAppendingPathComponent:@"instance.lock"];
     int fd = open(path.fileSystemRepresentation, O_CREAT | O_RDWR, 0644);
     if (fd < 0) return -1;
+    /* CLOEXEC so spawned children (QEMU, iso-patch-mac, ssh-keygen, ...) do NOT inherit this fd.
+       Otherwise an orphaned child (e.g. a QEMU VM left running after the app quits) keeps the
+       open-file-description alive and the flock held -> a relaunch fails "another instance running". */
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
     if (flock(fd, LOCK_EX | LOCK_NB) != 0) { close(fd); return -1; }
     return fd;   /* held for the process lifetime; OS releases on exit/crash */
 }
@@ -270,9 +274,14 @@ static void delete_discovery(void) {
 /* ---- Derived state (macOS) ---- */
 
 static const char *derive_state(const AsbVmMac *v) {
-    if (!v->install_complete && v->install_progress >= 0) return "installing";
+    if (!v->disk_built && v->install_progress >= 0)       return "installing";  /* host building the disk */
     if (!v->running)                                      return "stopped";
     if (v->shutting_down)                                 return "stopping";
+    if (!v->install_complete)                             return "installing";  /* guest first-boot install
+                                                                                   (Windows: until the agent
+                                                                                   connects). macOS sets
+                                                                                   install_complete at build,
+                                                                                   so it never lands here. */
     if (!v->agent_online)                                 return "booting";
     return "online";
 }
@@ -281,7 +290,7 @@ static const char *derive_state(const AsbVmMac *v) {
    Windows' building_vhdx for the "don't tear the daemon down under it" guard
    (an exit mid-install orphans the iso-patch-mac child + half-built disk). */
 static BOOL vm_installing(const AsbVmMac *v) {
-    return !v->install_complete && v->install_progress >= 0;
+    return !v->disk_built && v->install_progress >= 0;
 }
 
 /* Cheap per-VM status object -- field-for-field the Windows daemon's
@@ -312,17 +321,20 @@ static NSDictionary *vm_status_dict(const AsbVmMac *v) {
 
 /* ---- Create-input validation ----
  * Mirrors web/app.js validateVmName/validateUsername/validatePassword exactly
- * as they apply on a macOS host (osType locked to "macOS"), plus the numeric
- * rules the Windows daemon enforces, so the API rejects exactly what the UI
- * would. Returns an English error (nil = valid). */
+ * as they apply on a macOS host. osType may be "macOS" or "Windows" (anything
+ * else is rejected; Windows additionally requires an ISO and disallows
+ * templates), plus the numeric rules the Windows daemon enforces, so the API
+ * rejects exactly what the UI would. Returns an English error (nil = valid). */
 static NSString *validate_create_mac(NSString *name, NSString *os,
                                      NSString *user, BOOL is_template,
                                      int ram_mb, int hdd_gb, int cpu_cores,
                                      int gpu_mode, int net_mode) {
-    if (![os.lowercaseString isEqualToString:@"macos"])
-        return @"Only macOS guests are supported on a macOS host.";
+    BOOL is_mac = [os.lowercaseString isEqualToString:@"macos"];
+    BOOL is_win = [os.lowercaseString isEqualToString:@"windows"];
+    if (!is_mac && !is_win)
+        return @"Only macOS and Windows guests are supported on a macOS host.";
     if (is_template)
-        return @"Templates are only supported for Windows.";
+        return @"Templates are not yet supported for Windows-on-Mac (use a direct ISO install).";
 
     /* name / hostname (macOS LocalHostName rules, app.js validateVmName) */
     if (!name.length) return @"VM name is required.";
@@ -695,6 +707,7 @@ static int handle_request(int fd, HttpReq *r) {
             int net = [b[@"networkMode"] intValue];
             BOOL sshEnabled = [b[@"sshEnabled"] boolValue];
             BOOL sshDeploy  = [b[@"sshDeployKey"] boolValue];
+            BOOL testMode   = [b[@"testMode"] boolValue];
             BOOL isTemplate = [b[@"isTemplate"] boolValue];
 
             if (sshDeploy && !sshEnabled) {
@@ -711,6 +724,12 @@ static int handle_request(int fd, HttpReq *r) {
                 send_err(fd, 400, "Bad Request", @"invalid_arg", verr);
                 return 0;
             }
+            /* Windows-on-Mac is a from-scratch ISO install: the ISO is mandatory. */
+            if ([os.lowercaseString isEqualToString:@"windows"] && img.length == 0) {
+                send_err(fd, 400, "Bad Request", @"invalid_arg",
+                         @"A Windows ISO (imagePath) is required to create a Windows VM.");
+                return 0;
+            }
 
             /* Async create (202 then events/status), like Windows -- and the
                admin-authorization prompt inside create must not block the
@@ -723,7 +742,7 @@ static int handle_request(int fd, HttpReq *r) {
                                            ram, hdd, cpu, gpu, net,
                                            img.length ? img.UTF8String : NULL,
                                            user.UTF8String, pass.UTF8String,
-                                           sshEnabled, sshDeploy);
+                                           sshEnabled, sshDeploy, testMode);
                 if (rc != BACKEND_OK)
                     hlog(@"create '%@' failed rc=%d (alert event posted)", name, rc);
             });

@@ -1,0 +1,277 @@
+/*
+ * win_provision.c -- see win_provision.h. Platform-neutral; no Win32 / no Foundation.
+ * Content is byte-faithful to src/backend_win/disk_util.c's generate_vhdx_* functions, with the
+ * single addition of the asb_ivshmem install step (harmless no-op on Windows-to-Windows).
+ */
+#include "win_provision.h"
+#include <string.h>
+
+/* ---- base64 of UTF-16LE(pass + "Password") -- matches the unattend <Password PlainText=false>
+ * encoding (what CryptBinaryToStringA(BASE64|NOCRLF) produces on Windows). ---- */
+static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static void password_b64(const char *pass, char *out, size_t out_sz) {
+    /* build UTF-16LE bytes of (pass + "Password") */
+    unsigned char buf[1024];
+    size_t n = 0;
+    const char *parts[2] = { pass, "Password" };
+    for (int p = 0; p < 2; p++) {
+        for (const char *s = parts[p]; *s && n + 2 < sizeof buf; s++) {
+            buf[n++] = (unsigned char)*s;   /* low byte */
+            buf[n++] = 0;                   /* high byte (ASCII) */
+        }
+    }
+    size_t o = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        unsigned b0 = buf[i];
+        unsigned b1 = (i + 1 < n) ? buf[i + 1] : 0;
+        unsigned b2 = (i + 2 < n) ? buf[i + 2] : 0;
+        unsigned triple = (b0 << 16) | (b1 << 8) | b2;
+        if (o + 4 >= out_sz) break;
+        out[o++] = B64[(triple >> 18) & 0x3F];
+        out[o++] = B64[(triple >> 12) & 0x3F];
+        out[o++] = (i + 1 < n) ? B64[(triple >> 6) & 0x3F] : '=';
+        out[o++] = (i + 2 < n) ? B64[triple & 0x3F] : '=';
+    }
+    out[o] = 0;
+}
+
+/* Map a BCP-47 tag to the InputLocale "LCID:KLID" form (same table as lang_to_input_locale). */
+static const char *input_locale(const char *lang) {
+    static const struct { const char *tag, *klid; } map[] = {
+        {"en-US","0409:00000409"},{"en-GB","0809:00000809"},{"de-DE","0407:00000407"},
+        {"fr-FR","040c:0000040c"},{"fr-CA","0c0c:00001009"},{"es-ES","0c0a:0000040a"},
+        {"es-MX","080a:0000080a"},{"it-IT","0410:00000410"},{"pt-BR","0416:00000416"},
+        {"pt-PT","0816:00000816"},{"ja-JP","0411:00000411"},{"ko-KR","0412:00000412"},
+        {"zh-CN","0804:00000804"},{"zh-TW","0404:00000404"},{"ru-RU","0419:00000419"},
+        {"pl-PL","0415:00000415"},{"nl-NL","0413:00000413"},{"sv-SE","041d:0000041d"},
+        {"nb-NO","0414:00000414"},{"da-DK","0406:00000406"},{"fi-FI","040b:0000040b"},
+        {"cs-CZ","0405:00000405"},{"hu-HU","040e:0000040e"},{"tr-TR","041f:0000041f"},
+        {"ar-SA","0401:00000401"},{"he-IL","040d:0000040d"},{"th-TH","041e:0000041e"},
+        {"uk-UA","0422:00000422"},{"ro-RO","0418:00000418"},{"el-GR","0408:00000408"},
+        {"bg-BG","0402:00020402"},{"hr-HR","041a:0000041a"},{"sk-SK","041b:0000041b"},
+        {"sl-SI","0424:00000424"},{"et-EE","0425:00000425"},{"lv-LV","0426:00000426"},
+        {"lt-LT","0427:00000427"},
+    };
+    for (size_t i = 0; i < sizeof(map)/sizeof(map[0]); i++)
+        if (strcmp(lang, map[i].tag) == 0) return map[i].klid;
+    return "0409:00000409";
+}
+
+int asb_provision_unattend(FILE *f, const char *vm_name, const char *user, const char *pass,
+                           const char *arch, int test_mode, int is_arm64, const char *lang) {
+    if (!f) return -1;
+    char comp[16]; { size_t i = 0; for (; vm_name[i] && i < 15; i++) comp[i] = vm_name[i]; comp[i] = 0; }
+    char b64[2048]; password_b64(pass ? pass : "", b64, sizeof b64);
+    const char *loc = input_locale(lang ? lang : "en-US");
+    if (!lang) lang = "en-US";
+
+    /* UTF-8 BOM, matching the Windows _wfopen_s("w,ccs=UTF-8"). */
+    fputs("\xEF\xBB\xBF", f);
+    fprintf(f,
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+        "<unattend xmlns=\"urn:schemas-microsoft-com:unattend\"\n"
+        "          xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\">\n"
+        "\n"
+        "    <settings pass=\"specialize\">\n"
+        "        <component name=\"Microsoft-Windows-Shell-Setup\"\n"
+        "                   processorArchitecture=\"%s\"\n"
+        "                   publicKeyToken=\"31bf3856ad364e35\"\n"
+        "                   language=\"neutral\" versionScope=\"nonSxS\">\n"
+        "            <ComputerName>%s</ComputerName>\n"
+        "        </component>\n"
+        "        <component name=\"Microsoft-Windows-Deployment\"\n"
+        "                   processorArchitecture=\"%s\"\n"
+        "                   publicKeyToken=\"31bf3856ad364e35\"\n"
+        "                   language=\"neutral\" versionScope=\"nonSxS\">\n"
+        "            <RunSynchronous>\n"
+        "                <RunSynchronousCommand wcm:action=\"add\">\n"
+        "                    <Order>1</Order>\n"
+        "                    <Path>reg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path>\n"
+        "                </RunSynchronousCommand>\n",
+        arch, comp, arch);
+    {
+        int order = 2;
+        fprintf(f,
+            "                <RunSynchronousCommand wcm:action=\"add\">\n"
+            "                    <Order>%d</Order>\n"
+            "                    <Path>bcdedit /set recoveryenabled No</Path>\n"
+            "                </RunSynchronousCommand>\n"
+            "                <RunSynchronousCommand wcm:action=\"add\">\n"
+            "                    <Order>%d</Order>\n"
+            "                    <Path>bcdedit /set bootstatuspolicy IgnoreAllFailures</Path>\n"
+            "                </RunSynchronousCommand>\n", order, order + 1);
+        order += 2;
+        if (test_mode) {
+            fprintf(f,
+                "                <RunSynchronousCommand wcm:action=\"add\">\n"
+                "                    <Order>%d</Order>\n"
+                "                    <Path>bcdedit /set testsigning on</Path>\n"
+                "                </RunSynchronousCommand>\n", order++);
+        }
+        if (is_arm64) {
+            static const char *const keys[] = {
+                "BypassTPMCheck", "BypassSecureBootCheck", "BypassRAMCheck",
+                "BypassStorageCheck", "BypassCPUCheck"
+            };
+            for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); i++)
+                fprintf(f,
+                    "                <RunSynchronousCommand wcm:action=\"add\">\n"
+                    "                    <Order>%d</Order>\n"
+                    "                    <Path>reg add HKLM\\SYSTEM\\Setup\\LabConfig /v %s /t REG_DWORD /d 1 /f</Path>\n"
+                    "                </RunSynchronousCommand>\n",
+                    order++, keys[i]);
+        }
+    }
+    fprintf(f,
+        "            </RunSynchronous>\n"
+        "        </component>\n"
+        "    </settings>\n"
+        "\n"
+        "    <settings pass=\"oobeSystem\">\n"
+        "        <component name=\"Microsoft-Windows-International-Core\"\n"
+        "                   processorArchitecture=\"%s\"\n"
+        "                   publicKeyToken=\"31bf3856ad364e35\"\n"
+        "                   language=\"neutral\" versionScope=\"nonSxS\">\n"
+        "            <InputLocale>%s</InputLocale>\n"
+        "            <SystemLocale>%s</SystemLocale>\n"
+        "            <UILanguage>%s</UILanguage>\n"
+        "            <UserLocale>%s</UserLocale>\n"
+        "        </component>\n"
+        "        <component name=\"Microsoft-Windows-Shell-Setup\"\n"
+        "                   processorArchitecture=\"%s\"\n"
+        "                   publicKeyToken=\"31bf3856ad364e35\"\n"
+        "                   language=\"neutral\" versionScope=\"nonSxS\">\n"
+        "            <OOBE>\n"
+        "                <HideEULAPage>true</HideEULAPage>\n"
+        "                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>\n"
+        "                <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>\n"
+        "                <ProtectYourPC>3</ProtectYourPC>\n"
+        "            </OOBE>\n"
+        "            <UserAccounts><LocalAccounts>\n"
+        "                <LocalAccount wcm:action=\"add\">\n"
+        "                    <Name>%s</Name>\n"
+        "                    <Group>Administrators</Group>\n"
+        "                    <Password><Value>%s</Value><PlainText>false</PlainText></Password>\n"
+        "                </LocalAccount>\n"
+        "            </LocalAccounts></UserAccounts>\n"
+        "            <AutoLogon>\n"
+        "                <Enabled>true</Enabled>\n"
+        "                <Username>%s</Username>\n"
+        "                <Password><Value>%s</Value><PlainText>false</PlainText></Password>\n"
+        "                <LogonCount>1</LogonCount>\n"
+        "            </AutoLogon>\n"
+        "            <FirstLogonCommands>\n"
+        "                <SynchronousCommand wcm:action=\"add\">\n"
+        "                    <Order>1</Order>\n"
+        "                    <Description>Run AppSandbox setup</Description>\n"
+        "                    <CommandLine>C:\\Windows\\AppSandbox\\setup.cmd</CommandLine>\n"
+        "                    <RequiresUserInput>false</RequiresUserInput>\n"
+        "                </SynchronousCommand>\n"
+        "            </FirstLogonCommands>\n"
+        "        </component>\n"
+        "    </settings>\n"
+        "</unattend>\n",
+        arch, loc, lang, lang, lang, arch, user, b64, user, b64);
+    return 0;
+}
+
+int asb_provision_setup_cmd(FILE *f) {
+    if (!f) return -1;
+    fputs(
+        "@echo off\r\n"
+        "set LOG=%SystemRoot%\\AppSandbox\\setup.log\r\n"
+        "echo === setup.cmd started === >> \"%LOG%\"\r\n"
+        "REM Agent already at C:\\Windows\\AppSandbox\\ from VHDX staging\r\n"
+        "\"%SystemRoot%\\AppSandbox\\appsandbox-agent.exe\" --install >> \"%LOG%\" 2>&1\r\n"
+        "echo === setup.cmd finished === >> \"%LOG%\"\r\n",
+        f);
+    return 0;
+}
+
+int asb_provision_setupcomplete(FILE *f, const char *ssh_msi_name) {
+    if (!f) return -1;
+    fputs(
+        "@echo off\r\n"
+        "set LOG=%SystemRoot%\\AppSandbox\\setup.log\r\n"
+        "mkdir \"%SystemRoot%\\AppSandbox\" 2>nul\r\n"
+        "echo === SetupComplete.cmd started === >> \"%LOG%\"\r\n"
+        "\r\n"
+        "set DRVDIR=%SystemRoot%\\AppSandbox\\drivers\r\n"
+        "if not exist \"%DRVDIR%\\AppSandboxVDD.inf\" goto :done\r\n"
+        "\r\n"
+        "echo [SETUP] Enabling test signing... >> \"%LOG%\"\r\n"
+        "bcdedit /set testsigning on >> \"%LOG%\" 2>&1\r\n"
+        "\r\n"
+        "REM ---- asb_ivshmem: shared-memory transport PCI driver (1af4:1110), installed FIRST so the\r\n"
+        "REM transport is up before the VDD/agent connect to us. Its catalog is signed by the SEPARATE\r\n"
+        "REM \"AppSandbox Test Cert\" (NOT the VDD's WDKTestCert), so trust that cert first -- same certutil\r\n"
+        "REM pattern as the VDD. No matching device on Windows-to-Windows, so devcon is a no-op there.\r\n"
+        "if exist \"%DRVDIR%\\asb_ivshmem.cer\" (\r\n"
+        "    echo [IVSHMEM] Installing certificate... >> \"%LOG%\"\r\n"
+        "    certutil -addstore Root \"%DRVDIR%\\asb_ivshmem.cer\" >> \"%LOG%\" 2>&1\r\n"
+        "    certutil -f -addstore TrustedPublisher \"%DRVDIR%\\asb_ivshmem.cer\" >> \"%LOG%\" 2>&1\r\n"
+        ")\r\n"
+        "if exist \"%DRVDIR%\\asb_ivshmem.inf\" (\r\n"
+        "    echo [IVSHMEM] Installing transport driver with devcon... >> \"%LOG%\"\r\n"
+        "    \"%DRVDIR%\\devcon.exe\" install \"%DRVDIR%\\asb_ivshmem.inf\" \"PCI\\VEN_1AF4&DEV_1110&SUBSYS_11001AF4&REV_01\" >> \"%LOG%\" 2>&1\r\n"
+        "    echo [IVSHMEM] devcon exit code: %errorlevel% >> \"%LOG%\"\r\n"
+        ")\r\n"
+        "\r\n"
+        "REM ---- VDD (IddCx virtual display) -- its cert (WDKTestCert) then devcon install (Root device)\r\n"
+        "if exist \"%DRVDIR%\\AppSandboxVDD.cer\" (\r\n"
+        "    echo [VDD] Installing certificate... >> \"%LOG%\"\r\n"
+        "    certutil -addstore Root \"%DRVDIR%\\AppSandboxVDD.cer\" >> \"%LOG%\" 2>&1\r\n"
+        "    certutil -f -addstore TrustedPublisher \"%DRVDIR%\\AppSandboxVDD.cer\" >> \"%LOG%\" 2>&1\r\n"
+        ")\r\n"
+        "echo [VDD] Installing driver with devcon... >> \"%LOG%\"\r\n"
+        "\"%DRVDIR%\\devcon.exe\" install \"%DRVDIR%\\AppSandboxVDD.inf\" Root\\AppSandboxVDD >> \"%LOG%\" 2>&1\r\n"
+        "echo [VDD] devcon exit code: %errorlevel% >> \"%LOG%\"\r\n"
+        "\r\n"
+        "REM Disable display sleep so IDD swap chain stays alive\r\n"
+        "powercfg /change monitor-timeout-ac 0\r\n"
+        "powercfg /change monitor-timeout-dc 0\r\n"
+        "powercfg /change standby-timeout-ac 0\r\n"
+        "powercfg /change standby-timeout-dc 0\r\n"
+        "echo [PWR] Display sleep disabled >> \"%LOG%\"\r\n"
+        "\r\n"
+        "REM ---- VAD (Microsoft WHQL-signed -- already trusted, no cert needed) -- devcon install\r\n"
+        "if exist \"%DRVDIR%\\AppSandboxVAD.inf\" (\r\n"
+        "    echo [VAD] Installing driver with devcon... >> \"%LOG%\"\r\n"
+        "    \"%DRVDIR%\\devcon.exe\" install \"%DRVDIR%\\AppSandboxVAD.inf\" Root\\AppSandboxVAD >> \"%LOG%\" 2>&1\r\n"
+        "    echo [VAD] devcon exit code: %errorlevel% >> \"%LOG%\"\r\n"
+        ")\r\n"
+        "\r\n"
+        "REM ---- NetKVM (virtio-net NIC) -- Red Hat WHQL-signed (no cert needed). `devcon update` binds\r\n"
+        "REM it to the existing virtio-net-pci device (1af4:1000) for NAT networking. netkvmp.exe must sit\r\n"
+        "REM beside the INF (the INF CopyFiles-es it). No matching device on Windows-to-Windows -> no-op.\r\n"
+        "if exist \"%DRVDIR%\\netkvm.inf\" (\r\n"
+        "    echo [NETKVM] Installing virtio-net driver with devcon... >> \"%LOG%\"\r\n"
+        "    \"%DRVDIR%\\devcon.exe\" update \"%DRVDIR%\\netkvm.inf\" \"PCI\\VEN_1AF4&DEV_1000&SUBSYS_00011AF4&REV_00\" >> \"%LOG%\" 2>&1\r\n"
+        "    echo [NETKVM] devcon exit code: %errorlevel% >> \"%LOG%\"\r\n"
+        ")\r\n"
+        "\r\n",
+        f);
+
+    if (ssh_msi_name && ssh_msi_name[0]) {
+        fprintf(f,
+            "REM Install OpenSSH Server\r\n"
+            "set SSHDIR=%%SystemRoot%%\\AppSandbox\r\n"
+            "if exist \"%%SSHDIR%%\\%s\" (\r\n"
+            "    echo [SSH] Installing OpenSSH Server... >> \"%%LOG%%\"\r\n"
+            "    msiexec /i \"%%SSHDIR%%\\%s\" /qn /norestart >> \"%%LOG%%\" 2>&1\r\n"
+            "    echo [SSH] msiexec exit code: %%errorlevel%% >> \"%%LOG%%\"\r\n"
+            "    sc config sshd start= auto >> \"%%LOG%%\" 2>&1\r\n"
+            "    net start sshd >> \"%%LOG%%\" 2>&1\r\n"
+            "    echo [SSH] Done >> \"%%LOG%%\"\r\n"
+            ")\r\n"
+            "\r\n",
+            ssh_msi_name, ssh_msi_name);
+    }
+
+    fputs(
+        ":done\r\n"
+        "echo === SetupComplete.cmd finished === >> \"%LOG%\"\r\n",
+        f);
+    return 0;
+}

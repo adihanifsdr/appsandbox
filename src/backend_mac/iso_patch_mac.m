@@ -1,4 +1,5 @@
 #import "iso_patch_mac.h"
+#import "vm_dir.h"               /* AppSandbox support root (sibling of VMs/) for the driver cache */
 #import <Security/Security.h>
 #import <Security/AuthorizationTags.h>
 
@@ -387,6 +388,70 @@ static void ensure_fetch_registry(void) {
     [self runUnprivilegedArgs:args
                      progress:progressBlock
                    completion:completion];
+}
+
+#pragma mark - build-windows (unprivileged)
+
++ (void)buildWindowsDiskWithISO:(NSURL *)isoURL
+                        outDisk:(NSURL *)outDiskURL
+                     payloadDir:(NSString *)payloadDir
+                      devconExe:(NSString *)devconExe
+                     sshMsiPath:(NSString *)sshMsiPath
+                         vmName:(NSString *)vmName
+                      adminUser:(NSString *)adminUser
+                      adminPass:(NSString *)adminPass
+                           lang:(NSString *)lang
+                         diskGb:(int)diskGb
+                       testMode:(BOOL)testMode
+                       progress:(IsoPatchProgress)progressBlock
+                     completion:(IsoPatchCompletion)completion {
+    NSMutableArray *args = [@[
+        @"build-windows",
+        @"--iso",     isoURL.path,
+        @"--out",     outDiskURL.path,
+        @"--payload", payloadDir,
+        @"--vm-name", vmName,
+        @"--user",    adminUser,
+        @"--pass",    adminPass,
+        @"--lang",    (lang.length ? lang : @"en-US"),
+        @"--disk-gb", [NSString stringWithFormat:@"%d", diskGb > 0 ? diskGb : 64],
+        @"--test-mode", (testMode ? @"1" : @"0"),   /* honor the create-time choice (mirrors Windows) */
+    ] mutableCopy];
+    if (devconExe.length) { [args addObject:@"--devcon"]; [args addObject:devconExe]; }
+    if (sshMsiPath.length) { [args addObject:@"--ssh-msi"]; [args addObject:sshMsiPath]; }
+    [self runUnprivilegedArgs:args
+                     progress:progressBlock
+                   completion:completion];
+}
+
+/* Mirror of ensure_ssh_msi_cached: download the OpenSSH ARM64 MSI once, cache it under
+ * <Caches>/AppSandbox/, return the cached path (or nil). Blocking; the build flow runs off-main. */
++ (NSString *)ensureOpenSSHMsiCached {
+    NSString *name = @"OpenSSH-ARM64-v10.0.0.0.msi";
+    NSString *urlStr = @"https://github.com/PowerShell/Win32-OpenSSH/releases/download/"
+                        "10.0.0.0p2-Preview/OpenSSH-ARM64-v10.0.0.0.msi";
+    /* Cache under the AppSandbox support dir (sibling of VMs/ + restore.ipsw), NOT ~/Library/Caches —
+     * VmDir's root is sudo-aware, so the daemon (root) and the GUI (user) share one cache. */
+    NSString *cacheDir = [[VmDir vmsRootDirectory] URLByDeletingLastPathComponent].path;
+    [[NSFileManager defaultManager] createDirectoryAtPath:cacheDir
+                              withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *dst = [cacheDir stringByAppendingPathComponent:name];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:dst]) return dst;
+
+    /* Synchronous download (follows the GitHub->CDN redirect). */
+    __block NSData *data = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    NSURLSessionDataTask *t = [[NSURLSession sharedSession]
+        dataTaskWithURL:[NSURL URLWithString:urlStr]
+      completionHandler:^(NSData *d, NSURLResponse *resp, NSError *err) {
+        NSInteger code = [resp isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)resp).statusCode : 0;
+        if (d.length && (code == 200 || code == 0) && !err) data = d;
+        dispatch_semaphore_signal(sem);
+    }];
+    [t resume];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)180 * NSEC_PER_SEC));
+    if (data.length && [data writeToFile:dst atomically:YES]) return dst;
+    return nil;
 }
 
 #pragma mark - stage (privileged)

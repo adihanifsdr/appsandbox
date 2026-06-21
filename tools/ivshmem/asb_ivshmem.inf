@@ -1,0 +1,59 @@
+; asb_ivshmem.inf — AppSandbox ivshmem BAR-mapping driver (KMDF). Our own code, no third party.
+; Binds QEMU's ivshmem-plain PCI device. The SUBSYS-qualified hardware ID is more specific than
+; the inbox "PCI standard RAM Controller" match, so PnP ranks this driver higher and binds it.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ManufacturerName%
+CatalogFile = asb_ivshmem.cat
+PnpLockdown = 1
+; DriverVer is stamped by the build (stampinf).
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+asb_ivshmem.sys = 1
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTARM64
+
+[Standard.NTARM64]
+; Most-specific match first (SUBSYS) so we outrank the generic inbox RAM-controller driver.
+%DeviceDesc% = ASB_Install, PCI\VEN_1AF4&DEV_1110&SUBSYS_11001AF4&REV_01
+%DeviceDesc% = ASB_Install, PCI\VEN_1AF4&DEV_1110&SUBSYS_11001AF4
+%DeviceDesc% = ASB_Install, PCI\VEN_1AF4&DEV_1110
+
+[ASB_Install.NT]
+CopyFiles = ASB_Copy
+
+[ASB_Copy]
+asb_ivshmem.sys
+
+[ASB_Install.NT.Services]
+AddService = asb_ivshmem, 0x00000002, ASB_Service
+
+[ASB_Service]
+DisplayName   = %ServiceDesc%
+ServiceType   = 1   ; SERVICE_KERNEL_DRIVER
+StartType     = 3   ; SERVICE_DEMAND_START
+ErrorControl  = 1   ; SERVICE_ERROR_NORMAL
+ServiceBinary = %13%\asb_ivshmem.sys
+
+[ASB_Install.NT.Wdf]
+KmdfService = asb_ivshmem, asb_wdfsect
+
+[asb_wdfsect]
+; VERIFY against the installed WDK (e.g. 1.31/1.33). stampinf -k can set this from the build.
+KmdfLibraryVersion = 1.33
+
+[Strings]
+ManufacturerName = "AppSandbox"
+DiskName         = "AppSandbox ivshmem Install Disk"
+DeviceDesc       = "AppSandbox ivshmem Shared Memory"
+ServiceDesc      = "AppSandbox ivshmem Driver"
