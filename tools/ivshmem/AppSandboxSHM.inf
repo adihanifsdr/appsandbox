@@ -1,4 +1,4 @@
-; asb_ivshmem.inf — AppSandbox ivshmem BAR-mapping driver (KMDF). Our own code, no third party.
+; AppSandboxSHM.inf — AppSandbox ivshmem BAR-mapping driver (KMDF). Our own code, no third party.
 ; Binds QEMU's ivshmem-plain PCI device. The SUBSYS-qualified hardware ID is more specific than
 ; the inbox "PCI standard RAM Controller" match, so PnP ranks this driver higher and binds it.
 
@@ -7,7 +7,7 @@ Signature   = "$WINDOWS NT$"
 Class       = System
 ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
 Provider    = %ManufacturerName%
-CatalogFile = asb_ivshmem.cat
+CatalogFile = AppSandboxSHM.cat
 PnpLockdown = 1
 ; DriverVer is stamped by the build (stampinf).
 
@@ -18,12 +18,21 @@ DefaultDestDir = 13
 1 = %DiskName%
 
 [SourceDisksFiles]
-asb_ivshmem.sys = 1
+AppSandboxSHM.sys = 1
 
 [Manufacturer]
-%ManufacturerName% = Standard,NTARM64
+; .10.0...22000 TargetOSVersion restricts install to Windows 11, which AppSandbox requires. A min-OS
+; decoration is mandatory here because DefaultDestDir = 13 (run-from-driver-store, for PnpLockdown=1)
+; requires it. Both arches declared (the project builds x64 + ARM64).
+%ManufacturerName% = Standard,NTamd64.10.0...22000,NTARM64.10.0...22000
 
-[Standard.NTARM64]
+[Standard.NTamd64.10.0...22000]
+; Most-specific match first (SUBSYS) so we outrank the generic inbox RAM-controller driver.
+%DeviceDesc% = ASB_Install, PCI\VEN_1AF4&DEV_1110&SUBSYS_11001AF4&REV_01
+%DeviceDesc% = ASB_Install, PCI\VEN_1AF4&DEV_1110&SUBSYS_11001AF4
+%DeviceDesc% = ASB_Install, PCI\VEN_1AF4&DEV_1110
+
+[Standard.NTARM64.10.0...22000]
 ; Most-specific match first (SUBSYS) so we outrank the generic inbox RAM-controller driver.
 %DeviceDesc% = ASB_Install, PCI\VEN_1AF4&DEV_1110&SUBSYS_11001AF4&REV_01
 %DeviceDesc% = ASB_Install, PCI\VEN_1AF4&DEV_1110&SUBSYS_11001AF4
@@ -33,20 +42,20 @@ asb_ivshmem.sys = 1
 CopyFiles = ASB_Copy
 
 [ASB_Copy]
-asb_ivshmem.sys
+AppSandboxSHM.sys
 
 [ASB_Install.NT.Services]
-AddService = asb_ivshmem, 0x00000002, ASB_Service
+AddService = AppSandboxSHM, 0x00000002, ASB_Service
 
 [ASB_Service]
 DisplayName   = %ServiceDesc%
 ServiceType   = 1   ; SERVICE_KERNEL_DRIVER
 StartType     = 3   ; SERVICE_DEMAND_START
 ErrorControl  = 1   ; SERVICE_ERROR_NORMAL
-ServiceBinary = %13%\asb_ivshmem.sys
+ServiceBinary = %13%\AppSandboxSHM.sys
 
 [ASB_Install.NT.Wdf]
-KmdfService = asb_ivshmem, asb_wdfsect
+KmdfService = AppSandboxSHM, asb_wdfsect
 
 [asb_wdfsect]
 ; VERIFY against the installed WDK (e.g. 1.31/1.33). stampinf -k can set this from the build.
@@ -54,6 +63,6 @@ KmdfLibraryVersion = 1.33
 
 [Strings]
 ManufacturerName = "AppSandbox"
-DiskName         = "AppSandbox ivshmem Install Disk"
-DeviceDesc       = "AppSandbox ivshmem Shared Memory"
-ServiceDesc      = "AppSandbox ivshmem Driver"
+DiskName         = "AppSandbox Shared Memory Install Disk"
+DeviceDesc       = "AppSandbox Shared Memory"
+ServiceDesc      = "AppSandbox Shared Memory Driver"

@@ -311,14 +311,17 @@ $signedDir  = Join-Path $bin 'drivers-signed'
 $driversDir = Join-Path $bin 'drivers'
 if (-not $SkipDrivers) {
     $haveSigned = (Test-DriverSigned $driversDir 'AppSandboxVDD' $asb.Full) -and `
-                  (Test-DriverSigned $driversDir 'AppSandboxVAD' $asb.Full)
+                  (Test-DriverSigned $driversDir 'AppSandboxVAD' $asb.Full) -and `
+                  (Test-DriverSigned $driversDir 'AppSandboxSHM' $asb.Full)
     if ($ForceDriverSign -or -not $haveSigned) {
         # Reuse a prior MS-signed download only if it matches THIS version; otherwise submit.
         $vddInf = Get-ChildItem (Join-Path $signedDir 'AppSandboxVDD') -Recurse -Filter 'AppSandboxVDD.inf' -ErrorAction SilentlyContinue | Select-Object -First 1
         $vadInf = Get-ChildItem (Join-Path $signedDir 'AppSandboxVAD') -Recurse -Filter 'AppSandboxVAD.inf' -ErrorAction SilentlyContinue | Select-Object -First 1
-        $reusable = (-not $ForceDriverSign) -and $vddInf -and $vadInf -and `
+        $shmInf = Get-ChildItem (Join-Path $signedDir 'AppSandboxSHM') -Recurse -Filter 'AppSandboxSHM.inf' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $reusable = (-not $ForceDriverSign) -and $vddInf -and $vadInf -and $shmInf -and `
                     (Test-DriverSigned $vddInf.DirectoryName 'AppSandboxVDD' $asb.Full) -and `
-                    (Test-DriverSigned $vadInf.DirectoryName 'AppSandboxVAD' $asb.Full)
+                    (Test-DriverSigned $vadInf.DirectoryName 'AppSandboxVAD' $asb.Full) -and `
+                    (Test-DriverSigned $shmInf.DirectoryName 'AppSandboxSHM' $asb.Full)
         if ($reusable) {
             Write-Host "Reusing existing Microsoft-signed drivers (v$($asb.Full)) from drivers-signed - no resubmit."
         } else {
@@ -336,7 +339,8 @@ if (-not $SkipDrivers) {
         }
         # Guard: confirm the deposited drivers are MS-signed AND this version before shipping.
         if (-not ((Test-DriverSigned $driversDir 'AppSandboxVDD' $asb.Full) -and `
-                  (Test-DriverSigned $driversDir 'AppSandboxVAD' $asb.Full))) {
+                  (Test-DriverSigned $driversDir 'AppSandboxVAD' $asb.Full) -and `
+                  (Test-DriverSigned $driversDir 'AppSandboxSHM' $asb.Full))) {
             throw "Drivers in $driversDir are not Microsoft-signed at v$($asb.Full) - aborting (sign-drivers may have failed)."
         }
     } else {
@@ -398,6 +402,7 @@ $required = @(
     'AppSandbox.exe', 'appsandbox_core.dll', 'iso-patch.exe', 'WebView2Loader.dll',
     'drivers\AppSandboxVDD.dll', 'drivers\AppSandboxVDD.inf', 'drivers\AppSandboxVDD.cat',
     'drivers\AppSandboxVAD.sys', 'drivers\AppSandboxVAD.inf', 'drivers\AppSandboxVAD.cat',
+    'drivers\AppSandboxSHM.sys', 'drivers\AppSandboxSHM.inf', 'drivers\AppSandboxSHM.cat',
     'drivers\devcon.exe', 'resources', 'web',
     'headless-api\asb.py', 'headless-api\README.md', 'headless-api\examples', 'headless-api\tests'
 )

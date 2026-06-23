@@ -15,6 +15,7 @@
 #define ASB_TRANSPORT_H
 
 #include <stdint.h>
+#include "asb_atomics.h"   /* force _Interlocked* INLINE on MSVC (/MT outlined-atomics crash fix); no-op off MSVC */
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +45,29 @@ extern "C" {
  * a slot is [ASB_SLOT_HDR bytes][AsbRing g2h hdr (sizeof AsbRing)][g2h.cap data][AsbRing h2g hdr][h2g.cap data]. */
 #define ASB_SLOT_HDR   64u
 
+/* Byte offset of AsbSlot.owner_id within the 64-byte slot header (state@0, _pad@4, owner_id@8). Guest
+ * (asb_transport.c) and Mac host (asb_ivshmem_transport.m) compute the owner_id pointer from the slot
+ * base via this constant. ivshmem (Mac<->Win) ONLY — the PC AF_HYPERV path never maps slot memory. */
+#define ASB_SLOT_OWNER_OFFSET 8u
+
+/* CAS-free single-writer handshake words (ivshmem; host-connector channels ch1-7). Each is written by
+ * EXACTLY ONE side, so no BAR word ever has two writers — a hardware atomic RMW (casal/ldxr-stxr) is an
+ * illegal instruction on the ivshmem BAR under QEMU+HVF. host_token/host_gen = HOST-sole; guest_ack =
+ * GUEST-sole; owner_id = GUEST-sole; state = HOST-sole on ch1-7 (GUEST-sole on the 9P region, which
+ * inverts connector/acceptor roles and is left at its validated baseline). */
+#define ASB_SLOT_HOST_TOKEN_OFFSET 16u   /* host-sole: per-arm handshake nonce; 0 = released */
+#define ASB_SLOT_GUEST_ACK_OFFSET  24u   /* guest-sole (ch1-7): echo of the host_token the guest accepted */
+#define ASB_SLOT_HOST_GEN_OFFSET   32u   /* host-sole: arming host's process generation (mach_absolute_time), residue id */
+#define ASB_SLOT_GUEST_HB_OFFSET   40u   /* guest-sole: liveness beacon. A guest background ticker bumps it
+                                          * ~4Hz while the owning PROCESS is alive (data-INDEPENDENT, so an
+                                          * idle channel still beats); the host pump tears the slot down if it
+                                          * goes stale. This is the ivshmem analog of the OS-delivered peer
+                                          * death that hvsocket (Win<->Win) / vsock (Mac<->Mac) give for free.
+                                          * Host keys on the value CHANGING (clock-domain-safe) and only after
+                                          * it has seen >=1 change (so a legacy guest that never beats is never
+                                          * false-killed). ivshmem (Mac<->Win) ONLY. */
+#define ACCEPT_EST_WAIT_MS 2000          /* guest accept: max ms to wait for the host to publish ESTABLISHED */
+
 /* Connection slot states. */
 #define ASB_SLOT_FREE        0u
 #define ASB_SLOT_CONNECTING  1u   /* connector claimed it, awaiting accept */
@@ -66,6 +90,17 @@ typedef struct AsbRing {
 typedef struct AsbSlot {
     volatile uint32_t state;    /* ASB_SLOT_* */
     uint32_t          _pad;
+    volatile uint64_t owner_id; /* (guest_pid<<32)|accept_seq, at ASB_SLOT_OWNER_OFFSET=8. The guest
+                                 * acceptor stamps it just before publishing ESTABLISHED (and in
+                                 * asb_stream_reset); the Mac host pump captures it once and EXITS when
+                                 * it changes (a NEW acceptance took the slot). A respawned guest (fresh
+                                 * pid) frees its dead predecessor's residue once at startup. Liveness by
+                                 * IDENTITY, never a clock -> no idle false-positive. Mac/ivshmem ONLY;
+                                 * the PC AF_HYPERV path never maps slot memory. */
+    volatile uint64_t host_token; /* @16 HOST-sole (ch1-7): per-arm handshake nonce; 0 = released */
+    volatile uint64_t guest_ack;  /* @24 GUEST-sole (ch1-7): echo of accepted host_token = "accept this arm" */
+    volatile uint64_t host_gen;   /* @32 HOST-sole: arming host generation (mach_absolute_time @ init) */
+    volatile uint64_t guest_hb;   /* @40 GUEST-sole: liveness beacon, bumped ~4Hz by a guest ticker thread */
     /* AsbRing g2h (+ its data), then AsbRing h2g (+ its data) follow; layout via slot_stride. */
 } AsbSlot;
 

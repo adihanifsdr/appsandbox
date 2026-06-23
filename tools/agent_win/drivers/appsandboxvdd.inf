@@ -18,7 +18,7 @@ Class = Display
 ClassVer = 2.0
 Provider = %ManufacturerName%
 CatalogFile = AppSandboxVDD.cat
-DriverVer = 06/17/2026,0.1.3.0
+DriverVer = 06/22/2026,0.1.3.0
 
 [Manufacturer]
 %ManufacturerName% = Standard,NTARM64.10.0...22000

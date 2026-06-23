@@ -1,7 +1,7 @@
 /*
  * win_provision.c -- see win_provision.h. Platform-neutral; no Win32 / no Foundation.
  * Content is byte-faithful to src/backend_win/disk_util.c's generate_vhdx_* functions, with the
- * single addition of the asb_ivshmem install step (harmless no-op on Windows-to-Windows).
+ * single addition of the AppSandboxSHM install step (harmless no-op on Windows-to-Windows).
  */
 #include "win_provision.h"
 #include <string.h>
@@ -203,19 +203,21 @@ int asb_provision_setupcomplete(FILE *f, const char *ssh_msi_name) {
         "echo [SETUP] Enabling test signing... >> \"%LOG%\"\r\n"
         "bcdedit /set testsigning on >> \"%LOG%\" 2>&1\r\n"
         "\r\n"
-        "REM ---- asb_ivshmem: shared-memory transport PCI driver (1af4:1110), installed FIRST so the\r\n"
-        "REM transport is up before the VDD/agent connect to us. Its catalog is signed by the SEPARATE\r\n"
-        "REM \"AppSandbox Test Cert\" (NOT the VDD's WDKTestCert), so trust that cert first -- same certutil\r\n"
-        "REM pattern as the VDD. No matching device on Windows-to-Windows, so devcon is a no-op there.\r\n"
-        "if exist \"%DRVDIR%\\asb_ivshmem.cer\" (\r\n"
-        "    echo [IVSHMEM] Installing certificate... >> \"%LOG%\"\r\n"
-        "    certutil -addstore Root \"%DRVDIR%\\asb_ivshmem.cer\" >> \"%LOG%\" 2>&1\r\n"
-        "    certutil -f -addstore TrustedPublisher \"%DRVDIR%\\asb_ivshmem.cer\" >> \"%LOG%\" 2>&1\r\n"
+        "REM ---- AppSandboxSHM: shared-memory transport PCI driver for QEMU's ivshmem device\r\n"
+        "REM PCI\\VEN_1AF4&DEV_1110. Installed FIRST so the transport is up before the VDD/agent connect.\r\n"
+        "REM It is test-signed, so trust its .cer with certutil (same as the VDD) then bind it to the\r\n"
+        "REM already-enumerated PCI device with `devcon update` -- the SUBSYS-qualified driver outranks\r\n"
+        "REM the inbox RAM-controller driver. Same pattern as NetKVM below; Windows-to-Windows has no\r\n"
+        "REM 1af4:1110 device, so it is a no-op there.\r\n"
+        "if exist \"%DRVDIR%\\AppSandboxSHM.cer\" (\r\n"
+        "    echo [SHM] Installing certificate... >> \"%LOG%\"\r\n"
+        "    certutil -addstore Root \"%DRVDIR%\\AppSandboxSHM.cer\" >> \"%LOG%\" 2>&1\r\n"
+        "    certutil -f -addstore TrustedPublisher \"%DRVDIR%\\AppSandboxSHM.cer\" >> \"%LOG%\" 2>&1\r\n"
         ")\r\n"
-        "if exist \"%DRVDIR%\\asb_ivshmem.inf\" (\r\n"
-        "    echo [IVSHMEM] Installing transport driver with devcon... >> \"%LOG%\"\r\n"
-        "    \"%DRVDIR%\\devcon.exe\" install \"%DRVDIR%\\asb_ivshmem.inf\" \"PCI\\VEN_1AF4&DEV_1110&SUBSYS_11001AF4&REV_01\" >> \"%LOG%\" 2>&1\r\n"
-        "    echo [IVSHMEM] devcon exit code: %errorlevel% >> \"%LOG%\"\r\n"
+        "if exist \"%DRVDIR%\\AppSandboxSHM.inf\" (\r\n"
+        "    echo [SHM] Installing transport driver with devcon update... >> \"%LOG%\"\r\n"
+        "    \"%DRVDIR%\\devcon.exe\" update \"%DRVDIR%\\AppSandboxSHM.inf\" \"PCI\\VEN_1AF4&DEV_1110&SUBSYS_11001AF4&REV_01\" >> \"%LOG%\" 2>&1\r\n"
+        "    echo [SHM] devcon exit code: %errorlevel% >> \"%LOG%\"\r\n"
         ")\r\n"
         "\r\n"
         "REM ---- VDD (IddCx virtual display) -- its cert (WDKTestCert) then devcon install (Root device)\r\n"

@@ -18,7 +18,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../ivshmem/asb_ivshmem.h"   /* GUID_DEVINTERFACE_ASB_IVSHMEM, IOCTL_ASB_IVSHMEM_MAP */
+#include "../ivshmem/AppSandboxSHM.h"   /* GUID_DEVINTERFACE_APPSANDBOX_SHM, IOCTL_APPSANDBOX_SHM_MAP */
+#include <intrin.h>
+/* _InterlockedIncrement acts on g_accept_seq — a regular GLOBAL, NOT the ivshmem BAR — so it is legal
+ * (casal/ldxr-stxr work on normal RAM; only atomics on the BAR fault with 0xc000001d on QEMU+HVF). The
+ * connect/accept handshake is CAS-FREE (strict single-writer state), so there is NO _InterlockedCompare-
+ * Exchange on the BAR. (Mac host uses __sync_* in asb_ivshmem_transport.m.) */
+#pragma intrinsic(_InterlockedIncrement)
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "setupapi.lib")
@@ -34,6 +40,28 @@ static int            g_is_ivshmem = 0;
 static uint8_t       *g_bar = NULL;        /* mapped BAR base (Mac) */
 static uint64_t       g_bar_size = 0;
 static AsbShmDirectory *g_dir = NULL;
+
+/* ivshmem slot-ownership identity (Mac path only). owner_id = (g_guest_pid<<32)|accept_seq stamps each
+ * acceptance so the host pump can tell when a NEW acceptance takes a slot, and a respawned guest (fresh
+ * pid) recognises + reclaims its dead predecessor's residue. g_accept_seq is seeded NONZERO at init so a
+ * restarted process never reuses a predecessor's owner_id even on guest PID reuse. */
+static uint32_t       g_guest_pid = 0;
+static volatile LONG  g_accept_seq = 0;
+
+/* ---- Guest liveness beacon (ivshmem). ONE per-process ticker thread bumps the guest_hb word of every
+ * live conn ~4Hz, DATA-INDEPENDENTLY, so the host can detect THIS guest process dying (force-kill/crash)
+ * even on an idle or read-only channel (audio/clipboard-reader) where there is no I/O to fail. It is the
+ * ivshmem analog of the OS-delivered peer death that hvsocket (Win<->Win) and vsock (Mac<->Mac) provide
+ * for free. Per-process: each helper only beats the slots IT owns, so each guest_hb word still has exactly
+ * one writer (the single-writer-per-word BAR rule holds; a plain `(*p)++` is load/add/store, NOT a BAR
+ * atomic). The host keys on the value CHANGING (clock-domain-safe) and only after >=1 observed change, so
+ * a legacy guest that never beats is never false-killed. ---- */
+#define ASB_HB_TICK_MS   250
+#define ASB_HB_MAX_CONNS 64
+static CRITICAL_SECTION g_hb_cs;
+static int              g_hb_cs_inited = 0;
+static struct AsbConn  *g_hb_conns[ASB_HB_MAX_CONNS];
+static int              g_hb_count = 0;
 
 /* ---- AF_HYPERV definitions (PC backend), matching agent.c ---- */
 #define AF_HYPERV 34
@@ -70,6 +98,12 @@ struct AsbConn {
     SOCKET    sock;
     /* Mac: pointers into the BAR for this slot */
     volatile uint32_t *state;
+    volatile uint64_t *owner_id;        /* slot identity (off 8); guest-sole, host reads */
+    volatile uint64_t *host_token;      /* off 16; host-sole, guest reads (per-arm handshake nonce) */
+    volatile uint64_t *guest_ack;       /* off 24; guest-sole on ch1-7 (echo of accepted host_token) */
+    volatile uint64_t *guest_hb;        /* off 40; guest-sole liveness beacon (bumped by the ticker thread) */
+    uint64_t my_owner_id;               /* the owner_id WE stamped for this acceptance (C5 close self-check) */
+    uint64_t my_host_token;             /* the host_token of the arm WE accepted (C4 data-path disconnect) */
     AsbRing  *g2h; uint8_t *g2h_data;   /* guest writes (send) */
     AsbRing  *h2g; uint8_t *h2g_data;   /* guest reads  (recv) */
 };
@@ -88,12 +122,61 @@ static AsbShmRegionDesc *find_region(int channel) {
 /* Resolve slot index -> the AsbConn ring pointers (host has laid out g2h then h2g, each hdr+cap). */
 static void bind_slot(AsbConn *c, AsbShmRegionDesc *r, uint32_t slot_index) {
     uint8_t *slot = g_bar + r->offset + (uint64_t)slot_index * r->slot_stride;
-    c->state    = (volatile uint32_t *)slot;
+    c->state      = (volatile uint32_t *)slot;
+    c->owner_id   = (volatile uint64_t *)(slot + ASB_SLOT_OWNER_OFFSET);
+    c->host_token = (volatile uint64_t *)(slot + ASB_SLOT_HOST_TOKEN_OFFSET);
+    c->guest_ack  = (volatile uint64_t *)(slot + ASB_SLOT_GUEST_ACK_OFFSET);
+    c->guest_hb   = (volatile uint64_t *)(slot + ASB_SLOT_GUEST_HB_OFFSET);
     c->g2h      = (AsbRing *)(slot + ASB_SLOT_HDR);
     c->g2h_data = (uint8_t *)c->g2h + ASB_RING_HDR;
     c->h2g      = (AsbRing *)(c->g2h_data + c->g2h->cap);
     c->h2g_data = (uint8_t *)c->h2g + ASB_RING_HDR;
 }
+
+/* owner_id for a fresh acceptance: (pid<<32)|monotonic-seq. The guest is the only writer; the host
+ * only ever READS owner_id. */
+static uint64_t next_owner_id(void) {
+    return ((uint64_t)g_guest_pid << 32) | (uint32_t)InterlockedIncrement(&g_accept_seq);
+}
+
+/* Beacon ticker: every ASB_HB_TICK_MS, bump guest_hb for every registered live conn. The increment is a
+ * plain load/add/store (single writer per word) — never an ldxr/stxr/casal atomic, which faults on the
+ * ivshmem BAR under QEMU+HVF. Runs for the life of the process. */
+static DWORD WINAPI hb_thread_proc(LPVOID arg) {
+    (void)arg;
+    while (g_hb_cs_inited) {   /* always true post-init; a condition (not for(;;)) keeps the
+                                 return reachable so the VDD's /WX build has no C4702. */
+        int i;
+        Sleep(ASB_HB_TICK_MS);
+        EnterCriticalSection(&g_hb_cs);
+        for (i = 0; i < g_hb_count; i++) {
+            struct AsbConn *c = g_hb_conns[i];
+            if (c && c->guest_hb) (*c->guest_hb)++;
+        }
+        MemoryBarrier();
+        LeaveCriticalSection(&g_hb_cs);
+    }
+    return 0;
+}
+static void hb_register(struct AsbConn *c) {
+    if (!g_hb_cs_inited || !c) return;
+    EnterCriticalSection(&g_hb_cs);
+    if (g_hb_count < ASB_HB_MAX_CONNS) g_hb_conns[g_hb_count++] = c;
+    LeaveCriticalSection(&g_hb_cs);
+}
+static void hb_unregister(struct AsbConn *c) {
+    int i;
+    if (!g_hb_cs_inited || !c) return;
+    EnterCriticalSection(&g_hb_cs);
+    for (i = 0; i < g_hb_count; i++)
+        if (g_hb_conns[i] == c) { g_hb_conns[i] = g_hb_conns[--g_hb_count]; break; }
+    LeaveCriticalSection(&g_hb_cs);
+}
+
+/* (Guest startup slot-reclaim REMOVED. With strict single-writer state the guest never writes `state`
+ * on ch1-7, so it cannot reclaim. Host-crash recovery is now 100% host-side: the Mac host's
+ * connectChannel reclaims a dead host generation's residue via the host_gen word — see
+ * asb_ivshmem_transport.m. No g_reclaimed_mask / channel_bit / per-channel startup pass remains.) */
 
 /* SPSC ring: write up to len bytes; returns bytes written (0 if full). Single producer. */
 static int ring_write(AsbRing *r, uint8_t *data, const void *buf, int len) {
@@ -148,12 +231,12 @@ static int ring_read(AsbRing *r, uint8_t *data, void *buf, int len) {
  * ================================================================================ */
 static int open_ivshmem(void) {
     HDEVINFO di; SP_DEVICE_INTERFACE_DATA ifd; SP_DEVICE_INTERFACE_DETAIL_DATA *det;
-    DWORD need = 0; HANDLE h; ASB_IVSHMEM_MAP m; DWORD br = 0;
-    di = SetupDiGetClassDevs(&GUID_DEVINTERFACE_ASB_IVSHMEM, NULL, NULL,
+    DWORD need = 0; HANDLE h; APPSANDBOX_SHM_MAP m; DWORD br = 0;
+    di = SetupDiGetClassDevs(&GUID_DEVINTERFACE_APPSANDBOX_SHM, NULL, NULL,
                              DIGCF_DEVICEINTERFACE | DIGCF_PRESENT);
     if (di == INVALID_HANDLE_VALUE) return -1;
     ifd.cbSize = sizeof(ifd);
-    if (!SetupDiEnumDeviceInterfaces(di, NULL, &GUID_DEVINTERFACE_ASB_IVSHMEM, 0, &ifd)) return -1;
+    if (!SetupDiEnumDeviceInterfaces(di, NULL, &GUID_DEVINTERFACE_APPSANDBOX_SHM, 0, &ifd)) return -1;
     SetupDiGetDeviceInterfaceDetail(di, &ifd, NULL, 0, &need, NULL);
     det = (SP_DEVICE_INTERFACE_DETAIL_DATA *)malloc(need);
     if (!det) return -1;
@@ -164,7 +247,7 @@ static int open_ivshmem(void) {
     free(det);
     if (h == INVALID_HANDLE_VALUE) return -1;
     ZeroMemory(&m, sizeof(m));
-    if (!DeviceIoControl(h, IOCTL_ASB_IVSHMEM_MAP, NULL, 0, &m, sizeof(m), &br, NULL)) return -1;
+    if (!DeviceIoControl(h, IOCTL_APPSANDBOX_SHM_MAP, NULL, 0, &m, sizeof(m), &br, NULL)) return -1;
     g_bar = (uint8_t *)(uintptr_t)m.userVa;
     g_bar_size = m.size;
     g_dir = (AsbShmDirectory *)g_bar;
@@ -187,7 +270,16 @@ int asb_transport_init(void) {
         RegCloseKey(k);
     }
     WSAStartup(MAKEWORD(2, 2), &wsa);   /* needed by PC backend + the ssh/9p TCP relays either way */
-    if (!force_hv && (force_iv || open_ivshmem() == 0)) { g_is_ivshmem = 1; return 0; }
+    if (!force_hv && (force_iv || open_ivshmem() == 0)) {
+        g_is_ivshmem = 1;
+        g_guest_pid  = (uint32_t)GetCurrentProcessId();
+        g_accept_seq = (LONG)(GetTickCount64() & 0x3FFFFFFF);   /* nonzero seed: owner_id unique across PID reuse */
+        /* Start the liveness-beacon ticker (one per process). It idles harmlessly until a conn registers. */
+        InitializeCriticalSection(&g_hb_cs);
+        g_hb_cs_inited = 1;
+        { HANDLE t = CreateThread(NULL, 0, hb_thread_proc, NULL, 0, NULL); if (t) CloseHandle(t); }
+        return 0;
+    }
     g_is_ivshmem = 0;                   /* default: AF_HYPERV */
     return 0;
 }
@@ -205,7 +297,7 @@ AsbListener *asb_listen(int channel) {
     if (g_is_ivshmem) {
         l->region = find_region(channel);
         if (!l->region) { free(l); return NULL; }
-        return l;
+        return l;   /* no startup reclaim: host-side host_gen residue reclaim handles host-crash recovery */
     }
     {   /* PC: socket + bind(GUID) + listen. Retry bind 10x/500ms — matches the channel
            EXEs' original behaviour (the service GUID can be briefly held after a respawn). */
@@ -228,19 +320,44 @@ AsbListener *asb_listen(int channel) {
 AsbConn *asb_accept(AsbListener *l, int timeout_ms) {
     if (!l) return NULL;
     if (g_is_ivshmem) {
-        /* poll slots for one the connector set to CONNECTING; claim it */
+        /* CAS-FREE accept (strict single-writer state). The HOST owns `state`; the guest signals
+           acceptance by echoing host_token into guest_ack (guest-sole), then WAITS for the host to
+           publish ESTABLISHED. The guest NEVER writes `state`, so there is no two-writer clobber and no
+           hardware atomic is needed (atomics fault on the ivshmem BAR under QEMU+HVF). */
         int elapsed = 0;
         for (;;) {
             uint32_t s;
             for (s = 0; s < l->region->n_slots; s++) {
-                AsbConn tmp; bind_slot(&tmp, l->region, s);
+                AsbConn tmp; uint32_t st; uint64_t tok, ack;
+                memset(&tmp, 0, sizeof(tmp));
+                bind_slot(&tmp, l->region, s);
                 MemoryBarrier();
-                if (*tmp.state == ASB_SLOT_CONNECTING) {
-                    AsbConn *c = (AsbConn *)calloc(1, sizeof(*c));
-                    if (!c) return NULL;
-                    *c = tmp; c->channel = l->channel; c->is_ivshmem = 1;
-                    *c->state = ASB_SLOT_ESTABLISHED; MemoryBarrier();
-                    return c;
+                st = *tmp.state; tok = *tmp.host_token; ack = *tmp.guest_ack;
+                if (st == ASB_SLOT_CONNECTING && tok != 0 && ack != tok) {   /* a FRESH offer we have not acked */
+                    int w = 0;
+                    uint64_t oid = next_owner_id();
+                    *tmp.owner_id  = oid;  MemoryBarrier();   /* (a) publish identity (guest-sole) */
+                    *tmp.guest_ack = tok;  MemoryBarrier();   /* (b) accept THIS arm (guest-sole) */
+                    for (;;) {                                /* wait for the host to publish ESTABLISHED */
+                        uint32_t st2; uint64_t tok2;
+                        MemoryBarrier();
+                        st2 = *tmp.state; tok2 = *tmp.host_token;
+                        if (st2 == ASB_SLOT_ESTABLISHED && tok2 == tok) {
+                            AsbConn *c = (AsbConn *)calloc(1, sizeof(*c));
+                            if (!c) return NULL;              /* host token still live -> it times out -> FREE */
+                            *c = tmp; c->channel = l->channel; c->is_ivshmem = 1;
+                            c->my_owner_id = oid; c->my_host_token = tok;
+                            MemoryBarrier();
+                            hb_register(c);   /* begin beating this slot's liveness word */
+                            return c;
+                        }
+                        /* host re-armed (new token), released (FREE), or reclaimed (CLOSED/CLOSING) under
+                           us: abandon — we never wrote `state`, so there is nothing to undo. */
+                        if (tok2 != tok || st2 == ASB_SLOT_FREE ||
+                            st2 == ASB_SLOT_CLOSED || st2 == ASB_SLOT_CLOSING) break;
+                        if (++w > ACCEPT_EST_WAIT_MS) break;
+                        Sleep(1);
+                    }
                 }
             }
             if (timeout_ms >= 0 && elapsed >= timeout_ms) return NULL;
@@ -267,12 +384,18 @@ AsbConn *asb_connect(int channel) {   /* guest connects out (9P) */
             MemoryBarrier();
             if (*tmp.state == ASB_SLOT_FREE) {
                 int waited = 0;
+                *tmp.owner_id = next_owner_id(); MemoryBarrier();   /* keep owner_id valid (9P guest-connect-out; transient) */
                 *tmp.state = ASB_SLOT_CONNECTING; MemoryBarrier();
                 while (*(volatile uint32_t *)tmp.state != ASB_SLOT_ESTABLISHED) {
                     if (waited > 5000) { *tmp.state = ASB_SLOT_FREE; return NULL; }
                     Sleep(1); waited++; MemoryBarrier();
                 }
-                { AsbConn *c = (AsbConn *)calloc(1, sizeof(*c)); if (!c) { *tmp.state = ASB_SLOT_FREE; return NULL; } *c = tmp; c->channel = channel; c->is_ivshmem = 1; return c; }
+                { AsbConn *c = (AsbConn *)calloc(1, sizeof(*c)); if (!c) { *tmp.state = ASB_SLOT_FREE; return NULL; }
+                  *c = tmp; c->channel = channel; c->is_ivshmem = 1;
+                  c->my_host_token = 0;             /* 9P connector: host_token unused -> the C4 host_token check is skipped */
+                  c->my_owner_id   = *tmp.owner_id;
+                  hb_register(c);                   /* beat this slot too (harmless on 9P) */
+                  return c; }
             }
         }
         return NULL;   /* no free slot */
@@ -294,10 +417,12 @@ int asb_send(AsbConn *c, const void *buf, int len) {
         while (off < len) {
             int n;
             MemoryBarrier();
-            /* Any state other than ESTABLISHED means the connector (host) closed or RE-ARMED the slot
-               (e.g. the viewer relaunched, setting it back to CONNECTING) — treat as disconnect so the
-               acceptor's serve loop returns and re-accepts, mirroring a TCP peer close on PC. */
-            if (*c->state != ASB_SLOT_ESTABLISHED) return off ? off : -1;
+            /* Disconnect if the host left ESTABLISHED, OR (ch1-7) re-armed the slot with a NEW
+               host_token — the latter means a fresh arm superseded ours, so we must stop producing
+               into the old arm's ring BEFORE the host zeroes/reuses it (C4). my_host_token==0 on the
+               9P connector path, where this token check is skipped (9P keys on state only). */
+            if (*c->state != ASB_SLOT_ESTABLISHED ||
+                (c->my_host_token != 0 && *c->host_token != c->my_host_token)) return off ? off : -1;
             n = ring_write(c->g2h, c->g2h_data, (const uint8_t *)buf + off, len - off);
             if (n > 0) off += n; else Sleep(0);   /* ring full: yield, retry (host draining) */
         }
@@ -318,13 +443,22 @@ int asb_send(AsbConn *c, const void *buf, int len) {
 int asb_recv(AsbConn *c, void *buf, int len) {
     if (!c) return -1;
     if (c->is_ivshmem) {
+        int spins = 0;
         for (;;) {
             int n = ring_read(c->h2g, c->h2g_data, buf, len);
             if (n > 0) return n;             /* drain any buffered data before reporting EOF */
             MemoryBarrier();
-            /* Connector closed or re-armed the slot (left ESTABLISHED) -> EOF (== TCP recv 0). */
-            if (*c->state != ASB_SLOT_ESTABLISHED) return 0;
-            Sleep(0);   /* empty: yield then re-poll (idle backoff handled by callers if needed) */
+            /* Connector closed or re-armed the slot (left ESTABLISHED, or new host_token) -> EOF (C4). */
+            if (*c->state != ASB_SLOT_ESTABLISHED ||
+                (c->my_host_token != 0 && *c->host_token != c->my_host_token)) return 0;
+            /* Empty ring: spin-yield briefly so an actively-streaming producer keeps full
+               throughput / low latency, then fall back to Sleep(1) once the ring stays
+               empty — so an idle receiver (e.g. input/clipboard blocking while the host
+               viewer is open) does not peg a CPU core. The spin window resets per call, so
+               a steady transfer (ring rarely empties) is unaffected. ivshmem-only; the PC
+               recv() path below is byte-for-byte unchanged (Windows-to-Windows untouched). */
+            if (spins < 2000) { spins++; Sleep(0); }
+            else Sleep(1);
         }
     }
     return recv(c->sock, (char *)buf, len, 0);
@@ -337,7 +471,8 @@ int asb_poll(AsbConn *c, int timeout_ms) {
         for (;;) {
             MemoryBarrier();
             if (c->h2g->tail != c->h2g->head) return 1;       /* inbound bytes available */
-            if (*c->state != ASB_SLOT_ESTABLISHED) return -1; /* connector closed or re-armed -> closed */
+            if (*c->state != ASB_SLOT_ESTABLISHED ||
+                (c->my_host_token != 0 && *c->host_token != c->my_host_token)) return -1; /* closed/re-armed (C4) */
             if (timeout_ms >= 0 && elapsed >= timeout_ms) return 0;
             Sleep(1); elapsed++;
         }
@@ -358,12 +493,23 @@ void asb_set_timeout(AsbConn *c, int recv_ms, int send_ms) {
 
 void asb_close(AsbConn *c) {
     if (!c) return;
+    hb_unregister(c);   /* stop beating before we tear the slot down (no-op if never registered) */
     if (c->is_ivshmem) {
-        /* Only signal CLOSING if WE still hold the established slot. If the connector already
-           re-armed it (CONNECTING/FREE after a host relaunch) or closed it, writing CLOSING would
-           clobber the connector's fresh state and strand the next accept — just free the wrapper. */
         MemoryBarrier();
-        if (*c->state == ASB_SLOT_ESTABLISHED) { *c->state = ASB_SLOT_CLOSING; MemoryBarrier(); }
+        if (c->channel == ASB_CH_9P) {
+            /* 9P: the guest is the CONNECTOR and owns `state` on this region. Signal close by writing
+               CLOSING if we still hold it (don't clobber a re-armed slot). Baseline behavior. */
+            if (c->state && *c->state == ASB_SLOT_ESTABLISHED) { *c->state = ASB_SLOT_CLOSING; MemoryBarrier(); }
+        } else {
+            /* ch1-7: the HOST owns `state`; the guest must NEVER write it. Signal close by bumping our
+               owner_id (guest-sole) so the host pump's owner_id guard fails and its done: writes FREE.
+               C5 self-check: only bump if WE still own THIS acceptance, so a stale wrapper (its
+               acceptance long superseded on a reused single slot) can't bump a stranger's owner_id. */
+            if (c->owner_id && c->state && *c->state == ASB_SLOT_ESTABLISHED
+                && *c->owner_id == c->my_owner_id) {
+                *c->owner_id = next_owner_id(); MemoryBarrier();
+            }
+        }
     }
     else if (c->sock != INVALID_SOCKET) closesocket(c->sock);
     free(c);
@@ -377,15 +523,18 @@ void asb_close_listener(AsbListener *l) {
 
 void asb_abandon(AsbConn *c) {
     /* Free the wrapper only; leave the slot/socket untouched (the new owner controls it now). */
-    if (c) free(c);
+    if (!c) return;
+    hb_unregister(c);   /* this wrapper is dead; the new owner registers its own conn */
+    free(c);
 }
 
 void asb_stream_reset(AsbConn *c) {
-    if (!c || !c->is_ivshmem) return;
-    c->g2h->head = c->g2h->tail = 0;
-    MemoryBarrier();
-    *c->state = ASB_SLOT_ESTABLISHED;
-    MemoryBarrier();
+    /* No-op under strict single-writer state. A host reattach is a genuine re-accept: the host arms a
+       new host_token and ZEROES both rings before the guest's asb_accept (which captures a fresh
+       owner_id + host_token). The guest must NOT write `state` on ch1-7, and the ring is already at
+       offset 0 from the host's arm, so there is nothing to reset here. The VDD's bSentFullFrame=FALSE
+       on the new connection already emits one full frame (correct on a real reattach, not a bounce). */
+    (void)c;
 }
 
 /* ---- newline-framed helpers (== recv_line/send_line in agent.c) ---- */

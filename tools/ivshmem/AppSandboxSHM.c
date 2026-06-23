@@ -1,5 +1,5 @@
 /*
- * asb_ivshmem.c — AppSandbox ivshmem BAR-mapping driver (KMDF). Our own code, no third party.
+ * AppSandboxSHM.c — AppSandbox ivshmem BAR-mapping driver (KMDF). Our own code, no third party.
  *
  * Binds QEMU's ivshmem-plain PCI device (VEN_1AF4&DEV_1110), finds the large prefetchable
  * memory BAR (BAR2 = the shared window), and on IOCTL maps it into the caller's user address
@@ -15,7 +15,7 @@
  */
 #include <ntddk.h>
 #include <wdf.h>
-#include "asb_ivshmem.h"
+#include "AppSandboxSHM.h"
 
 typedef struct _DEVICE_CONTEXT {
     PHYSICAL_ADDRESS bar2Pa;     /* physical base of the shared BAR        */
@@ -69,7 +69,7 @@ NTSTATUS AsbEvtDeviceAdd(WDFDRIVER drv, PWDFDEVICE_INIT init)
     st = WdfDeviceCreate(&init, &devAttr, &dev);
     if (!NT_SUCCESS(st)) return st;
 
-    st = WdfDeviceCreateDeviceInterface(dev, &GUID_DEVINTERFACE_ASB_IVSHMEM, NULL);
+    st = WdfDeviceCreateDeviceInterface(dev, &GUID_DEVINTERFACE_APPSANDBOX_SHM, NULL);
     if (!NT_SUCCESS(st)) return st;
 
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&qCfg, WdfIoQueueDispatchParallel);
@@ -128,9 +128,9 @@ VOID AsbEvtIoDeviceControl(WDFQUEUE q, WDFREQUEST req, size_t outLen, size_t inL
     UNREFERENCED_PARAMETER(inLen);
 
     switch (code) {
-    case IOCTL_ASB_IVSHMEM_INFO:
-    case IOCTL_ASB_IVSHMEM_MAP: {
-        ASB_IVSHMEM_MAP *out = NULL;
+    case IOCTL_APPSANDBOX_SHM_INFO:
+    case IOCTL_APPSANDBOX_SHM_MAP: {
+        APPSANDBOX_SHM_MAP *out = NULL;
         WDFFILEOBJECT fo;
         PFILE_CONTEXT fc;
         PMDL mdl;
@@ -144,7 +144,7 @@ VOID AsbEvtIoDeviceControl(WDFQUEUE q, WDFREQUEST req, size_t outLen, size_t inL
         if (!NT_SUCCESS(st)) break;
         out->size = ctx->bar2Len;
         out->userVa = 0;
-        if (code == IOCTL_ASB_IVSHMEM_INFO) { info = sizeof(*out); break; }
+        if (code == IOCTL_APPSANDBOX_SHM_INFO) { info = sizeof(*out); break; }
 
         fo = WdfRequestGetFileObject(req);
         fc = fo ? FileGetContext(fo) : NULL;
@@ -176,7 +176,7 @@ VOID AsbEvtIoDeviceControl(WDFQUEUE q, WDFREQUEST req, size_t outLen, size_t inL
         info = sizeof(*out);
         break;
     }
-    case IOCTL_ASB_IVSHMEM_UNMAP: {
+    case IOCTL_APPSANDBOX_SHM_UNMAP: {
         WDFFILEOBJECT fo = WdfRequestGetFileObject(req);
         PFILE_CONTEXT fc = fo ? FileGetContext(fo) : NULL;
         if (fc && fc->userVa && fc->mdl) {

@@ -8,6 +8,17 @@
 
 ## Status (current — verified against the tree)
 
+### 2026-06-22 — SHM driver build-integrated; provisioning cmd-bug fixed; 2-VM create validated
+
+- **ivshmem driver renamed `asb_ivshmem` → `AppSandboxSHM`** across files, INF (service / `ServiceBinary` / `CatalogFile` + display strings), the device-interface GUID *symbol* (GUID value preserved), driver source, `asb_transport.c`, `win_provision.c`, the payload, and `iso-patch-mac.m`'s stage list. QEMU's `ivshmem` device id and the Mac **host** transport (`asb_ivshmem_transport.*`) intentionally keep their names.
+- **Now built through the VS pipeline, like VDD/VAD** (no more hand-built `cl/link`): `tools/ivshmem/AppSandboxSHM.vcxproj` (KMDF, 4 configs) + `tools/ivshmem/Package/AppSandboxSHMPackage.vcxproj` (Inf2Cat regenerates the catalog over the freshly-built `.sys`, TestSign, post-build copy → `bin\Release[-ARM64]\drivers` + extracted `.cer`), both registered in `AppSandbox.sln`. Added to `tools/sign/submission-config.json` + `make-release.ps1` validate/ship lists for MS attestation, exactly like VDD/VAD. The INF carries a `.10.0...22000` (Win11) `TargetOSVersion` decoration (required because `DefaultDestDir=13`, run-from-driver-store / `PnpLockdown=1`).
+- **`devcon update` (not `devcon install`) for the SHM PCI device** — per MS docs, DevCon Install is for non-PnP/root devices and "cannot be used for Plug and Play devices" (it fabricates a phantom `ROOT\SYSTEM` devnode on a real PCI hwid). Same pattern as NetKVM.
+- **ROOT-CAUSE FIX — "fresh VMs never finish installing":** a literal `(…)` in an `echo` *inside* a cmd `( )` block in the generated `SetupComplete.cmd` desynced cmd's paren matcher and silently skipped EVERY driver install (SHM/VDD/VAD/NetKVM), so the agent could never reach the transport. Removed the parens; audited all generated cmd strings (none others).
+- **ISO mount:** concurrent/staggered creates use a per-build `-shadow` (copy-on-write) attach so each build gets an independent device + mount point.
+- **Toolset:** all 10 user-mode `.vcxproj` reconciled to `v145` (VS 2026); the WDK driver projects keep `WindowsKernelModeDriver10.0` / `WindowsUserModeDriver10.0`.
+- **VALIDATED:** two fresh VMs created via the `--headless` API install the full driver set — both pulled NetKVM-driven IPs (`192.168.2.8`/`.9`); since NetKVM is the *last* driver in `SetupComplete.cmd`, SHM/VDD/VAD installed too. Agent-online + display pending the post-install reboot that activates test-signing.
+- **Shipping blocker unchanged in kind:** SHM now test-signs + attestation-submits through the same path as VDD/VAD, but the unsigned-payload blocker (top of `windows-on-mac-plan.md`, R9) still needs the EV/attestation or JIT-pull story. P6/P7 unchanged.
+
 **P0–P5 are implemented; P6 (UI/API + vendoring) and P7 (acceptance) remain.** The Windows-on-Mac
 create→boot→online→display→ssh path runs end to end on the dev host (VM `MyAppSandbox`, driven via
 the `--headless` daemon + `tools/headless-api/asb.py`): agent online over ivshmem ch1, VDD display

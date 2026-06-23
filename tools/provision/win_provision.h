@@ -4,7 +4,7 @@
  *
  * SINGLE SOURCE OF TRUTH: compiled into BOTH the Windows backend (src/backend_win/disk_util.c
  * delegates here) and the macOS tools/iso-patch-mac target, so the staged scripts are byte-identical
- * regardless of host. There is no is-mac/is-pc fork. The asb_ivshmem driver install is included
+ * regardless of host. There is no is-mac/is-pc fork. The AppSandboxSHM driver install is included
  * unconditionally; it is a harmless no-op on Windows-to-Windows (no ivshmem PCI device present).
  * See the [[windows-on-mac-provisioning-unification]] memory.
  */
@@ -33,7 +33,7 @@ int asb_provision_unattend(FILE *f, const char *vm_name, const char *user, const
 /* setup.cmd -- first-logon: agent already staged at C:\Windows\AppSandbox\; register the service. */
 int asb_provision_setup_cmd(FILE *f);
 
-/* SetupComplete.cmd -- runs as SYSTEM before first logon: trust the test cert, install asb_ivshmem
+/* SetupComplete.cmd -- runs as SYSTEM before first logon: trust the test cert, install AppSandboxSHM
  * (pnputil; no-op on Win-to-Win), install the VDD + VAD root devices (devcon), disable display sleep,
  * and -- if ssh_msi_name is non-NULL -- install OpenSSH Server (msiexec + sc + net start).
  * ssh_msi_name is the basename of the MSI staged into \Windows\AppSandbox\. */

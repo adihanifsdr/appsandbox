@@ -19,6 +19,9 @@
 #import "idd_display.h"
 #import "asb_ivshmem_transport.h"
 #import <AudioToolbox/AudioToolbox.h>
+#import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
+#import <IOSurface/IOSurface.h>
 
 #include <unistd.h>
 #include <pthread.h>
@@ -27,6 +30,11 @@
 #include <stdio.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <errno.h>
+#include <time.h>
+#include <fcntl.h>
+#include <pwd.h>
+#include <sys/stat.h>
 #include "../../tools/transport/asb_transport.h"   /* ASB_CH_DISPLAY/INPUT/AUDIO/CLIPBOARD[_READER], AsbCursor, ASB_CURSOR_MAGIC */
 
 /* ---- VDD wire protocol (mirror of tools/vdd/vdd.h + src/backend_win/vm_display_idd.c).
@@ -102,6 +110,9 @@ static NSData *idd_cfhtml_to_html(const uint8_t *d, uint32_t n);
 static NSData *idd_html_to_cfhtml(NSData *frag);
 static NSData *idd_dib_to_png(const uint8_t *d, uint32_t n);
 static NSData *idd_image_to_dib(NSData *img);
+/* Aspect-preserving fit (letterbox); shared by the Metal render (viewport/scissor), input mapping, and
+   the cursor scale. Defined near IddDisplayView; forward-declared here for renderMetal above it. */
+static CGRect idd_letterbox(double viewW, double viewH, double frameW, double frameH, double *outScale);
 
 /* macOS virtual keycode -> Windows VK (US layout). Built once. */
 static uint8_t g_vk[128];
@@ -147,6 +158,26 @@ static int is_extended(unsigned short kc)
         return 1;
     }
     return 0;
+}
+
+/* Resolve the GUI console user (the one who will paste) so root-created clipboard files can be chowned
+   to them. The daemon runs as root (for vmnet), where NSTemporaryDirectory() is root's PRIVATE temp,
+   unreadable by the logged-in user — see -clipRecvFiles. Prefer /dev/console's owner (the logged-in GUI
+   user); fall back to SUDO_USER. Returns NO if no non-root target can be identified. */
+static BOOL idd_console_user(uid_t *uid, gid_t *gid)
+{
+    struct stat st;
+    if (stat("/dev/console", &st) == 0 && st.st_uid != 0) {
+        struct passwd *pw = getpwuid(st.st_uid);
+        *uid = st.st_uid; *gid = pw ? pw->pw_gid : st.st_gid;
+        return YES;
+    }
+    const char *su = getenv("SUDO_USER");
+    if (su && *su) {
+        struct passwd *pw = getpwnam(su);
+        if (pw && pw->pw_uid != 0) { *uid = pw->pw_uid; *gid = pw->pw_gid; return YES; }
+    }
+    return NO;
 }
 
 /* ---- Build an NSCursor from the VDD cursor record. Both QueryHardwareCursor3 types are 32bpp BGRA:
@@ -244,7 +275,7 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
 - (BOOL)clipRecvFiles:(int)fd urls:(NSMutableArray *)urls;
 /* View callbacks (main thread): render-buffer + cursor access and input dispatch. */
 - (void)renderTick;
-- (BOOL)copyRenderInfoW:(uint32_t *)w h:(uint32_t *)h stride:(uint32_t *)stride buf:(uint8_t **)buf;
+- (void)renderMetal;   /* the view calls this on resize so the frame redraws synchronously while dragging */
 - (uint32_t)frameWidth;
 - (uint32_t)frameHeight;
 - (NSCursor *)currentCursorForScale:(double)scale;
@@ -255,15 +286,33 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
 @end
 
 @implementation IddDisplayWindow {
-    /* ch2 framebuffer, reconstructed from the VDD wire stream by the reader thread.
-       The reader writes _fb (+ bumps _fbSeq under _fbLock); the render timer copies it into
-       _renderFb when _fbSeq advances and triggers a redraw, so drawRect never races the reader. */
+    /* ch2 framebuffer, reconstructed from the VDD wire stream by the reader thread. The reader writes
+       _fb (+ bumps _fbSeq under _fbLock); the render timer copies it once into a GPU surface when _fbSeq
+       advances, so the GPU never races the reader. */
     uint8_t          *_fb;          /* working buffer (reader thread) */
-    uint8_t          *_renderFb;    /* render buffer (main thread) */
     uint32_t          _fbW, _fbH, _fbStride;
     volatile uint32_t _fbSeq;       /* bumped on each applied frame */
-    uint32_t          _renderSeq;
+    uint32_t          _renderSeq;   /* last _fbSeq uploaded to the GPU */
     pthread_mutex_t   _fbLock;
+
+    /* Metal GPU render (zero-copy, mirrors the Windows D3D11 path). The reconstructed frame is copied
+       ONCE into a pool of IOSurface-backed MTLTextures (the same Map+memcpy floor Windows has), then the
+       GPU SAMPLES that surface in place — no CPU→GPU upload — with a LINEAR (bilinear) sampler into a
+       letterboxed viewport+scissor, exactly like compute_letterbox + the D3D11 viewport. The CAMetalLayer
+       is the view's backing layer; triple-buffered with an in-flight semaphore. */
+    id<MTLDevice>              _mtlDev;
+    id<MTLCommandQueue>        _mtlQ;
+    id<MTLRenderPipelineState> _mtlPS;
+    id<MTLSamplerState>        _mtlSamp;
+    CAMetalLayer              *_metalLayer;   /* == the view's backing layer */
+    dispatch_semaphore_t       _mtlSem;
+    #define IDD_SURF_COUNT 3
+    IOSurfaceRef               _surf[IDD_SURF_COUNT];
+    id<MTLTexture>             _surfTex[IDD_SURF_COUNT];
+    uint32_t                   _surfW, _surfH;
+    int                        _frontIdx;     /* last surface written = what the GPU samples */
+    BOOL                       _frontValid;
+    CGSize                     _drawableSize;
 
     /* Guest cursor stashed by the ch2 reader (AsbCursor blob + shape bytes), applied on the
        main thread by the render timer (rebuilt on shape/visibility/scale change). */
@@ -280,10 +329,22 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
     int               _hasMove;
     uint32_t          _moveX, _moveY;
 
-    /* ch3 INPUT fd (host connects + writes InputPacket). -1 until connected; the reader-managed
-       input connector reconnects it. Written from the main thread, (re)opened by the input thread. */
+    /* ch3 INPUT fd (the input WORKER thread connects + writes InputPacket). -1 until connected; the
+       worker reconnects it. The main thread NEVER touches this fd — it only enqueues into _inq. */
     volatile int      _inputFd;
     pthread_mutex_t   _inputLock;
+
+    /* Input send queue: the AppKit main thread (-sendInput:) enqueues InputPackets here and returns
+       immediately; the input worker thread (inputLoop) drains it and does the actual ch3 send +
+       reconnect. This is what makes the window structurally immune to a guest input-helper/agent/VDD
+       restart — ch3 backpressure or a dead slot can only ever stall the worker, never the UI (or the
+       HTTP API served on the main run loop). Bounded ring, drop-OLDEST when full (input is droppable;
+       the latest mouse position wins). Guarded by _inqLock; the worker waits on _inqCond. */
+    #define IDD_INQ_CAP 256
+    InputPacket       _inq[IDD_INQ_CAP];
+    uint32_t          _inqHead, _inqTail;
+    pthread_mutex_t   _inqLock;
+    pthread_cond_t    _inqCond;
     /* Display thread's current ch2 fd, published so teardown can shutdown() it to unblock the
        thread's blocking recv (idd_rd_full). Guarded by _inputLock (shared fd-publication lock). */
     volatile int      _displayFd;
@@ -346,13 +407,87 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
     pthread_mutex_init(&_curLock, NULL);
     pthread_mutex_init(&_inputLock, NULL);
     pthread_mutex_init(&_pcmLock, NULL);
+    pthread_mutex_init(&_inqLock, NULL);
+    pthread_cond_init(&_inqCond, NULL);
 
     _view = [[IddDisplayView alloc] initWithFrame:frame];
     _view.owner = self;
     _view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     window.contentView = _view;
     window.delegate = self;
+    [self setupMetal];
     return self;
+}
+
+/* Build the Metal device/pipeline/sampler and point the view's CAMetalLayer at them. The shaders are the
+   direct MSL port of g_vs_hlsl/g_ps_hlsl in vm_display_idd.c: a fullscreen triangle (no vertex buffer)
+   whose UVs sample the frame texture; the letterbox is done by the viewport+scissor at draw time, the
+   bars by the clear color. Linear sampler + clamp == D3D11_FILTER_MIN_MAG_MIP_LINEAR + ADDRESS_CLAMP. */
+- (void)setupMetal {
+    _mtlDev = MTLCreateSystemDefaultDevice();
+    if (!_mtlDev) return;   /* never nil on the Apple-Silicon hardware this app requires */
+    _mtlQ = [_mtlDev newCommandQueue];
+
+    NSString *src =
+        @"#include <metal_stdlib>\n"
+        @"using namespace metal;\n"
+        @"struct VOut { float4 pos [[position]]; float2 uv; };\n"
+        @"vertex VOut idd_vmain(uint vid [[vertex_id]]) {\n"
+        @"    float2 uv = float2((vid << 1) & 2, vid & 2);\n"
+        @"    VOut o; o.uv = uv;\n"
+        @"    o.pos = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);\n"
+        @"    return o;\n"
+        @"}\n"
+        @"fragment float4 idd_fmain(VOut in [[stage_in]],\n"
+        @"        texture2d<float> tex [[texture(0)]], sampler smp [[sampler(0)]]) {\n"
+        @"    return tex.sample(smp, in.uv);\n"
+        @"}\n";
+    NSError *err = nil;
+    id<MTLLibrary> lib = [_mtlDev newLibraryWithSource:src options:nil error:&err];
+    if (!lib) { NSLog(@"IDD Metal: library compile failed: %@", err); return; }
+    MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
+    pd.vertexFunction   = [lib newFunctionWithName:@"idd_vmain"];
+    pd.fragmentFunction = [lib newFunctionWithName:@"idd_fmain"];
+    pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    _mtlPS = [_mtlDev newRenderPipelineStateWithDescriptor:pd error:&err];
+    if (!_mtlPS) { NSLog(@"IDD Metal: pipeline failed: %@", err); return; }
+
+    MTLSamplerDescriptor *sd = [[MTLSamplerDescriptor alloc] init];
+    sd.minFilter    = MTLSamplerMinMagFilterLinear;   /* bilinear, like the D3D11 sampler */
+    sd.magFilter    = MTLSamplerMinMagFilterLinear;
+    sd.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    _mtlSamp = [_mtlDev newSamplerStateWithDescriptor:sd];
+    _mtlSem  = dispatch_semaphore_create(IDD_SURF_COUNT);
+
+    _metalLayer = (CAMetalLayer *)_view.layer;
+    _metalLayer.device          = _mtlDev;
+    _metalLayer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+    _metalLayer.framebufferOnly = YES;
+    _metalLayer.contentsScale   = self.window.backingScaleFactor ?: 1.0;
+}
+
+/* (Re)allocate the IOSurface pool + matching textures when the guest geometry changes. Each MTLTexture is
+   created OVER its IOSurface, so the GPU samples the surface bytes directly (zero-copy upload). */
+- (void)recreateSurfacesW:(uint32_t)w h:(uint32_t)h {
+    for (int i = 0; i < IDD_SURF_COUNT; i++) {
+        _surfTex[i] = nil;
+        if (_surf[i]) { CFRelease(_surf[i]); _surf[i] = NULL; }
+    }
+    NSDictionary *props = @{ (id)kIOSurfaceWidth:           @(w),
+                             (id)kIOSurfaceHeight:          @(h),
+                             (id)kIOSurfaceBytesPerElement: @4,
+                             (id)kIOSurfacePixelFormat:     @((uint32_t)(('B'<<24)|('G'<<16)|('R'<<8)|'A')) };
+    for (int i = 0; i < IDD_SURF_COUNT; i++) {
+        _surf[i] = IOSurfaceCreate((CFDictionaryRef)props);
+        if (!_surf[i]) { _surfW = _surfH = 0; return; }
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                     width:w height:h mipmapped:NO];
+        td.usage       = MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModeShared;   /* IOSurface is CPU+GPU shared memory (unified on Apple Silicon) */
+        _surfTex[i] = [_mtlDev newTextureWithDescriptor:td iosurface:_surf[i] plane:0];
+    }
+    _surfW = w; _surfH = h; _frontValid = NO; _frontIdx = 0;
 }
 
 - (void)showDisplay {
@@ -372,10 +507,14 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
     self.userClosed = NO;
     if (!_threadsStarted) {
         _threadsStarted = YES;
-        self.timer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 60.0) repeats:YES block:^(NSTimer *t) {
+        self.timer = [NSTimer timerWithTimeInterval:(1.0 / 60.0) repeats:YES block:^(NSTimer *t) {
             (void)t;
             [self renderTick];
         }];
+        /* Common modes so renderTick keeps firing DURING a live window resize (event-tracking run-loop
+           mode), not just the default mode — otherwise the frame freezes and CA stretches the last
+           drawable to the new bounds while you drag the edge, snapping back only when the drag ends. */
+        [[NSRunLoop currentRunLoop] addTimer:self.timer forMode:NSRunLoopCommonModes];
         pthread_create(&_displayThread, NULL, idd_display_thread, (__bridge void *)self);
         pthread_create(&_inputThread,   NULL, idd_input_thread,   (__bridge void *)self);
         /* ch4 audio + ch5/ch6 clipboard reader threads — same lifecycle as display/input: connect in
@@ -391,26 +530,97 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
 - (void)renderTick {
     [self flushMove];
     [self.view updateGuestCursor];
-    if (_fbSeq != _renderSeq && _fb) {
+    [self renderMetal];
+}
+
+#pragma mark - GPU render (Metal, main thread)
+
+/* Upload a new frame into the next pool surface (ONE copy — the Map+memcpy floor), or just re-encode on
+   resize, then draw the letterboxed quad sampling the IOSurface in place. Mirrors d3d_render_frame. */
+- (void)renderMetal {
+    if (!_mtlPS || !_metalLayer) return;
+    /* While the user is live-resizing the window, present synchronously inside the CA transaction (see the
+       present branch below) so the new drawable and the layer's new bounds change atomically — no stale
+       stretched/skewed frame. Outside resize we keep the cheap async present (no main-thread GPU wait). */
+    BOOL liveResize = self.view.inLiveResize;
+    if (_metalLayer.presentsWithTransaction != liveResize) _metalLayer.presentsWithTransaction = liveResize;
+    CGFloat sc = _metalLayer.contentsScale ?: 1.0;
+    CGSize want = CGSizeMake(self.view.bounds.size.width * sc, self.view.bounds.size.height * sc);
+    if (want.width < 1 || want.height < 1) return;
+    BOOL resized = !CGSizeEqualToSize(_drawableSize, want);
+    if (resized) { _metalLayer.drawableSize = want; _drawableSize = want; }
+
+    BOOL newFrame = (_fbSeq != _renderSeq) && _fb && _fbW && _fbH;
+    if (!newFrame && !resized) return;             /* nothing changed -> no GPU work (idle = 0 draws) */
+
+    int i;
+    if (newFrame) {
+        if (_surfW != _fbW || _surfH != _fbH) [self recreateSurfacesW:_fbW h:_fbH];
+        if (!_surf[0]) { _renderSeq = _fbSeq; return; }
+        i = _frontValid ? (_frontIdx + 1) % IDD_SURF_COUNT : 0;
+    } else {
+        if (!_frontValid) return;                  /* resize before any frame -> nothing to show yet */
+        i = _frontIdx;
+    }
+
+    /* Acquire a slot BEFORE touching surface[i], so the semaphore (count == surface count) guarantees its
+       previous GPU read has finished — we never rewrite a surface the GPU is still sampling. Every draw
+       (new frame OR resize redraw) takes exactly one slot, so the rotation/slot pairing stays balanced. */
+    dispatch_semaphore_wait(_mtlSem, DISPATCH_TIME_FOREVER);
+    if (newFrame) {
+        IOSurfaceLock(_surf[i], 0, NULL);
+        uint8_t *dst = (uint8_t *)IOSurfaceGetBaseAddress(_surf[i]);
+        size_t dstStride = IOSurfaceGetBytesPerRow(_surf[i]);
         pthread_mutex_lock(&_fbLock);
-        size_t need = (size_t)_fbStride * _fbH;
-        if (need) {
-            if (!_renderFb) _renderFb = malloc(need);
-            if (_renderFb) memcpy(_renderFb, _fb, need);
-        }
+        size_t copyStride = _fbStride < dstStride ? _fbStride : dstStride;
+        for (uint32_t r = 0; r < _fbH; r++)
+            memcpy(dst + (size_t)r * dstStride, _fb + (size_t)r * _fbStride, copyStride);
         _renderSeq = _fbSeq;
         pthread_mutex_unlock(&_fbLock);
-        [self.view setNeedsDisplay:YES];
+        IOSurfaceUnlock(_surf[i], 0, NULL);
+        _frontIdx = i; _frontValid = YES;
+    }
+
+    id<CAMetalDrawable> drawable = [_metalLayer nextDrawable];
+    if (!drawable) { dispatch_semaphore_signal(_mtlSem); return; }   /* transient -> skip this frame */
+
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture     = drawable.texture;
+    rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
+    rp.colorAttachments[0].clearColor  = MTLClearColorMake(0.05, 0.05, 0.07, 1.0);   /* letterbox bars */
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLCommandBuffer> cb = [_mtlQ commandBuffer];
+    id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+
+    double dw = _drawableSize.width, dh = _drawableSize.height;
+    CGRect lb = idd_letterbox(dw, dh, _surfW, _surfH, NULL);   /* same fit math as input + Windows */
+    [enc setViewport:(MTLViewport){ lb.origin.x, lb.origin.y, lb.size.width, lb.size.height, 0.0, 1.0 }];
+    NSUInteger sx = (NSUInteger)floor(lb.origin.x), sy = (NSUInteger)floor(lb.origin.y);
+    NSUInteger sw = (NSUInteger)floor(lb.size.width), sh = (NSUInteger)floor(lb.size.height);
+    if (sx + sw > (NSUInteger)dw) sw = (NSUInteger)dw - sx;
+    if (sy + sh > (NSUInteger)dh) sh = (NSUInteger)dh - sy;
+    if (sw && sh) [enc setScissorRect:(MTLScissorRect){ sx, sy, sw, sh }];   /* clip to the frame rect */
+
+    [enc setRenderPipelineState:_mtlPS];
+    [enc setFragmentTexture:_surfTex[i] atIndex:0];
+    [enc setFragmentSamplerState:_mtlSamp atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];   /* fullscreen triangle */
+    [enc endEncoding];
+    dispatch_semaphore_t sem = _mtlSem;
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull cmd) { (void)cmd; dispatch_semaphore_signal(sem); }];
+    if (liveResize) {
+        /* presentsWithTransaction path: commit, wait until the GPU has SCHEDULED the work (cheap — not
+           full completion), then present the drawable so it lands in the SAME CA transaction as the
+           window's bounds change. This is what keeps the frame from stretching mid-drag. */
+        [cb commit];
+        [cb waitUntilScheduled];
+        [drawable present];
+    } else {
+        [cb presentDrawable:drawable];
+        [cb commit];
     }
 }
 
-#pragma mark - Render-buffer access (main thread / drawRect)
-
-- (BOOL)copyRenderInfoW:(uint32_t *)w h:(uint32_t *)h stride:(uint32_t *)stride buf:(uint8_t **)buf {
-    if (!_renderFb || _fbW == 0 || _fbH == 0) return NO;
-    *w = _fbW; *h = _fbH; *stride = _fbStride; *buf = _renderFb;
-    return YES;
-}
 - (uint32_t)frameWidth  { return _fbW; }
 - (uint32_t)frameHeight { return _fbH; }
 
@@ -437,20 +647,20 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
 
 - (void)sendInput:(uint32_t)type p1:(uint32_t)p1 p2:(uint32_t)p2 p3:(uint32_t)p3 {
     InputPacket pkt = { INPUT_MAGIC, type, p1, p2, p3 };
-    pthread_mutex_lock(&_inputLock);
-    int fd = _inputFd;
-    if (fd >= 0) {
-        /* Blocking write of one whole packet. The pump's recv() drains it; if the guest end is gone
-           the write fails and the input thread reconnects. Drop on failure to keep framing. */
-        const uint8_t *p = (const uint8_t *)&pkt;
-        size_t off = 0, len = sizeof(pkt);
-        while (off < len) {
-            ssize_t wn = send(fd, p + off, len - off, 0);
-            if (wn <= 0) { _inputFd = -1; break; }   /* let the input thread reconnect */
-            off += (size_t)wn;
-        }
-    }
-    pthread_mutex_unlock(&_inputLock);
+    /* ENQUEUE ONLY — the AppKit main thread does ZERO ch3 socket I/O. The input worker thread
+       (inputLoop) drains this ring and does the actual blocking send + owns reconnect. This is the
+       fix for the window-wedge: any guest input-helper/agent/VDD restart (or desktop/session switch)
+       can stall ch3, but that backpressure now only ever stalls the worker thread — never the UI or
+       the HTTP API served on the main run loop. A non-blocking send on the main thread (MSG_DONTWAIT)
+       was NOT enough: the main thread stayed coupled to ch3's live state and still pinned in __sendto.
+       Bounded ring, drop-OLDEST when full (input is droppable; the latest position wins). */
+    pthread_mutex_lock(&_inqLock);
+    uint32_t next = (_inqTail + 1) % IDD_INQ_CAP;
+    if (next == _inqHead) _inqHead = (_inqHead + 1) % IDD_INQ_CAP;   /* full -> drop oldest */
+    _inq[_inqTail] = pkt;
+    _inqTail = next;
+    pthread_cond_signal(&_inqCond);
+    pthread_mutex_unlock(&_inqLock);
 }
 
 - (void)recordMoveX:(uint32_t)x y:(uint32_t)y { _moveX = x; _moveY = y; _hasMove = 1; }
@@ -535,16 +745,21 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
             }
 
             if (fh.dirty_rect_count == 0) {
-                /* Full frame: data_size then height*stride bytes straight into _fb. */
+                /* Full frame: data_size then height*stride bytes. Read into scratch FIRST (unlocked)
+                   so a multi-MB blocking recv never holds _fbLock — renderTick (main thread) also
+                   takes _fbLock, so holding it across the recv stalled the whole UI for the transfer
+                   (M1). Mirrors the Windows recv-into-recv_buf-before-frame_cs path and the dirty-rect
+                   path below. */
                 uint32_t data_size = 0;
                 if (!idd_rd_full(fd, &data_size, 4)) break;
                 uint32_t want = _fbStride * _fbH;
                 if (data_size != want) break;
+                if (data_size > scratchSz) { free(scratch); scratch = malloc(data_size); scratchSz = data_size; if (!scratch) break; }
+                if (!idd_rd_full(fd, scratch, (int)data_size)) break;
                 pthread_mutex_lock(&_fbLock);
-                BOOL ok = idd_rd_full(fd, _fb, (int)data_size);
-                if (ok) _fbSeq++;
+                memcpy(_fb, scratch, data_size);
+                _fbSeq++;
                 pthread_mutex_unlock(&_fbLock);
-                if (!ok) break;
             } else {
                 /* Dirty rects: rects[], data_size, then per-rect packed rows. */
                 if (fh.dirty_rect_count > VDD_MAX_DIRTY) break;
@@ -584,25 +799,82 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
     free(scratch);
 }
 
-/* Keep a ch3 INPUT connection alive: connect, publish the fd for -sendInput:, and wait until it
-   drops (the main thread nils _inputFd on a failed write, or the guest closes its accept). We never
-   read from the input fd (one-way host->guest), so we poll our own published fd to detect teardown. */
+/* Own the ch3 INPUT connection end-to-end on this worker thread: connect, publish the fd (so teardown
+   can shutdown() it), then loop draining the main thread's _inq and BLOCKING-sending each InputPacket,
+   plus detecting guest-side teardown. Blocking I/O is safe HERE (off the UI thread): ch3 backpressure
+   or a dead slot stalls only this thread, and we recover by reconnecting. The main thread only ever
+   touches _inq, so it can never wedge. Mirrors the proven Windows model (recv thread owns the input
+   socket + its reconnect) — just with the send moved off the UI thread via the queue. */
 - (void)inputLoop {
     while (!_stop) {
         int fd = [_transport connectChannel:ASB_CH_INPUT timeoutMs:2000];
         if (fd < 0) { if (_stop) break; usleep(200000); continue; }
+        /* EPIPE not SIGPIPE: when the transport pump tears this slot down on guest-acceptor death it
+           closes our socketpair peer, so a send here must fail with EPIPE (-> reconnect), never signal. */
+        { int one = 1; setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one)); }
+        /* Genuinely non-blocking, mirroring Windows' ioctlsocket(FIONBIO) on the input socket
+           (vm_display_idd.c:1560): macOS does not reliably honor MSG_DONTWAIT on AF_UNIX SOCK_STREAM, so
+           without O_NONBLOCK the worker can still briefly block in __sendto on a full ring. With it, send
+           returns EAGAIN instantly (-> drop) and only a real error/EOF triggers reconnect. */
+        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
         pthread_mutex_lock(&_inputLock);
         _inputFd = fd;
         pthread_mutex_unlock(&_inputLock);
 
-        /* Wait until -sendInput: clears _inputFd (write failed) or close is requested. */
-        while (!_stop) {
-            pthread_mutex_lock(&_inputLock);
-            int cur = _inputFd;
-            pthread_mutex_unlock(&_inputLock);
-            if (cur != fd) break;
-            usleep(50000);
+        BOOL dead = NO;
+        while (!_stop && !dead) {
+            /* 1) Wait briefly for queued input, then drain it into a local batch. The cond wait wakes
+               immediately when -sendInput: enqueues, or after 50 ms so we still periodically poll the
+               fd for EOF (a guest input-helper respawn while input is idle). */
+            InputPacket batch[IDD_INQ_CAP];
+            int nbatch = 0;
+            pthread_mutex_lock(&_inqLock);
+            if (_inqHead == _inqTail && !_stop) {
+                struct timespec ts;
+                clock_gettime(CLOCK_REALTIME, &ts);
+                ts.tv_nsec += 50 * 1000 * 1000;
+                if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+                pthread_cond_timedwait(&_inqCond, &_inqLock, &ts);
+            }
+            while (_inqHead != _inqTail && nbatch < IDD_INQ_CAP) {
+                batch[nbatch++] = _inq[_inqHead];
+                _inqHead = (_inqHead + 1) % IDD_INQ_CAP;
+            }
+            pthread_mutex_unlock(&_inqLock);
+
+            /* 2) Send the batch NON-BLOCKING — mirrors the proven Windows send_input
+               (vm_display_idd.c:504). EAGAIN/EWOULDBLOCK = ch3 send buffer momentarily full -> DROP the
+               packet, keep the connection (input is droppable; never block this worker waiting on the
+               guest). Any OTHER error, or a partial write (which would misalign the guest's fixed 20-byte
+               reads), means the channel is dead -> reconnect + resync on a fresh accept. The dead signal
+               arrives because the transport pump tears the slot down + closes our fd when the guest
+               acceptor stops draining (force-killed helper) — the ivshmem analog of an hvsocket RST — so
+               this send then fails (EPIPE) exactly like Windows. A guest that is merely slow keeps
+               draining, so EAGAIN-drop just sheds a few stale input events without dropping the link. */
+            for (int i = 0; i < nbatch && !_stop; i++) {
+                ssize_t wn = send(fd, &batch[i], sizeof(InputPacket), MSG_DONTWAIT);
+                if (wn == (ssize_t)sizeof(InputPacket)) continue;            /* delivered */
+                if (wn < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;  /* full -> drop */
+                dead = YES; break;                                          /* error/partial -> reconnect */
+            }
+            if (dead || _stop) break;
+
+            /* 3) Detect a guest-side teardown even while idle: ch3 is host->guest, but the guest's
+               socketpair end is closed by the pump on disconnect/respawn (asb_ivshmem_pump_main done:),
+               and the input helper sends a one-time READY magic. Poll readable (0 timeout, non-blocking);
+               recv==0 is EOF -> reconnect; recv>0 is the incidental READY byte(s) -> discard and keep
+               serving. So input survives a guest restart even with nothing being typed. */
+            fd_set rfds; FD_ZERO(&rfds); FD_SET(fd, &rfds);
+            struct timeval tv = { .tv_sec = 0, .tv_usec = 0 };
+            int s = select(fd + 1, &rfds, NULL, NULL, &tv);
+            if (s < 0) break;                          /* select error -> reconnect */
+            if (s > 0 && FD_ISSET(fd, &rfds)) {
+                char drain[64];
+                ssize_t rd = recv(fd, drain, sizeof(drain), 0);
+                if (rd <= 0) break;   /* 0 = guest closed ch3 (respawn/disconnect) -> reconnect */
+            }
         }
+
         pthread_mutex_lock(&_inputLock);
         if (_inputFd == fd) _inputFd = -1;
         pthread_mutex_unlock(&_inputLock);
@@ -926,7 +1198,16 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
 /* Receive a CF_HDROP file set off ch6 into a temp dir and append the top-level NSURLs to `urls`. */
 - (BOOL)clipRecvFiles:(int)fd urls:(NSMutableArray *)urls {
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:
+    /* Stage the received files where the PASTING user can read them. When the daemon runs as root (for
+       vmnet networking), NSTemporaryDirectory() is root's PRIVATE /var/folders/.../T (mode 700): the file
+       transfers fine but the file URL we put on the pasteboard is then unreadable by the logged-in user,
+       so paste yields nothing (text works only because it's inline pasteboard bytes, not a file ref). So
+       when root, stage under world-traversable /tmp and hand the tree to the console user; otherwise keep
+       the per-user temp (already user-owned). */
+    uid_t cuid = 0; gid_t cgid = 0;
+    BOOL chownToUser = (geteuid() == 0) && idd_console_user(&cuid, &cgid);
+    NSString *base = chownToUser ? @"/tmp" : NSTemporaryDirectory();
+    NSString *root = [base stringByAppendingPathComponent:
                       [NSString stringWithFormat:@"asbclip-%u", arc4random()]];
     [fm createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil];
     NSMutableArray *tops = [NSMutableArray array];
@@ -964,6 +1245,14 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
             if (f) fclose(f);
         }
     }
+    /* Hand the received tree to the console user so the pasteboard file URL is readable on paste, and
+       lock it to that user (0700) so other local users can't read clipboard contents from /tmp. */
+    if (chownToUser) {
+        chown(root.fileSystemRepresentation, cuid, cgid);
+        chmod(root.fileSystemRepresentation, 0700);
+        for (NSString *sub in [fm enumeratorAtPath:root])
+            chown([root stringByAppendingPathComponent:sub].fileSystemRepresentation, cuid, cgid);
+    }
     for (NSString *t in tops) [urls addObject:[NSURL fileURLWithPath:[root stringByAppendingPathComponent:t]]];
     return YES;
 }
@@ -982,6 +1271,11 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
     _stop = 1;
     [self.timer invalidate];
     self.timer = nil;
+    /* Wake the input worker if it's parked in pthread_cond_timedwait so it sees _stop at once
+       (the shutdown() below also unblocks it if it's mid-send). */
+    pthread_mutex_lock(&_inqLock);
+    pthread_cond_broadcast(&_inqCond);
+    pthread_mutex_unlock(&_inqLock);
     /* Drop both fds so the threads' blocking calls return: the input thread's published fd, and the
        display thread's published ch2 fd (it's blocked in idd_rd_full -> recv; shutdown() forces EOF).
        Without the display shutdown the join below hangs until the VDD next sends a frame. */
@@ -1013,14 +1307,19 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
 
 - (void)dealloc {
     [self teardown];
+    for (int i = 0; i < IDD_SURF_COUNT; i++) {
+        _surfTex[i] = nil;
+        if (_surf[i]) { CFRelease(_surf[i]); _surf[i] = NULL; }
+    }
     free(_fb);
-    free(_renderFb);
     free(_curBlob);
     free(_pcm);
     pthread_mutex_destroy(&_fbLock);
     pthread_mutex_destroy(&_curLock);
     pthread_mutex_destroy(&_inputLock);
     pthread_mutex_destroy(&_pcmLock);
+    pthread_mutex_destroy(&_inqLock);
+    pthread_cond_destroy(&_inqCond);
 }
 
 @end
@@ -1142,6 +1441,25 @@ int idd_rd_full(int fd, void *buf, int len)
     return 1;
 }
 
+/* Aspect-preserving fit (letterbox/pillarbox) of a frameW x frameH frame inside a viewW x viewH view:
+   scale = min(viewW/frameW, viewH/frameH), centered. Direct port of compute_letterbox in
+   src/backend_win/vm_display_idd.c so the Mac SCALES (never stretches) exactly like Windows. Returns the
+   destination rect in the view's (y-up) coordinate space; *outScale (optional) receives the uniform
+   scale. -drawRect: and -recordMove: BOTH call this, so render and input can never disagree — the same
+   coupling Windows gets by sharing compute_letterbox between d3d_render_frame and window_to_vm_coords. */
+static CGRect idd_letterbox(double viewW, double viewH, double frameW, double frameH, double *outScale)
+{
+    if (viewW <= 0 || viewH <= 0 || frameW <= 0 || frameH <= 0) {
+        if (outScale) *outScale = 1.0;
+        return CGRectZero;
+    }
+    double sx = viewW / frameW, sy = viewH / frameH;
+    double s = sx < sy ? sx : sy;            /* smaller axis wins -> fit inside, not fill */
+    double w = frameW * s, h = frameH * s;
+    if (outScale) *outScale = s;
+    return CGRectMake((viewW - w) * 0.5, (viewH - h) * 0.5, w, h);   /* centered */
+}
+
 /* ================================================================================
  * IddDisplayView -- the frame + input NSView.
  * ================================================================================ */
@@ -1150,6 +1468,45 @@ int idd_rd_full(int fd, void *buf, int len)
 - (BOOL)isOpaque { return YES; }
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)acceptsFirstMouse:(NSEvent *)e { (void)e; return YES; }
+
+/* The frame is rendered by Metal into this view's CAMetalLayer backing layer (see IddDisplayWindow's
+   renderMetal); there is no CPU drawRect for the frame. */
+- (instancetype)initWithFrame:(NSRect)f
+{
+    self = [super initWithFrame:f];
+    if (self) {
+        self.wantsLayer = YES;
+        self.layerContentsRedrawPolicy = NSViewLayerContentsRedrawNever;   /* we drive the layer ourselves */
+    }
+    return self;
+}
+- (CALayer *)makeBackingLayer
+{
+    CAMetalLayer *l = [CAMetalLayer layer];
+    l.opaque = YES;
+    return l;
+}
+/* Keep the Metal layer's contentsScale in step with the display (retina) so drawableSize == physical px. */
+- (void)viewDidChangeBackingProperties
+{
+    [super viewDidChangeBackingProperties];
+    CGFloat s = self.window.backingScaleFactor;
+    if (s > 0) self.layer.contentsScale = s;
+}
+/* Redraw synchronously on every resize step (incl. live resize) so the frame tracks the window size
+   instead of CA stretching the last drawable until the drag ends — matching how Windows repaints inside
+   its resize loop. renderMetal sees the new bounds, resizes the drawable, and (during live resize)
+   presents in-transaction. */
+- (void)setFrameSize:(NSSize)newSize
+{
+    [super setFrameSize:newSize];
+    [self.owner renderMetal];
+}
+- (void)viewDidEndLiveResize
+{
+    [super viewDidEndLiveResize];
+    [self.owner renderMetal];   /* final crisp frame at the settled size */
+}
 
 - (void)updateTrackingAreas
 {
@@ -1167,8 +1524,9 @@ int idd_rd_full(int fd, void *buf, int len)
 {
     IddDisplayWindow *o = self.owner;
     if (!o) return;
-    uint32_t fbW = [o frameWidth];
-    double scale = (fbW ? self.bounds.size.width / (double)fbW : 1.0);
+    uint32_t fbW = [o frameWidth], fbH = [o frameHeight];
+    double scale = 1.0;
+    if (fbW && fbH) idd_letterbox(self.bounds.size.width, self.bounds.size.height, fbW, fbH, &scale);
     NSCursor *nc = [o currentCursorForScale:scale];
     if (nc) [self.window invalidateCursorRectsForView:self];
 }
@@ -1178,31 +1536,8 @@ int idd_rd_full(int fd, void *buf, int len)
     if (c) [self addCursorRect:self.bounds cursor:c];
 }
 
-- (void)drawRect:(NSRect)dirtyRect
-{
-    (void)dirtyRect;
-    CGContextRef ctx = [[NSGraphicsContext currentContext] CGContext];
-    CGRect b = NSRectToCGRect(self.bounds);
-    CGContextSetRGBFillColor(ctx, 0.05, 0.05, 0.07, 1.0);
-    CGContextFillRect(ctx, b);
-    /* Render from the controller's render buffer — the main-thread copy the timer takes when a new
-       frame arrives, so we never race the ch2 reader mid-frame. */
-    uint32_t w = 0, h = 0, stride = 0; uint8_t *buf = NULL;
-    if (![self.owner copyRenderInfoW:&w h:&h stride:&stride buf:&buf]) return;
-
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGDataProviderRef dp = CGDataProviderCreateWithData(NULL, buf, (size_t)stride * h, NULL);
-    CGImageRef img = CGImageCreate(w, h, 8, 32, stride, cs,
-        kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little,
-        dp, NULL, false, kCGRenderingIntentDefault);
-    CGContextSetInterpolationQuality(ctx, kCGInterpolationLow);
-    CGContextDrawImage(ctx, b, img);
-    CGImageRelease(img);
-    CGDataProviderRelease(dp);
-    CGColorSpaceRelease(cs);
-    /* The HW cursor is NOT drawn into the frame — it's applied as the macOS cursor (NSCursor) via
-       updateGuestCursor, so the OS renders it at the real pointer position with the correct hotspot. */
-}
+/* No -drawRect: the frame is drawn by Metal into the CAMetalLayer (renderMetal). The HW cursor is applied
+   as the macOS NSCursor via updateGuestCursor, so the OS renders it at the real pointer position. */
 
 /* ---- mouse ---- */
 - (void)recordMove:(NSEvent *)e
@@ -1212,12 +1547,17 @@ int idd_rd_full(int fd, void *buf, int len)
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
     NSRect b = self.bounds;
     if (b.size.width < 1 || b.size.height < 1) return;
-    double nx = p.x / b.size.width;
-    double ny = (b.size.height - p.y) / b.size.height;   /* flip y: window is y-up, guest top-down */
-    if (nx < 0) nx = 0; if (nx > 1) nx = 1;
-    if (ny < 0) ny = 0; if (ny > 1) ny = 1;
     uint32_t gw = [o frameWidth]  ? [o frameWidth]  : 1920;
     uint32_t gh = [o frameHeight] ? [o frameHeight] : 1080;
+    /* Invert the SAME letterbox the renderer uses (mirrors window_to_vm_coords): map the click into the
+       letterboxed rect, not the whole view, so the cursor lands on the correct VM pixel and a click in a
+       bar clamps to the frame edge (Windows behavior). */
+    CGRect lb = idd_letterbox(b.size.width, b.size.height, gw, gh, NULL);
+    if (lb.size.width < 1 || lb.size.height < 1) return;
+    double nx = (p.x - lb.origin.x) / lb.size.width;
+    double ny = (lb.origin.y + lb.size.height - p.y) / lb.size.height;   /* y-up view -> top-down guest */
+    if (nx < 0) nx = 0; if (nx > 1) nx = 1;
+    if (ny < 0) ny = 0; if (ny > 1) ny = 1;
     [o recordMoveX:(uint32_t)(nx * (gw - 1)) y:(uint32_t)(ny * (gh - 1))];
 }
 - (void)mouseMoved:(NSEvent *)e        { [self recordMove:e]; }

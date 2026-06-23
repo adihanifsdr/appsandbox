@@ -1397,7 +1397,7 @@ static int cmd_publish_shm(int argc, char **argv) {
  *    5. unmount the ISO + remove the temp dir
  *
  *  The SetupComplete.cmd differs from the Windows one in one way: it also installs
- *  the asb_ivshmem PCI driver (pnputil), since the Mac transport is ivshmem rather
+ *  the AppSandboxSHM PCI driver (pnputil), since the Mac transport is ivshmem rather
  *  than AF_HYPERV. testMode (Secure Boot off + test signing on) is mandatory: the
  *  guest drivers are test-signed. ======================================================================== */
 
@@ -1408,43 +1408,27 @@ static int bw_manifest_add(FILE *mf, NSString *src, const char *dest) {
     return 1;
 }
 
-/* ---- ISO mount lifecycle (read-only) ---- */
-typedef struct { NSString *diskDev; NSString *mountPt; } IsoMount;
+/* ---- ISO mount lifecycle ---- */
+typedef struct { NSString *diskDev; NSString *mountPt; NSString *shadowPath; } IsoMount;
 
-/* If this ISO is already attached — a Finder double-click auto-mounts a Windows ISO, or a prior build
- * died before detaching — a fresh `hdiutil attach` fails with "Resource busy". Detach any existing
- * attachment of this exact image first so the mount below is clean. */
-static void bw_detach_existing_iso(NSString *isoPath) {
-    NSString *want = [isoPath stringByStandardizingPath];
-    NSString *sout = nil;
-    if (run_tool(@"/usr/bin/hdiutil", @[@"info", @"-plist"], &sout, NULL) != 0 || !sout.length) return;
-    NSData *d = [sout dataUsingEncoding:NSUTF8StringEncoding];
-    id parsed = [NSPropertyListSerialization propertyListWithData:d options:0 format:NULL error:NULL];
-    NSArray *imgs = [parsed isKindOfClass:[NSDictionary class]] ? parsed[@"images"] : nil;
-    for (NSDictionary *img in imgs) {
-        NSString *ip = img[@"image-path"];
-        if (![ip isKindOfClass:[NSString class]]) continue;
-        if (![[ip stringByStandardizingPath] isEqualToString:want] && ![ip isEqualToString:isoPath]) continue;
-        /* Detach the whole-image dev node (the first system-entity, no s<N> partition suffix). */
-        NSString *dev = nil;
-        for (NSDictionary *e in img[@"system-entities"]) {
-            NSString *de = e[@"dev-entry"];
-            if (de) { dev = de; break; }
-        }
-        if (dev) (void)run_tool(@"/usr/bin/hdiutil", @[@"detach", @"-force", dev], NULL, NULL);
-    }
-}
-
-/* Attach the ISO read-only and locate the mount point that actually contains
- * sources/install.wim (a Windows ISO exposes both ISO9660 and UDF volumes). */
+/* Attach the ISO and locate the mount point that actually contains sources/install.wim (a Windows ISO
+ * exposes both ISO9660 and UDF volumes).
+ *
+ * CONCURRENCY: each build attaches with its OWN unique copy-on-write SHADOW file, which gives it an
+ * INDEPENDENT device + mount point. hdiutil de-duplicates a plain re-attach of the same image to one
+ * shared device, so without the shadow two concurrent builds would share a device and detaching one
+ * would tear the ISO out from under the other. The shadow stays ~empty (we only READ install.wim) and
+ * is deleted on unmount. */
 static BOOL bw_mount_iso(NSString *isoPath, IsoMount *out, NSString **errOut) {
-    out->diskDev = nil; out->mountPt = nil;
-    bw_detach_existing_iso(isoPath);   /* clear a stale/Finder attachment so attach won't be "Resource busy" */
+    out->diskDev = nil; out->mountPt = nil; out->shadowPath = nil;
+    NSString *shadow = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                        [NSString stringWithFormat:@"asb-iso-%08x.shadow", arc4random()]];
     NSString *sout = nil, *serr = nil;
     int rc = run_tool(@"/usr/bin/hdiutil",
-                      @[@"attach", @"-readonly", @"-nobrowse", @"-plist", isoPath],
+                      @[@"attach", @"-nobrowse", @"-shadow", shadow, @"-plist", isoPath],
                       &sout, &serr);
     if (rc != 0) { if (errOut) *errOut = [NSString stringWithFormat:@"hdiutil attach failed (%d): %@", rc, serr]; return NO; }
+    out->shadowPath = shadow;
 
     NSData *d = [sout dataUsingEncoding:NSUTF8StringEncoding];
     id parsed = [NSPropertyListSerialization propertyListWithData:d options:0 format:NULL error:NULL];
@@ -1467,6 +1451,7 @@ static BOOL bw_mount_iso(NSString *isoPath, IsoMount *out, NSString **errOut) {
     if (!out->mountPt) {
         /* No install.wim found at any mount point; detach + fail. */
         if (out->diskDev) (void)run_tool(@"/usr/bin/hdiutil", @[@"detach", @"-force", out->diskDev], NULL, NULL);
+        [[NSFileManager defaultManager] removeItemAtPath:shadow error:nil];
         if (errOut) *errOut = @"ISO mounted but sources/install.wim not found";
         return NO;
     }
@@ -1475,7 +1460,8 @@ static BOOL bw_mount_iso(NSString *isoPath, IsoMount *out, NSString **errOut) {
 
 static void bw_unmount_iso(IsoMount *m) {
     if (m->diskDev) (void)run_tool(@"/usr/bin/hdiutil", @[@"detach", @"-force", m->diskDev], NULL, NULL);
-    m->diskDev = nil; m->mountPt = nil;
+    if (m->shadowPath) [[NSFileManager defaultManager] removeItemAtPath:m->shadowPath error:nil];   /* COW shadow */
+    m->diskDev = nil; m->mountPt = nil; m->shadowPath = nil;
 }
 
 /* win_disk_build progress -> PROGRESS/STATUS lines. */
@@ -1564,9 +1550,9 @@ static int cmd_build_windows(int argc, char **argv) {
         n += bw_manifest_add(mf, src, [NSString stringWithFormat:@"\\Windows\\AppSandbox\\%s", bins[i]].UTF8String);
     }
     /* test-signed drivers (VDD + VAD + ivshmem) + the test cert(s). Each is existence-gated. */
-    const char *drv[] = { "appsandboxvdd.inf", "AppSandboxVDD.dll", "AppSandboxVDD.cat", "AppSandboxVDD.cer",
-                          "AppSandboxVAD.inf", "appsandboxvad.sys", "AppSandboxVAD.cat", "AppSandboxVAD.cer",
-                          "asb_ivshmem.inf", "asb_ivshmem.sys", "asb_ivshmem.cat", "asb_ivshmem.cer",
+    const char *drv[] = { "AppSandboxVDD.inf", "AppSandboxVDD.dll", "AppSandboxVDD.cat", "AppSandboxVDD.cer",
+                          "AppSandboxVAD.inf", "AppSandboxVAD.sys", "AppSandboxVAD.cat", "AppSandboxVAD.cer",
+                          "AppSandboxSHM.inf", "AppSandboxSHM.sys", "AppSandboxSHM.cat", "AppSandboxSHM.cer",
                           /* NetKVM (virtio-net) -- vendored from virtio-win (BSD-3-Clause; license file
                              staged alongside). Mac payload only; never in the Windows-host manifest. */
                           "netkvm.inf", "netkvm.sys", "netkvm.cat", "netkvmp.exe", "virtio-win_license.txt" };

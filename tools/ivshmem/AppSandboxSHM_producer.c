@@ -1,20 +1,20 @@
 /*
- * asb_ivshmem_producer.c — guest user-mode producer for the ivshmem shared-memory test.
+ * AppSandboxSHM_producer.c — guest user-mode producer for the ivshmem shared-memory test.
  *
  * Opens our ivshmem driver, IOCTL-maps BAR2 into this process, and writes the SAME per-page
  * protocol that tools/shm-test/shm_host.c reads (magic + page header + payload + page0 control),
  * looping memcpy + frame_seq so the macOS host (mmap of the ivshmem backing file) can validate
  * integrity, measure host-read bandwidth, observe frame rate, and ping-pong round-trip latency.
  *
- * Build (user-mode, ARM64): vcvarsall arm64 && cl /O2 asb_ivshmem_producer.c /link setupapi.lib
- * Run: asb_ivshmem_producer.exe [seconds]
+ * Build (user-mode, ARM64): vcvarsall arm64 && cl /O2 AppSandboxSHM_producer.c /link setupapi.lib
+ * Run: AppSandboxSHM_producer.exe [seconds]
  */
 #include <windows.h>
 #include <setupapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include "asb_ivshmem.h"
+#include "AppSandboxSHM.h"
 #pragma comment(lib, "setupapi.lib")
 
 #define PAGE      4096
@@ -36,13 +36,13 @@ static uint32_t fnv32(const uint8_t *d, size_t n){
 }
 
 static BYTE *map_bar(uint64_t *outSize){
-    HDEVINFO di = SetupDiGetClassDevs(&GUID_DEVINTERFACE_ASB_IVSHMEM, NULL, NULL,
+    HDEVINFO di = SetupDiGetClassDevs(&GUID_DEVINTERFACE_APPSANDBOX_SHM, NULL, NULL,
                                       DIGCF_DEVICEINTERFACE | DIGCF_PRESENT);
     SP_DEVICE_INTERFACE_DATA ifd; SP_DEVICE_INTERFACE_DETAIL_DATA *det; DWORD need=0;
-    HANDLE h; ASB_IVSHMEM_MAP m; DWORD br=0;
+    HANDLE h; APPSANDBOX_SHM_MAP m; DWORD br=0;
     if (di == INVALID_HANDLE_VALUE){ printf("SetupDiGetClassDevs err=%lu\n", GetLastError()); return NULL; }
     ifd.cbSize = sizeof(ifd);
-    if (!SetupDiEnumDeviceInterfaces(di, NULL, &GUID_DEVINTERFACE_ASB_IVSHMEM, 0, &ifd)){
+    if (!SetupDiEnumDeviceInterfaces(di, NULL, &GUID_DEVINTERFACE_APPSANDBOX_SHM, 0, &ifd)){
         printf("EnumDeviceInterfaces err=%lu (driver bound? interface enabled?)\n", GetLastError()); return NULL; }
     SetupDiGetDeviceInterfaceDetail(di, &ifd, NULL, 0, &need, NULL);
     det = (SP_DEVICE_INTERFACE_DETAIL_DATA *)malloc(need);
@@ -53,8 +53,8 @@ static BYTE *map_bar(uint64_t *outSize){
                    NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE){ printf("CreateFile(%ws) err=%lu\n", det->DevicePath, GetLastError()); return NULL; }
     ZeroMemory(&m, sizeof(m));
-    if (!DeviceIoControl(h, IOCTL_ASB_IVSHMEM_MAP, NULL, 0, &m, sizeof(m), &br, NULL)){
-        printf("IOCTL_ASB_IVSHMEM_MAP err=%lu\n", GetLastError()); return NULL; }
+    if (!DeviceIoControl(h, IOCTL_APPSANDBOX_SHM_MAP, NULL, 0, &m, sizeof(m), &br, NULL)){
+        printf("IOCTL_APPSANDBOX_SHM_MAP err=%lu\n", GetLastError()); return NULL; }
     printf("MAPPED size=%llu userVa=0x%llx\n", (unsigned long long)m.size, (unsigned long long)m.userVa);
     *outSize = m.size;
     /* leak h on purpose: the mapping stays valid until the process exits (then the driver unmaps). */
