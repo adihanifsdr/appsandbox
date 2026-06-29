@@ -10,15 +10,63 @@
  * encoding (what CryptBinaryToStringA(BASE64|NOCRLF) produces on Windows). ---- */
 static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/* Decode one UTF-8 sequence at s (NUL-terminated); returns the Unicode code point and
+   sets *adv to the bytes consumed. Malformed -> U+FFFD, *adv=1. The continuation-byte
+   checks short-circuit on the first non-continuation byte (NUL included), so it never
+   reads past the terminator. The input is UTF-8 on both hosts (macOS passes
+   NSString.UTF8String; Windows passes WideCharToMultiByte(CP_UTF8,...)). */
+static unsigned asb_utf8_next(const unsigned char *s, int *adv) {
+    unsigned char c = s[0];
+    if (c < 0x80) { *adv = 1; return c; }
+    if ((c & 0xE0) == 0xC0 && (s[1] & 0xC0) == 0x80) {
+        *adv = 2; return ((unsigned)(c & 0x1F) << 6) | (unsigned)(s[1] & 0x3F);
+    }
+    if ((c & 0xF0) == 0xE0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80) {
+        *adv = 3; return ((unsigned)(c & 0x0F) << 12) | ((unsigned)(s[1] & 0x3F) << 6) | (unsigned)(s[2] & 0x3F);
+    }
+    if ((c & 0xF8) == 0xF0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) {
+        *adv = 4; return ((unsigned)(c & 0x07) << 18) | ((unsigned)(s[1] & 0x3F) << 12)
+                       | ((unsigned)(s[2] & 0x3F) << 6) | (unsigned)(s[3] & 0x3F);
+    }
+    *adv = 1; return 0xFFFD;
+}
+
+/* ASCII case-insensitive compare (BCP-47 language tags are ASCII); mirrors the Windows
+   backend's _wcsicmp lookup so e.g. "de-de" and "de-DE" resolve to the same layout. */
+static int asb_ascii_ieq(const char *a, const char *b) {
+    for (;; a++, b++) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca + 32);
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb + 32);
+        if (ca != cb) return 0;
+        if (!ca) return 1;
+    }
+}
+
 static void password_b64(const char *pass, char *out, size_t out_sz) {
-    /* build UTF-16LE bytes of (pass + "Password") */
+    /* Build the UTF-16LE bytes of (pass + "Password"), decoding the UTF-8 input properly
+       (each code point -> its real UTF-16 unit(s); astral -> surrogate pair) so non-ASCII
+       passwords match Windows' native UTF-16 password encoding. */
     unsigned char buf[1024];
     size_t n = 0;
     const char *parts[2] = { pass, "Password" };
     for (int p = 0; p < 2; p++) {
-        for (const char *s = parts[p]; *s && n + 2 < sizeof buf; s++) {
-            buf[n++] = (unsigned char)*s;   /* low byte */
-            buf[n++] = 0;                   /* high byte (ASCII) */
+        const unsigned char *s = (const unsigned char *)parts[p];
+        while (*s && n + 2 <= sizeof buf) {
+            int adv; unsigned cp = asb_utf8_next(s, &adv); s += adv;
+            if (cp <= 0xFFFF) {
+                buf[n++] = (unsigned char)(cp & 0xFF);
+                buf[n++] = (unsigned char)(cp >> 8);
+            } else {
+                unsigned v = cp - 0x10000;
+                unsigned hi = 0xD800 + (v >> 10), lo = 0xDC00 + (v & 0x3FF);
+                buf[n++] = (unsigned char)(hi & 0xFF);
+                buf[n++] = (unsigned char)(hi >> 8);
+                if (n + 2 <= sizeof buf) {
+                    buf[n++] = (unsigned char)(lo & 0xFF);
+                    buf[n++] = (unsigned char)(lo >> 8);
+                }
+            }
         }
     }
     size_t o = 0;
@@ -54,14 +102,25 @@ static const char *input_locale(const char *lang) {
         {"lt-LT","0427:00000427"},
     };
     for (size_t i = 0; i < sizeof(map)/sizeof(map[0]); i++)
-        if (strcmp(lang, map[i].tag) == 0) return map[i].klid;
+        if (asb_ascii_ieq(lang, map[i].tag)) return map[i].klid;
     return "0409:00000409";
 }
 
 int asb_provision_unattend(FILE *f, const char *vm_name, const char *user, const char *pass,
                            const char *arch, int test_mode, int is_arm64, const char *lang) {
     if (!f) return -1;
-    char comp[16]; { size_t i = 0; for (; vm_name[i] && i < 15; i++) comp[i] = vm_name[i]; comp[i] = 0; }
+    char comp[64];   /* up to 15 code points (NetBIOS), each <=4 UTF-8 bytes, + NUL */
+    {
+        const unsigned char *s = (const unsigned char *)vm_name;
+        size_t bi = 0; int cps = 0;
+        while (*s && cps < 15) {
+            int adv; (void)asb_utf8_next(s, &adv);
+            if (bi + (size_t)adv >= sizeof comp) break;
+            for (int k = 0; k < adv; k++) comp[bi++] = (char)s[k];
+            s += adv; cps++;
+        }
+        comp[bi] = 0;
+    }
     char b64[2048]; password_b64(pass ? pass : "", b64, sizeof b64);
     const char *loc = input_locale(lang ? lang : "en-US");
     if (!lang) lang = "en-US";

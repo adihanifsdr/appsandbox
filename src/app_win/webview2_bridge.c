@@ -537,7 +537,8 @@ BOOL json_get_string(const wchar_t *json, const wchar_t *key,
                      wchar_t *out, size_t out_len)
 {
     wchar_t pattern[300];
-    const wchar_t *p, *start, *end;
+    const wchar_t *p;
+    size_t o = 0;
 
     swprintf_s(pattern, 300, L"\"%s\"", key);
     p = wcsstr(json, pattern);
@@ -547,17 +548,50 @@ BOOL json_get_string(const wchar_t *json, const wchar_t *key,
     while (*p == L' ' || *p == L':' || *p == L'\t' || *p == L'\n' || *p == L'\r') p++;
     if (*p != L'"') return FALSE;
     p++;
-    start = p;
 
-    /* Find closing quote, handling escapes */
+    /* Copy the value into `out`, DECODING JSON string escapes. (A prior version copied the
+       slice verbatim, leaving \uXXXX -- what json.dumps/ensure_ascii and many HTTP clients
+       emit for non-ASCII -- and \" \\ as literal text, which corrupted e.g. non-ASCII
+       passwords on the headless path.) A \uXXXX yields one UTF-16 code unit directly; an
+       astral character arrives as two \u escapes (a surrogate pair) and both units are
+       stored, which is already valid UTF-16. */
     while (*p && *p != L'"') {
-        if (*p == L'\\' && *(p + 1)) p++;
-        p++;
+        wchar_t ch;
+        if (*p == L'\\' && *(p + 1)) {
+            p++;
+            switch (*p) {
+                case L'"':  ch = L'"';  p++; break;
+                case L'\\': ch = L'\\'; p++; break;
+                case L'/':  ch = L'/';  p++; break;
+                case L'b':  ch = L'\b'; p++; break;
+                case L'f':  ch = L'\f'; p++; break;
+                case L'n':  ch = L'\n'; p++; break;
+                case L'r':  ch = L'\r'; p++; break;
+                case L't':  ch = L'\t'; p++; break;
+                case L'u': {
+                    unsigned v = 0; int i;
+                    p++;
+                    for (i = 0; i < 4 && *p; i++) {
+                        wchar_t h = *p;
+                        if (h >= L'0' && h <= L'9') v = (v << 4) | (unsigned)(h - L'0');
+                        else if (h >= L'a' && h <= L'f') v = (v << 4) | (unsigned)(h - L'a' + 10);
+                        else if (h >= L'A' && h <= L'F') v = (v << 4) | (unsigned)(h - L'A' + 10);
+                        else break;
+                        p++;
+                    }
+                    ch = (wchar_t)v;
+                    break;
+                }
+                default: ch = *p; p++; break;   /* unknown escape: keep the char literally */
+            }
+        } else {
+            ch = *p;
+            p++;
+        }
+        if (o + 1 >= out_len) { out[o] = 0; return FALSE; }
+        out[o++] = ch;
     }
-    end = p;
-
-    if ((size_t)(end - start) >= out_len) return FALSE;
-    wcsncpy_s(out, out_len, start, end - start);
+    out[o] = 0;
     return TRUE;
 }
 

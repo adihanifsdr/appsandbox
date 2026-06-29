@@ -30,10 +30,10 @@ them, because there is **one** unified code path (no is‑mac/is‑pc fork).
 - `tools/transport/asb_shm_layout.h` — shared‑memory region layout (host + guest agree on it).
 
 **One API, two backends, chosen at runtime by `asb_transport_init()`:**
-1. **Explicit override** — `HKLM\SOFTWARE\AppSandbox\Transport` registry value or an env var (the Mac
+1. **Explicit override** — `HKLM\SOFTWARE\AppSandbox\Transport` registry value (the Mac
    disk builder sets `ivshmem`).
 2. else **positively detect ivshmem** — our driver's device interface present, via
-   `SetupDiGetClassDevs(GUID_DEVINTERFACE_ASB_IVSHMEM)`.
+   `SetupDiGetClassDevs(GUID_DEVINTERFACE_APPSANDBOX_SHM)`.
 3. else **default to AF_HYPERV** (HCS/hvsocket) — **PC behavior byte‑identical to before**.
    **NEVER positively detect "Hyper‑V".**
 
@@ -114,8 +114,8 @@ the staged scripts are **byte‑identical regardless of host**. **There is no is
   staged at `C:\Windows\AppSandbox\`).
 - `asb_provision_setupcomplete(f, ssh_msi_name)` — runs as SYSTEM before first logon. **Install order:**
   1. `bcdedit /set testsigning on`
-  2. **asb_ivshmem** — `certutil` trust `asb_ivshmem.cer` (its OWN "AppSandbox Test Cert"), then
-     `devcon install asb_ivshmem.inf "PCI\VEN_1AF4&DEV_1110&SUBSYS_11001AF4&REV_01"`
+  2. **AppSandboxSHM** — `certutil` trust `AppSandboxSHM.cer` (its OWN "AppSandbox Test Cert"), then
+     `devcon update AppSandboxSHM.inf "PCI\VEN_1AF4&DEV_1110&SUBSYS_11001AF4&REV_01"`
   3. **VDD** — `certutil` trust `AppSandboxVDD.cer` (WDKTestCert), then `devcon install ... Root\AppSandboxVDD`
   4. disable display sleep (`powercfg`)
   5. **VAD** — `devcon install AppSandboxVAD.inf Root\AppSandboxVAD` (Microsoft WHQL‑signed, no cert)
@@ -130,17 +130,17 @@ Win→Win** (no matching PCI device), so it's safe to run them unconditionally.
 
 ## 4. NEW — two guest drivers the Windows code must know about
 
-### 4a. ivshmem driver — `tools/ivshmem/asb_ivshmem.{c,h,inf,vcxproj}` (ours, no third party)
+### 4a. ivshmem driver — `tools/ivshmem/AppSandboxSHM.{c,h,inf,vcxproj}` (ours, no third party)
 - **What:** a minimal **KMDF** driver (`Class = System`) that binds QEMU's **ivshmem‑plain** PCI
-  device and maps its **BAR2** (the shared‑memory window) into a user VA via `IOCTL_ASB_IVSHMEM_MAP`.
+  device and maps its **BAR2** (the shared‑memory window) into a user VA via `IOCTL_APPSANDBOX_SHM_MAP`.
   This is the macOS transport substrate (`asb_transport`'s ivshmem backend).
 - **Hardware ID:** `PCI\VEN_1AF4&DEV_1110` (SUBSYS `11001AF4&REV_01` most‑specific first, so it
-  outranks the inbox "PCI standard RAM Controller"). **Catalog `asb_ivshmem.cat`**, signed by the
+  outranks the inbox "PCI standard RAM Controller"). **Catalog `AppSandboxSHM.cat`**, signed by the
   **separate "AppSandbox Test Cert"** (NOT the VDD's WDKTestCert — three drivers, three certs).
-- **User‑mode discovery:** `GUID_DEVINTERFACE_ASB_IVSHMEM`
+- **User‑mode discovery:** `GUID_DEVINTERFACE_APPSANDBOX_SHM`
   (`69d97ae1-ad44-4a12-88db-e5d581890ef1`) — this is what `asb_transport_init()` looks up.
 - **On Windows‑on‑Windows:** there is **no ivshmem PCI device**, so the driver never binds and the
-  `devcon install` is a no‑op; the transport falls back to AF_HYPERV. It is shipped/installed anyway
+  `devcon update` is a no‑op; the transport falls back to AF_HYPERV. It is shipped/installed anyway
   because the provisioning path is unified.
 
 ### 4b. network driver — NetKVM / virtio‑net — downloaded at VM-create (third party, NOT committed to the repo)
@@ -162,8 +162,8 @@ Win→Win** (no matching PCI device), so it's safe to run them unconditionally.
 - `tools/transport/asb_transport.{c,h}` + `asb_shm_layout.h` — **link into every guest binary**.
 - `tools/provision/win_provision.{c,h}` — **compile into the Windows app project** (and the Mac
   target). Replaces the inline script generators in `disk_util.c`.
-- `tools/ivshmem/asb_ivshmem.{c,h,inf,vcxproj}` — driver #1; build → `asb_ivshmem.{sys,inf,cat}` +
-  extract `asb_ivshmem.cer`; **sign + emit into `release/resources/drivers`**.
+- `tools/ivshmem/AppSandboxSHM.{c,h,inf,vcxproj}` — driver #1; build → `AppSandboxSHM.{sys,inf,cat}` +
+  extract `AppSandboxSHM.cer`; **sign + emit into `release/resources/drivers`**.
 - NetKVM (`netkvm.*`, `netkvmp.exe`) — **downloaded at VM-create, not committed** — driver #2; **copy into
   `release/resources/drivers`** in the package step (already WHQL‑signed).
 - The Windows release manifest (`generate_vhdx_manifest`) must stage **both** new drivers + their
@@ -178,12 +178,12 @@ Today `src/backend_win/disk_util.c` still generates its **own inline** `unattend
 `setup.cmd` / `SetupComplete.cmd` (functions `generate_unattend_vhdx`, `generate_vhdx_setup_cmd`,
 `generate_vhdx_setupcomplete`, `generate_vhdx_manifest`, `stage_agent_and_setup`) and **does not yet**:
 - delegate to `win_provision.c` (so Win→Win and Win→Mac would diverge);
-- include the **asb_ivshmem** + **NetKVM** install steps in its SetupComplete;
-- add `asb_ivshmem.{inf,sys,cat,cer}` (and `netkvm.*` + `netkvmp.exe`) to `generate_vhdx_manifest`.
+- include the **AppSandboxSHM** + **NetKVM** install steps in its SetupComplete;
+- add `AppSandboxSHM.{inf,sys,cat,cer}` (and `netkvm.*` + `netkvmp.exe`) to `generate_vhdx_manifest`.
 
 **To do:** compile `win_provision.c` into the Windows app `.vcxproj`; replace `disk_util.c`'s inline
 generators with `asb_provision_unattend` / `asb_provision_setup_cmd` / `asb_provision_setupcomplete`;
-add the ivshmem (+ netkvm) driver files to the manifest; have `tools/ivshmem/asb_ivshmem.vcxproj`
+add the ivshmem (+ netkvm) driver files to the manifest; have `tools/ivshmem/AppSandboxSHM.vcxproj`
 emit into `release/resources/drivers` and `sign-drivers.ps1` sign it. This keeps **Win→Win
 byte‑identical** and proves a release‑signed build reproduces the Mac result.
 
@@ -217,5 +217,5 @@ release must be cut** that includes them before either ship path works.
 - **Keep p9copy's PC AF_HYPERV branch** (`is_ivshmem ? asb_* : socket`).
 - **Keep the SSH relay's PC `select` branch** via `asb_conn_socket_u64()` (zero PC behavior change).
 - **Three drivers, three certs** — VDD = WDKTestCert; VAD = Microsoft WHQL (already trusted);
-  asb_ivshmem = "AppSandbox Test Cert". Each test‑signed driver needs its OWN `.cer` trusted before
+  AppSandboxSHM = "AppSandbox Test Cert". Each test‑signed driver needs its OWN `.cer` trusted before
   install or SetupComplete hangs on an untrusted publisher.
