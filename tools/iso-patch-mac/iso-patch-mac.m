@@ -1470,13 +1470,14 @@ static void bw_progress(int pct, const char *msg) {
 }
 
 static int cmd_build_windows(int argc, char **argv) {
-    NSString *iso = nil, *out = nil, *payload = nil, *devcon = nil, *sshMsi = nil;
+    NSString *iso = nil, *out = nil, *payload = nil, *devcon = nil, *sshMsi = nil, *signedZip = nil;
     NSString *vmName = @"WIN11-VM", *user = @"user", *pass = @"test123", *lang = @"en-US";
     int diskGb = 64, imageIdx = 1, testMode = 1;   /* testMode optional (mirrors Windows disk builder) */
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--iso") == 0 && i+1 < argc) iso = @(argv[++i]);
         else if (strcmp(argv[i], "--out") == 0 && i+1 < argc) out = @(argv[++i]);
         else if (strcmp(argv[i], "--payload") == 0 && i+1 < argc) payload = @(argv[++i]);
+        else if (strcmp(argv[i], "--signed-payload-zip") == 0 && i+1 < argc) signedZip = @(argv[++i]);
         else if (strcmp(argv[i], "--devcon") == 0 && i+1 < argc) devcon = @(argv[++i]);
         else if (strcmp(argv[i], "--ssh-msi") == 0 && i+1 < argc) sshMsi = @(argv[++i]);
         else if (strcmp(argv[i], "--vm-name") == 0 && i+1 < argc) vmName = @(argv[++i]);
@@ -1487,8 +1488,8 @@ static int cmd_build_windows(int argc, char **argv) {
         else if (strcmp(argv[i], "--image-index") == 0 && i+1 < argc) imageIdx = atoi(argv[++i]);
         else if (strcmp(argv[i], "--test-mode") == 0 && i+1 < argc) testMode = atoi(argv[++i]);
     }
-    if (!iso || !out || !payload) {
-        emit_error(@"build-windows: --iso, --out and --payload required");
+    if (!iso || !out || (!payload && !signedZip)) {
+        emit_error(@"build-windows: --iso, --out and one of --payload / --signed-payload-zip required");
         return 2;
     }
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -1501,6 +1502,32 @@ static int cmd_build_windows(int argc, char **argv) {
     if (![fm createDirectoryAtPath:tmp withIntermediateDirectories:YES attributes:nil error:&mkErr]) {
         emit_error([NSString stringWithFormat:@"mkdir staging: %@", mkErr.localizedDescription]); return 3;
     }
+
+    /* Choose the guest payload source. If a signed release zip was downloaded, extract the agent EXEs +
+     * drivers into this per-build temp dir and PREFER them over the bundled --payload, so the staged
+     * guest binaries are EV/attestation-signed (incl. the ivshmem AppSandboxSHM). The extraction is
+     * per-build (its own tmp), so concurrent creates never collide. Falls back to --payload on any
+     * problem. binDir holds the EXEs; drvDir holds the drivers/ files; devconPath is devcon.exe. */
+    NSString *binDir = payload;                                            /* bundled payload (fallback) */
+    NSString *drvDir = payload ? [payload stringByAppendingPathComponent:@"drivers"] : nil;
+    NSString *devconPath = devcon;                                         /* --devcon (bundle fallback) */
+    if (signedZip.length && [fm fileExistsAtPath:signedZip]) {
+        NSString *signedDir = [tmp stringByAppendingPathComponent:@"signed"];
+        int urc = run_tool(@"/usr/bin/unzip",
+                           @[@"-o", @"-q", signedZip, @"resources/appsandbox-*.exe", @"drivers/*", @"-d", signedDir],
+                           NULL, NULL);
+        NSString *sbin = [signedDir stringByAppendingPathComponent:@"resources"];
+        NSString *sdrv = [signedDir stringByAppendingPathComponent:@"drivers"];
+        if (urc == 0 && [fm fileExistsAtPath:[sbin stringByAppendingPathComponent:@"appsandbox-agent.exe"]]) {
+            binDir = sbin; drvDir = sdrv;
+            devconPath = [sdrv stringByAppendingPathComponent:@"devcon.exe"];
+            emit_log(@"using downloaded signed guest payload");
+        } else {
+            emit_log(@"signed payload extract failed; using bundled payload");
+        }
+    }
+    if (!binDir) { [fm removeItemAtPath:tmp error:nil]; emit_error(@"build-windows: no guest payload (need --payload or --signed-payload-zip)"); return 3; }
+
     emit_progress(2, @"Generating answer file + setup scripts");
     NSString *unattend = [tmp stringByAppendingPathComponent:@"unattend.xml"];
     NSString *setupCmd = [tmp stringByAppendingPathComponent:@"setup.cmd"];
@@ -1546,7 +1573,7 @@ static int cmd_build_windows(int argc, char **argv) {
                            "appsandbox-clipboard.exe", "appsandbox-clipboard-reader.exe",
                            "appsandbox-audio.exe" };
     for (size_t i = 0; i < sizeof(bins)/sizeof(bins[0]); i++) {
-        NSString *src = [payload stringByAppendingPathComponent:@(bins[i])];
+        NSString *src = [binDir stringByAppendingPathComponent:@(bins[i])];
         n += bw_manifest_add(mf, src, [NSString stringWithFormat:@"\\Windows\\AppSandbox\\%s", bins[i]].UTF8String);
     }
     /* test-signed drivers (VDD + VAD + ivshmem) + the test cert(s). Each is existence-gated. */
@@ -1556,13 +1583,12 @@ static int cmd_build_windows(int argc, char **argv) {
                           /* NetKVM (virtio-net) -- vendored from virtio-win (BSD-3-Clause; license file
                              staged alongside). Mac payload only; never in the Windows-host manifest. */
                           "netkvm.inf", "netkvm.sys", "netkvm.cat", "netkvmp.exe", "virtio-win_license.txt" };
-    NSString *drvDir = [payload stringByAppendingPathComponent:@"drivers"];
     for (size_t i = 0; i < sizeof(drv)/sizeof(drv[0]); i++) {
         NSString *src = [drvDir stringByAppendingPathComponent:@(drv[i])];
         n += bw_manifest_add(mf, src, [NSString stringWithFormat:@"\\Windows\\AppSandbox\\drivers\\%s", drv[i]].UTF8String);
     }
     /* devcon.exe (ARM64) -- installs the root-enumerated VDD/VAD devnodes */
-    if (devcon) n += bw_manifest_add(mf, devcon, "\\Windows\\AppSandbox\\drivers\\devcon.exe");
+    if (devconPath) n += bw_manifest_add(mf, devconPath, "\\Windows\\AppSandbox\\drivers\\devcon.exe");
     /* OpenSSH MSI (downloaded at create) -- SetupComplete.cmd installs it for SSH-over-ivshmem ch7 */
     if (sshMsiName)
         n += bw_manifest_add(mf, sshMsi, [NSString stringWithFormat:@"\\Windows\\AppSandbox\\%@", sshMsiName].UTF8String);

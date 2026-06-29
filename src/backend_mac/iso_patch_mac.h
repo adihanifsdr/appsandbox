@@ -63,12 +63,16 @@ typedef void (^IsoPatchCompletion)(NSError * _Nullable error);
 
 /* Build a from-scratch Windows VM disk (unprivileged): mount the ISO, apply
  * install.wim with our own NTFS writer, and stage the answer file + agent +
- * test-signed drivers. Mirrors the Windows VHDX-first create path. payloadDir
- * holds the guest EXEs + a drivers/ subdir; devconExe is the ARM64 devcon that
- * installs the root-enumerated VDD/VAD devnodes (may be nil). */
+ * drivers. Mirrors the Windows VHDX-first create path. payloadDir holds the
+ * (bundled) guest EXEs + a drivers/ subdir; signedPayloadZip, when non-nil, is a
+ * cached signed release zip that build-windows extracts and prefers over payloadDir.
+ * devconExe is the ARM64 devcon for the bundled path (may be nil; the signed path
+ * uses the devcon inside the zip). At least one of payloadDir / signedPayloadZip
+ * must be non-nil. */
 + (void)buildWindowsDiskWithISO:(NSURL *)isoURL
                         outDisk:(NSURL *)outDiskURL
-                     payloadDir:(NSString *)payloadDir
+                     payloadDir:(nullable NSString *)payloadDir
+               signedPayloadZip:(nullable NSString *)signedPayloadZip
                       devconExe:(nullable NSString *)devconExe
                      sshMsiPath:(nullable NSString *)sshMsiPath
                          vmName:(NSString *)vmName
@@ -84,6 +88,14 @@ typedef void (^IsoPatchCompletion)(NSError * _Nullable error);
  * ensure_ssh_msi_cached). Returns the cached path, or nil on failure. Blocking; call off-main.
  * (NetKVM/virtio-net is NOT downloaded — it is vendored in the payload's drivers/ dir.) */
 + (nullable NSString *)ensureOpenSSHMsiCached;
+
+/* Ensure the SIGNED Windows guest payload zip (EV-signed agent EXEs + attestation-signed drivers,
+ * incl. the ivshmem AppSandboxSHM) is cached locally. Mirrors ensureOpenSSHMsiCached: downloads the
+ * release zip on first use (single atomic write; the version is pinned in the filename so a newer
+ * release auto-invalidates) and returns the cached zip PATH. build-windows extracts the needed
+ * members into its own per-build temp dir. Returns nil on failure (caller falls back to the bundled
+ * payload). Blocking; call off-main. */
++ (nullable NSString *)ensureSignedWinPayloadZipCached;
 
 /* Free cached AuthorizationRef. Call from asb_mac_cleanup. */
 + (void)releaseAuthorization;

@@ -394,22 +394,22 @@ static void ensure_fetch_registry(void) {
 
 + (void)buildWindowsDiskWithISO:(NSURL *)isoURL
                         outDisk:(NSURL *)outDiskURL
-                     payloadDir:(NSString *)payloadDir
-                      devconExe:(NSString *)devconExe
-                     sshMsiPath:(NSString *)sshMsiPath
+                     payloadDir:(nullable NSString *)payloadDir
+               signedPayloadZip:(nullable NSString *)signedPayloadZip
+                      devconExe:(nullable NSString *)devconExe
+                     sshMsiPath:(nullable NSString *)sshMsiPath
                          vmName:(NSString *)vmName
                       adminUser:(NSString *)adminUser
                       adminPass:(NSString *)adminPass
-                           lang:(NSString *)lang
+                           lang:(nullable NSString *)lang
                          diskGb:(int)diskGb
                        testMode:(BOOL)testMode
-                       progress:(IsoPatchProgress)progressBlock
+                       progress:(nullable IsoPatchProgress)progressBlock
                      completion:(IsoPatchCompletion)completion {
     NSMutableArray *args = [@[
         @"build-windows",
         @"--iso",     isoURL.path,
         @"--out",     outDiskURL.path,
-        @"--payload", payloadDir,
         @"--vm-name", vmName,
         @"--user",    adminUser,
         @"--pass",    adminPass,
@@ -417,8 +417,10 @@ static void ensure_fetch_registry(void) {
         @"--disk-gb", [NSString stringWithFormat:@"%d", diskGb > 0 ? diskGb : 64],
         @"--test-mode", (testMode ? @"1" : @"0"),   /* honor the create-time choice (mirrors Windows) */
     ] mutableCopy];
-    if (devconExe.length) { [args addObject:@"--devcon"]; [args addObject:devconExe]; }
-    if (sshMsiPath.length) { [args addObject:@"--ssh-msi"]; [args addObject:sshMsiPath]; }
+    if (payloadDir.length)       { [args addObject:@"--payload"];            [args addObject:payloadDir]; }
+    if (signedPayloadZip.length) { [args addObject:@"--signed-payload-zip"]; [args addObject:signedPayloadZip]; }
+    if (devconExe.length)        { [args addObject:@"--devcon"];             [args addObject:devconExe]; }
+    if (sshMsiPath.length)       { [args addObject:@"--ssh-msi"];            [args addObject:sshMsiPath]; }
     [self runUnprivilegedArgs:args
                      progress:progressBlock
                    completion:completion];
@@ -450,6 +452,39 @@ static void ensure_fetch_registry(void) {
     }];
     [t resume];
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)180 * NSEC_PER_SEC));
+    if (data.length && [data writeToFile:dst atomically:YES]) return dst;
+    return nil;
+}
+
+/* See iso_patch_mac.h. Cache the signed Windows release zip. Mirrors ensureOpenSSHMsiCached: a single
+ * atomic write to a version-named file under the AppSandbox support dir (sibling of VMs/), shared by
+ * the root daemon + GUI. build-windows extracts the needed members into its own per-build temp. */
++ (nullable NSString *)ensureSignedWinPayloadZipCached {
+    /* Signed ARM64 release: EV-signed agent EXEs + MS-attestation-signed drivers (VDD/VAD/AppSandboxSHM/
+     * devcon). The version is pinned in the cached filename, so a newer release auto-invalidates. The
+     * URL must stay publicly fetchable by an unauthenticated client. */
+    NSString *name   = @"AppSandbox-0.1.3-win-arm64.zip";
+    NSString *urlStr = @"https://github.com/user-attachments/files/29446145/AppSandbox-0.1.3-win-arm64.zip";
+    NSString *cacheDir = [[VmDir vmsRootDirectory] URLByDeletingLastPathComponent].path;
+    [[NSFileManager defaultManager] createDirectoryAtPath:cacheDir
+                              withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *dst = [cacheDir stringByAppendingPathComponent:name];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:dst]) return dst;   /* cache hit */
+
+    /* Synchronous download (follows the GitHub->CDN redirect). The atomic writeToFile makes concurrent
+     * creates race-safe (worst case: a redundant download), exactly like the OpenSSH MSI. */
+    __block NSData *data = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    NSURLSessionDataTask *t = [[NSURLSession sharedSession]
+        dataTaskWithURL:[NSURL URLWithString:urlStr]
+      completionHandler:^(NSData *d, NSURLResponse *resp, NSError *err) {
+        NSInteger code = [resp isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)resp).statusCode : 0;
+        if (d.length && (code == 200 || code == 0) && !err) data = d;
+        dispatch_semaphore_signal(sem);
+    }];
+    [t resume];
+    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)300 * NSEC_PER_SEC)) != 0)
+        [t cancel];   /* timeout: don't leak the in-flight task */
     if (data.length && [data writeToFile:dst atomically:YES]) return dst;
     return nil;
 }

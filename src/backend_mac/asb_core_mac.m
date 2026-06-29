@@ -926,46 +926,42 @@ static void finish_install(int idx, NSError *error) {
  * + SetupComplete.cmd we staged bring the agent + drivers online. */
 static void start_windows_build_flow(int idx, NSURL *isoURL) {
     NSString *nsName = [NSString stringWithUTF8String:g_vms[idx].name];
-    NSURL *vmDir = [VmDir directoryForVm:nsName];
     NSURL *diskURL = [VmDir diskImageURLFor:nsName];
     int diskGb = g_vms[idx].hdd_gb;
 
-    NSString *payload = windows_payload_directory();
-    if (!payload) {
-        post_log("[%s] Windows guest payload (agent_win) not found; cannot build disk.",
-                 g_vms[idx].name);
-        post_alert(g_vms[idx].name, "Windows guest payload not found");
-        finish_install(idx, [NSError errorWithDomain:@"AsbCore" code:1
-            userInfo:@{NSLocalizedDescriptionKey:@"agent_win payload not found"}]);
-        return;
-    }
-    NSString *devcon = devcon_exe_path();
-    if (!devcon)
-        post_log("[%s] devcon.exe not found; VDD/VAD install steps will be skipped in guest.",
-                 g_vms[idx].name);
-
-    /* The OpenSSH MSI and the 789 MB NetKVM/virtio-win download are BLOCKING; they MUST NOT run on the
-       main thread or the GUI freezes for the whole first-create download (cache hits are instant).
-       Capture per-VM state here on the main queue (g_vms is main-owned), download on a background
-       queue, then hop back to main to kick off the (already-async) disk build. */
+    /* Capture per-VM state on the main queue (g_vms is main-owned); the blocking downloads + the
+       disk build run on a background queue. */
     BOOL sshEnabled     = g_vms[idx].ssh_enabled;
     BOOL testMode       = g_vms[idx].test_mode;
     NSString *adminUser = [NSString stringWithUTF8String:g_vms[idx].admin_user];
     NSString *adminPass = [NSString stringWithUTF8String:g_vms[idx].admin_pass];
-    (void)vmDir;
 
-    post_log("[%s] Caching guest drivers (OpenSSH + NetKVM)...", g_vms[idx].name);
-    post_event(CORE_VM_EVENT_INSTALL_STATUS, g_vms[idx].name, 0, "Downloading guest drivers");
+    post_log("[%s] Caching signed guest payload (agents + drivers) + OpenSSH...", g_vms[idx].name);
+    post_event(CORE_VM_EVENT_INSTALL_STATUS, g_vms[idx].name, 0, "Downloading guest payload");
     post_list_changed();
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        /* Off-main: blocks until the download finishes (or returns instantly on a cache hit).
-           NetKVM is NOT downloaded — it's vendored in the payload's drivers/ and staged by the builder. */
-        NSString *sshMsi = sshEnabled ? [IsoPatchMac ensureOpenSSHMsiCached] : nil;
+        /* Off-main (blocking; instant on cache hits). Cache the SIGNED guest payload zip (EV-signed
+           agents + attestation-signed drivers incl. ivshmem) like the OpenSSH MSI; build-windows
+           extracts it and prefers it over the bundled test-signed payload. NetKVM is not downloaded. */
+        NSString *signedZip = [IsoPatchMac ensureSignedWinPayloadZipCached];
+        NSString *bundle    = windows_payload_directory();
+        NSString *devcon    = devcon_exe_path();
+        NSString *sshMsi    = sshEnabled ? [IsoPatchMac ensureOpenSSHMsiCached] : nil;
 
         dispatch_async(dispatch_get_main_queue(), ^{
             int i = vm_index_of(nsName.UTF8String);
             if (i < 0) return;   /* VM deleted while downloading */
+            if (!signedZip && !bundle) {
+                post_log("[%s] Windows guest payload unavailable (download failed, no bundled fallback).",
+                         g_vms[i].name);
+                post_alert(g_vms[i].name, "Windows guest payload unavailable");
+                finish_install(i, [NSError errorWithDomain:@"AsbCore" code:1
+                    userInfo:@{NSLocalizedDescriptionKey:@"Windows guest payload unavailable"}]);
+                return;
+            }
+            post_log("[%s] Using %s guest payload.", g_vms[i].name,
+                     signedZip ? "downloaded signed" : "bundled test-signed");
             if (sshEnabled && !sshMsi)
                 post_log("[%s] OpenSSH MSI download failed; VM will build without SSH server.", g_vms[i].name);
 
@@ -975,7 +971,8 @@ static void start_windows_build_flow(int idx, NSURL *isoURL) {
 
             [IsoPatchMac buildWindowsDiskWithISO:isoURL
                                         outDisk:diskURL
-                                     payloadDir:payload
+                                     payloadDir:bundle
+                               signedPayloadZip:signedZip
                                       devconExe:devcon
                                      sshMsiPath:sshMsi
                                          vmName:nsName
