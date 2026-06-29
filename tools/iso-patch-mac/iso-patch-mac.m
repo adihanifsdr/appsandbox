@@ -1470,15 +1470,14 @@ static void bw_progress(int pct, const char *msg) {
 }
 
 static int cmd_build_windows(int argc, char **argv) {
-    NSString *iso = nil, *out = nil, *payload = nil, *devcon = nil, *sshMsi = nil, *signedZip = nil;
+    NSString *iso = nil, *out = nil, *sshMsi = nil, *signedZip = nil, *netkvmZip = nil;
     NSString *vmName = @"WIN11-VM", *user = @"user", *pass = @"test123", *lang = @"en-US";
     int diskGb = 64, imageIdx = 1, testMode = 1;   /* testMode optional (mirrors Windows disk builder) */
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--iso") == 0 && i+1 < argc) iso = @(argv[++i]);
         else if (strcmp(argv[i], "--out") == 0 && i+1 < argc) out = @(argv[++i]);
-        else if (strcmp(argv[i], "--payload") == 0 && i+1 < argc) payload = @(argv[++i]);
         else if (strcmp(argv[i], "--signed-payload-zip") == 0 && i+1 < argc) signedZip = @(argv[++i]);
-        else if (strcmp(argv[i], "--devcon") == 0 && i+1 < argc) devcon = @(argv[++i]);
+        else if (strcmp(argv[i], "--netkvm-zip") == 0 && i+1 < argc) netkvmZip = @(argv[++i]);
         else if (strcmp(argv[i], "--ssh-msi") == 0 && i+1 < argc) sshMsi = @(argv[++i]);
         else if (strcmp(argv[i], "--vm-name") == 0 && i+1 < argc) vmName = @(argv[++i]);
         else if (strcmp(argv[i], "--user") == 0 && i+1 < argc) user = @(argv[++i]);
@@ -1488,8 +1487,8 @@ static int cmd_build_windows(int argc, char **argv) {
         else if (strcmp(argv[i], "--image-index") == 0 && i+1 < argc) imageIdx = atoi(argv[++i]);
         else if (strcmp(argv[i], "--test-mode") == 0 && i+1 < argc) testMode = atoi(argv[++i]);
     }
-    if (!iso || !out || (!payload && !signedZip)) {
-        emit_error(@"build-windows: --iso, --out and one of --payload / --signed-payload-zip required");
+    if (!iso || !out || !signedZip) {
+        emit_error(@"build-windows: --iso, --out and --signed-payload-zip are required");
         return 2;
     }
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -1503,30 +1502,41 @@ static int cmd_build_windows(int argc, char **argv) {
         emit_error([NSString stringWithFormat:@"mkdir staging: %@", mkErr.localizedDescription]); return 3;
     }
 
-    /* Choose the guest payload source. If a signed release zip was downloaded, extract the agent EXEs +
-     * drivers into this per-build temp dir and PREFER them over the bundled --payload, so the staged
-     * guest binaries are EV/attestation-signed (incl. the ivshmem AppSandboxSHM). The extraction is
-     * per-build (its own tmp), so concurrent creates never collide. Falls back to --payload on any
-     * problem. binDir holds the EXEs; drvDir holds the drivers/ files; devconPath is devcon.exe. */
-    NSString *binDir = payload;                                            /* bundled payload (fallback) */
-    NSString *drvDir = payload ? [payload stringByAppendingPathComponent:@"drivers"] : nil;
-    NSString *devconPath = devcon;                                         /* --devcon (bundle fallback) */
-    if (signedZip.length && [fm fileExistsAtPath:signedZip]) {
-        NSString *signedDir = [tmp stringByAppendingPathComponent:@"signed"];
-        int urc = run_tool(@"/usr/bin/unzip",
-                           @[@"-o", @"-q", signedZip, @"resources/appsandbox-*.exe", @"drivers/*", @"-d", signedDir],
-                           NULL, NULL);
-        NSString *sbin = [signedDir stringByAppendingPathComponent:@"resources"];
-        NSString *sdrv = [signedDir stringByAppendingPathComponent:@"drivers"];
-        if (urc == 0 && [fm fileExistsAtPath:[sbin stringByAppendingPathComponent:@"appsandbox-agent.exe"]]) {
-            binDir = sbin; drvDir = sdrv;
-            devconPath = [sdrv stringByAppendingPathComponent:@"devcon.exe"];
-            emit_log(@"using downloaded signed guest payload");
-        } else {
-            emit_log(@"signed payload extract failed; using bundled payload");
-        }
+    /* The guest payload comes ONLY from the downloaded, signed release zip -- there is no bundled
+     * fallback. Extract the whole zip into this per-build temp (its own tmp, so concurrent creates
+     * never collide). A full extract (not a path-filtered subset) is required because the Windows-built
+     * zip stores entries with backslash separators that forward-slash unzip include-patterns never
+     * match (unzip would exit 11 and extract nothing); a full extract makes Info-ZIP rewrite the
+     * backslashes into real resources/ + drivers/ subdirs. Such zips make unzip exit 1 (warning), so
+     * the exit code is not a reliable signal -- the probe file decides. binDir holds the signed EXEs;
+     * drvDir holds the signed drivers (VDD/VAD/SHM) + devcon. */
+    NSString *signedDir = [tmp stringByAppendingPathComponent:@"signed"];
+    (void)run_tool(@"/usr/bin/unzip", @[@"-o", @"-q", signedZip, @"-d", signedDir], NULL, NULL);
+    NSString *binDir = [signedDir stringByAppendingPathComponent:@"resources"];
+    NSString *drvDir = [signedDir stringByAppendingPathComponent:@"drivers"];
+    NSString *devconPath = [drvDir stringByAppendingPathComponent:@"devcon.exe"];
+    if (![fm fileExistsAtPath:[binDir stringByAppendingPathComponent:@"appsandbox-agent.exe"]]) {
+        [fm removeItemAtPath:tmp error:nil];
+        emit_error(@"build-windows: signed payload zip did not yield resources/appsandbox-agent.exe");
+        return 3;
     }
-    if (!binDir) { [fm removeItemAtPath:tmp error:nil]; emit_error(@"build-windows: no guest payload (need --payload or --signed-payload-zip)"); return 3; }
+    emit_log(@"using downloaded signed guest payload");
+
+    /* NetKVM (virtio-net) ships in its own small vendored zip (BSD-3-Clause), pulled + cached
+     * separately because it changes independently of the signed release. Best-effort: a VM without it
+     * still comes online over ivshmem (it just has no guest network). The zip is flat -- extract into
+     * netkvmDir and stage from there below. */
+    NSString *netkvmDir = nil;
+    if (netkvmZip.length && [fm fileExistsAtPath:netkvmZip]) {
+        netkvmDir = [tmp stringByAppendingPathComponent:@"netkvm"];
+        (void)run_tool(@"/usr/bin/unzip", @[@"-o", @"-q", netkvmZip, @"-d", netkvmDir], NULL, NULL);
+        if (![fm fileExistsAtPath:[netkvmDir stringByAppendingPathComponent:@"netkvm.sys"]]) {
+            emit_log(@"netkvm zip extract failed; VM will build without a network driver");
+            netkvmDir = nil;
+        }
+    } else {
+        emit_log(@"no netkvm zip provided; VM will build without a network driver");
+    }
 
     emit_progress(2, @"Generating answer file + setup scripts");
     NSString *unattend = [tmp stringByAppendingPathComponent:@"unattend.xml"];
@@ -1576,16 +1586,22 @@ static int cmd_build_windows(int argc, char **argv) {
         NSString *src = [binDir stringByAppendingPathComponent:@(bins[i])];
         n += bw_manifest_add(mf, src, [NSString stringWithFormat:@"\\Windows\\AppSandbox\\%s", bins[i]].UTF8String);
     }
-    /* test-signed drivers (VDD + VAD + ivshmem) + the test cert(s). Each is existence-gated. */
+    /* Our signed drivers (VDD + VAD + ivshmem SHM) + their certs, from the signed payload. Existence-gated. */
     const char *drv[] = { "AppSandboxVDD.inf", "AppSandboxVDD.dll", "AppSandboxVDD.cat", "AppSandboxVDD.cer",
                           "AppSandboxVAD.inf", "AppSandboxVAD.sys", "AppSandboxVAD.cat", "AppSandboxVAD.cer",
-                          "AppSandboxSHM.inf", "AppSandboxSHM.sys", "AppSandboxSHM.cat", "AppSandboxSHM.cer",
-                          /* NetKVM (virtio-net) -- vendored from virtio-win (BSD-3-Clause; license file
-                             staged alongside). Mac payload only; never in the Windows-host manifest. */
-                          "netkvm.inf", "netkvm.sys", "netkvm.cat", "netkvmp.exe", "virtio-win_license.txt" };
+                          "AppSandboxSHM.inf", "AppSandboxSHM.sys", "AppSandboxSHM.cat", "AppSandboxSHM.cer" };
     for (size_t i = 0; i < sizeof(drv)/sizeof(drv[0]); i++) {
         NSString *src = [drvDir stringByAppendingPathComponent:@(drv[i])];
         n += bw_manifest_add(mf, src, [NSString stringWithFormat:@"\\Windows\\AppSandbox\\drivers\\%s", drv[i]].UTF8String);
+    }
+    /* NetKVM (virtio-net) -- vendored from virtio-win (BSD-3-Clause; license staged alongside), from its
+     * own zip (netkvmDir). Mac payload only; never in the Windows-host manifest. */
+    if (netkvmDir) {
+        const char *nk[] = { "netkvm.inf", "netkvm.sys", "netkvm.cat", "netkvmp.exe", "virtio-win_license.txt" };
+        for (size_t i = 0; i < sizeof(nk)/sizeof(nk[0]); i++) {
+            NSString *src = [netkvmDir stringByAppendingPathComponent:@(nk[i])];
+            n += bw_manifest_add(mf, src, [NSString stringWithFormat:@"\\Windows\\AppSandbox\\drivers\\%s", nk[i]].UTF8String);
+        }
     }
     /* devcon.exe (ARM64) -- installs the root-enumerated VDD/VAD devnodes */
     if (devconPath) n += bw_manifest_add(mf, devconPath, "\\Windows\\AppSandbox\\drivers\\devcon.exe");
@@ -1648,7 +1664,7 @@ static void print_usage(void) {
         "      Write the asb_transport directory into the ivshmem backing file\n"
         "      before QEMU boots (launcher owns it; guest services then select ivshmem).\n"
         "\n"
-        "  build-windows --iso <path> --out <disk.img> --payload <agent_win dir>\n"
+        "  build-windows --iso <path> --out <disk.img> --signed-payload-zip <zip> [--netkvm-zip <zip>]\n"
         "                [--devcon <devcon.exe>] [--ssh-msi <OpenSSH .msi>] [--vm-name <n>]\n"
         "                [--user <u>] [--pass <p>] [--lang <bcp47>] [--disk-gb <n>] [--image-index <n>]\n"
         "      From-scratch Windows VM disk: mount the ISO, apply install.wim with our\n"

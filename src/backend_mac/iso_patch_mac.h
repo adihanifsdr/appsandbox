@@ -63,17 +63,15 @@ typedef void (^IsoPatchCompletion)(NSError * _Nullable error);
 
 /* Build a from-scratch Windows VM disk (unprivileged): mount the ISO, apply
  * install.wim with our own NTFS writer, and stage the answer file + agent +
- * drivers. Mirrors the Windows VHDX-first create path. payloadDir holds the
- * (bundled) guest EXEs + a drivers/ subdir; signedPayloadZip, when non-nil, is a
- * cached signed release zip that build-windows extracts and prefers over payloadDir.
- * devconExe is the ARM64 devcon for the bundled path (may be nil; the signed path
- * uses the devcon inside the zip). At least one of payloadDir / signedPayloadZip
- * must be non-nil. */
+ * drivers. Mirrors the Windows VHDX-first create path. The guest payload comes
+ * ONLY from signedPayloadZip (required): a cached signed release zip (EV-signed
+ * agent EXEs + attestation-signed VDD/VAD/AppSandboxSHM + devcon) that build-windows
+ * extracts -- there is no bundled fallback. netkvmZip, when non-nil, is the cached
+ * vendored NetKVM zip (virtio-net); without it the VM builds with no guest NIC. */
 + (void)buildWindowsDiskWithISO:(NSURL *)isoURL
                         outDisk:(NSURL *)outDiskURL
-                     payloadDir:(nullable NSString *)payloadDir
-               signedPayloadZip:(nullable NSString *)signedPayloadZip
-                      devconExe:(nullable NSString *)devconExe
+               signedPayloadZip:(NSString *)signedPayloadZip
+                      netkvmZip:(nullable NSString *)netkvmZip
                      sshMsiPath:(nullable NSString *)sshMsiPath
                          vmName:(NSString *)vmName
                       adminUser:(NSString *)adminUser
@@ -85,8 +83,7 @@ typedef void (^IsoPatchCompletion)(NSError * _Nullable error);
                      completion:(IsoPatchCompletion)completion;
 
 /* Ensure the OpenSSH ARM64 MSI is cached locally (downloads it on first use, mirroring the Windows
- * ensure_ssh_msi_cached). Returns the cached path, or nil on failure. Blocking; call off-main.
- * (NetKVM/virtio-net is NOT downloaded — it is vendored in the payload's drivers/ dir.) */
+ * ensure_ssh_msi_cached). Returns the cached path, or nil on failure. Blocking; call off-main. */
 + (nullable NSString *)ensureOpenSSHMsiCached;
 
 /* Ensure the SIGNED Windows guest payload zip (EV-signed agent EXEs + attestation-signed drivers,
@@ -96,6 +93,12 @@ typedef void (^IsoPatchCompletion)(NSError * _Nullable error);
  * members into its own per-build temp dir. Returns nil on failure (caller falls back to the bundled
  * payload). Blocking; call off-main. */
 + (nullable NSString *)ensureSignedWinPayloadZipCached;
+
+/* Ensure the vendored NetKVM (virtio-net) zip is cached locally. Mirrors ensureSignedWinPayloadZipCached:
+ * downloads the small BSD-3 zip from the public repo on first use (single atomic write) and returns the
+ * cached PATH. build-windows extracts it into the guest's drivers. Returns nil on failure (the VM then
+ * builds without a guest NIC). Blocking; call off-main. */
++ (nullable NSString *)ensureNetkvmZipCached;
 
 /* Free cached AuthorizationRef. Call from asb_mac_cleanup. */
 + (void)releaseAuthorization;

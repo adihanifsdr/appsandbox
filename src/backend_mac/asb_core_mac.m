@@ -377,46 +377,6 @@ static NSString *agent_resource_directory(void) {
     return nil;
 }
 
-/* Locate the Windows guest payload directory (agent EXEs + drivers/ subdir).
- * Bundle first (<App>/Contents/Resources/agent_win), then dev fallback
- * (walk up to tools/agent_win). Mirrors agent_resource_directory. */
-static NSString *windows_payload_directory(void) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *bundle = [[NSBundle mainBundle].resourcePath
-                          stringByAppendingPathComponent:@"agent_win"];
-    if (bundle &&
-        [fm fileExistsAtPath:[bundle stringByAppendingPathComponent:@"appsandbox-agent.exe"]])
-        return bundle;
-    NSString *cur = [NSBundle mainBundle].bundlePath;
-    for (int i = 0; i < 6 && cur.length > 1; i++) {
-        NSString *cand = [cur stringByAppendingPathComponent:@"tools/agent_win"];
-        if ([fm fileExistsAtPath:[cand stringByAppendingPathComponent:@"appsandbox-agent.exe"]])
-            return cand;
-        cur = [cur stringByDeletingLastPathComponent];
-    }
-    return nil;
-}
-
-/* Locate the ARM64 devcon.exe (installs the root-enumerated VDD/VAD devnodes).
- * Bundle (Resources/agent_win/drivers/devcon.exe) first, then dev fallback
- * (vendor/devcon/arm64/devcon.exe). Returns nil if unavailable (build proceeds;
- * SetupComplete.cmd's devcon steps are guarded by `if exist`). */
-static NSString *devcon_exe_path(void) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *payload = windows_payload_directory();
-    if (payload) {
-        NSString *p = [payload stringByAppendingPathComponent:@"drivers/devcon.exe"];
-        if ([fm fileExistsAtPath:p]) return p;
-    }
-    NSString *cur = [NSBundle mainBundle].bundlePath;
-    for (int i = 0; i < 6 && cur.length > 1; i++) {
-        NSString *cand = [cur stringByAppendingPathComponent:@"vendor/devcon/arm64/devcon.exe"];
-        if ([fm fileExistsAtPath:cand]) return cand;
-        cur = [cur stringByDeletingLastPathComponent];
-    }
-    return nil;
-}
-
 /* ---- Agent lifecycle ---- */
 
 static void stop_ssh_proxy_for(int idx) {
@@ -941,27 +901,27 @@ static void start_windows_build_flow(int idx, NSURL *isoURL) {
     post_list_changed();
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        /* Off-main (blocking; instant on cache hits). Cache the SIGNED guest payload zip (EV-signed
-           agents + attestation-signed drivers incl. ivshmem) like the OpenSSH MSI; build-windows
-           extracts it and prefers it over the bundled test-signed payload. NetKVM is not downloaded. */
+        /* Off-main (blocking; instant on cache hits). The guest payload comes ONLY from the downloaded
+           SIGNED release zip (EV-signed agents + attestation-signed drivers incl. ivshmem SHM) -- no
+           bundled fallback. NetKVM (virtio-net) is a separate vendored zip; the OpenSSH MSI is separate
+           too. All are cached under the support dir like the IPSW. */
         NSString *signedZip = [IsoPatchMac ensureSignedWinPayloadZipCached];
-        NSString *bundle    = windows_payload_directory();
-        NSString *devcon    = devcon_exe_path();
+        NSString *netkvmZip = [IsoPatchMac ensureNetkvmZipCached];
         NSString *sshMsi    = sshEnabled ? [IsoPatchMac ensureOpenSSHMsiCached] : nil;
 
         dispatch_async(dispatch_get_main_queue(), ^{
             int i = vm_index_of(nsName.UTF8String);
             if (i < 0) return;   /* VM deleted while downloading */
-            if (!signedZip && !bundle) {
-                post_log("[%s] Windows guest payload unavailable (download failed, no bundled fallback).",
+            if (!signedZip) {
+                post_log("[%s] Signed Windows guest payload download failed -- cannot build (JIT-only, no fallback).",
                          g_vms[i].name);
-                post_alert(g_vms[i].name, "Windows guest payload unavailable");
+                post_alert(g_vms[i].name, "Windows guest payload download failed");
                 finish_install(i, [NSError errorWithDomain:@"AsbCore" code:1
-                    userInfo:@{NSLocalizedDescriptionKey:@"Windows guest payload unavailable"}]);
+                    userInfo:@{NSLocalizedDescriptionKey:@"Signed Windows guest payload download failed"}]);
                 return;
             }
-            post_log("[%s] Using %s guest payload.", g_vms[i].name,
-                     signedZip ? "downloaded signed" : "bundled test-signed");
+            if (!netkvmZip)
+                post_log("[%s] NetKVM download failed; VM will build without a guest network driver.", g_vms[i].name);
             if (sshEnabled && !sshMsi)
                 post_log("[%s] OpenSSH MSI download failed; VM will build without SSH server.", g_vms[i].name);
 
@@ -971,9 +931,8 @@ static void start_windows_build_flow(int idx, NSURL *isoURL) {
 
             [IsoPatchMac buildWindowsDiskWithISO:isoURL
                                         outDisk:diskURL
-                                     payloadDir:bundle
                                signedPayloadZip:signedZip
-                                      devconExe:devcon
+                                      netkvmZip:netkvmZip
                                      sshMsiPath:sshMsi
                                          vmName:nsName
                                       adminUser:adminUser

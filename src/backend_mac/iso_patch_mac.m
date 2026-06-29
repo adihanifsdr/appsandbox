@@ -394,9 +394,8 @@ static void ensure_fetch_registry(void) {
 
 + (void)buildWindowsDiskWithISO:(NSURL *)isoURL
                         outDisk:(NSURL *)outDiskURL
-                     payloadDir:(nullable NSString *)payloadDir
-               signedPayloadZip:(nullable NSString *)signedPayloadZip
-                      devconExe:(nullable NSString *)devconExe
+               signedPayloadZip:(NSString *)signedPayloadZip
+                      netkvmZip:(nullable NSString *)netkvmZip
                      sshMsiPath:(nullable NSString *)sshMsiPath
                          vmName:(NSString *)vmName
                       adminUser:(NSString *)adminUser
@@ -410,6 +409,7 @@ static void ensure_fetch_registry(void) {
         @"build-windows",
         @"--iso",     isoURL.path,
         @"--out",     outDiskURL.path,
+        @"--signed-payload-zip", signedPayloadZip,
         @"--vm-name", vmName,
         @"--user",    adminUser,
         @"--pass",    adminPass,
@@ -417,10 +417,8 @@ static void ensure_fetch_registry(void) {
         @"--disk-gb", [NSString stringWithFormat:@"%d", diskGb > 0 ? diskGb : 64],
         @"--test-mode", (testMode ? @"1" : @"0"),   /* honor the create-time choice (mirrors Windows) */
     ] mutableCopy];
-    if (payloadDir.length)       { [args addObject:@"--payload"];            [args addObject:payloadDir]; }
-    if (signedPayloadZip.length) { [args addObject:@"--signed-payload-zip"]; [args addObject:signedPayloadZip]; }
-    if (devconExe.length)        { [args addObject:@"--devcon"];             [args addObject:devconExe]; }
-    if (sshMsiPath.length)       { [args addObject:@"--ssh-msi"];            [args addObject:sshMsiPath]; }
+    if (netkvmZip.length)  { [args addObject:@"--netkvm-zip"]; [args addObject:netkvmZip]; }
+    if (sshMsiPath.length) { [args addObject:@"--ssh-msi"];    [args addObject:sshMsiPath]; }
     [self runUnprivilegedArgs:args
                      progress:progressBlock
                    completion:completion];
@@ -485,6 +483,34 @@ static void ensure_fetch_registry(void) {
     [t resume];
     if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)300 * NSEC_PER_SEC)) != 0)
         [t cancel];   /* timeout: don't leak the in-flight task */
+    if (data.length && [data writeToFile:dst atomically:YES]) return dst;
+    return nil;
+}
+
+/* See iso_patch_mac.h. Cache the vendored NetKVM zip. Mirrors ensureSignedWinPayloadZipCached: a single
+ * atomic write to a fixed-named file under the AppSandbox support dir (sibling of VMs/), shared by the
+ * root daemon + GUI. Pulled from the public repo (raw.githubusercontent.com); the file never changes. */
++ (nullable NSString *)ensureNetkvmZipCached {
+    NSString *name   = @"netkvm-arm64.zip";
+    NSString *urlStr = @"https://raw.githubusercontent.com/jamesstringer90/appsandbox/win-on-mac/vendor/virtio-win/netkvm-arm64.zip";
+    NSString *cacheDir = [[VmDir vmsRootDirectory] URLByDeletingLastPathComponent].path;
+    [[NSFileManager defaultManager] createDirectoryAtPath:cacheDir
+                              withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *dst = [cacheDir stringByAppendingPathComponent:name];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:dst]) return dst;   /* cache hit */
+
+    __block NSData *data = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    NSURLSessionDataTask *t = [[NSURLSession sharedSession]
+        dataTaskWithURL:[NSURL URLWithString:urlStr]
+      completionHandler:^(NSData *d, NSURLResponse *resp, NSError *err) {
+        NSInteger code = [resp isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)resp).statusCode : 0;
+        if (d.length && (code == 200 || code == 0) && !err) data = d;
+        dispatch_semaphore_signal(sem);
+    }];
+    [t resume];
+    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)180 * NSEC_PER_SEC)) != 0)
+        [t cancel];
     if (data.length && [data writeToFile:dst atomically:YES]) return dst;
     return nil;
 }

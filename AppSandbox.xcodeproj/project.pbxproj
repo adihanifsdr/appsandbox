@@ -479,7 +479,6 @@
 				A004000000000000000000BB /* Embed Frameworks */,
 				A022000000000000000000CC /* Embed iso-patch-mac */,
 				A032000000000000000000DD /* Embed agent_mac */,
-				A009000000000000000000AA /* Embed agent_win */,
 				A014000000000000000000CC /* Embed QEMU */,
 				A008000000000000000000AA /* Stamp version */,
 			);
@@ -644,21 +643,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "\"${SRCROOT}/tools/sign/stamp-version.sh\"\n";
-		};
-		A009000000000000000000AA /* Embed agent_win */ = {
-			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputPaths = (
-			);
-			name = "Embed agent_win (Windows guest payload)";
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "# Assemble the Windows guest payload into the app bundle (the 'release area'), mirroring the\n# Windows app post-build's `xcopy release\\resources -> OutDir\\resources`. The precompiled guest\n# binaries are committed under tools/agent_win (EXEs + our drivers/); third-party precompiled binaries\n# come from vendor/: devcon (vendor/devcon) and the NetKVM virtio-net driver (vendor/virtio-win).\nset -e\nSRC=\"$SRCROOT/tools/agent_win\"\nDST=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/agent_win\"\nif [ ! -d \"$SRC\" ]; then echo \"warning: $SRC not found; Windows guest payload not embedded\"; exit 0; fi\nrm -rf \"$DST\"\nmkdir -p \"$DST/drivers\"\ncp -R \"$SRC/.\" \"$DST/\"\nDEVCON=\"$SRCROOT/vendor/devcon/arm64/devcon.exe\"\nif [ -f \"$DEVCON\" ]; then cp -f \"$DEVCON\" \"$DST/drivers/devcon.exe\"; fi\nNETKVM=\"$SRCROOT/vendor/virtio-win/arm64\"\nif [ -d \"$NETKVM\" ]; then cp -f \"$NETKVM\"/* \"$DST/drivers/\"; fi\necho \"Embedded agent_win payload -> $DST\"\n";
 		};
 		A014000000000000000000CC /* Embed QEMU */ = {
 			isa = PBXShellScriptBuildPhase;
