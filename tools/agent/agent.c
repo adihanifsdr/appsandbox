@@ -1512,12 +1512,24 @@ static void ensure_vdd_running(void)
     if (strstr(output, "No matching"))
         return; /* not installed yet */
 
-    if (strstr(output, "disabled"))
-        agent_log("VDD: disabled — restarting.");
-    else if (strstr(output, "problem"))
-        agent_log("VDD: problem — restarting.");
+    /* A device in CM_PROB_DISABLED (explicitly disabled) has its CONFIGFLAG_DISABLED bit set;
+       `devcon restart` (DICS_PROPCHANGE: stop->start) reports success but CANNOT clear that bit,
+       so the device snaps straight back to disabled. Only `devcon enable` (DICS_ENABLE) clears it.
+       So: ENABLE a disabled device; RESTART a stuck-but-enabled ("problem") one. */
+    if (strstr(output, "disabled")) {
+        agent_log("VDD: disabled - enabling.");
+        if (!run_devcon(L"enable Root\\AppSandboxVDD", output, sizeof(output), &exit_code)) {
+            agent_log("VDD enable: devcon failed to launch (%lu).", GetLastError());
+            return;
+        }
+        agent_log("VDD enable (exit=%lu): %.400s", exit_code, output);
+        return;
+    }
+
+    if (strstr(output, "problem"))
+        agent_log("VDD: problem - restarting.");
     else
-        agent_log("VDD: unknown state — restarting.");
+        agent_log("VDD: unknown state - restarting.");
 
     if (!run_devcon(L"restart Root\\AppSandboxVDD", output, sizeof(output), &exit_code)) {
         agent_log("VDD restart: devcon failed to launch (%lu).", GetLastError());
