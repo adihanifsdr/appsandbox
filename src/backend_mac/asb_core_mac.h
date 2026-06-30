@@ -25,10 +25,21 @@ typedef struct {
     int     cpu_cores;
     int     gpu_mode;
     int     network_mode;
+    BOOL    test_mode;             /* Windows guest: Secure Boot off + test-signing on. Set at create,
+                                      persisted, read at start. Our guest drivers are test-signed, so a
+                                      Windows-on-Mac VM normally needs this — but it is NOT forced. */
     BOOL    running;
     BOOL    shutting_down;
-    BOOL    install_complete;
+    BOOL    install_complete;      /* "guest provisioned" — the agent has connected at least once
+                                      (mirrors Windows install_complete). macOS sets this at build-end
+                                      (no first-boot install phase); Windows sets it on first agent-
+                                      online, so the first-boot window shows "installing". */
+    BOOL    disk_built;            /* disk is built + bootable — gates start (asb_mac_vm_start). Set at
+                                      build/stage end for BOTH OSes, distinct from install_complete so a
+                                      Windows VM can boot while its first boot is still "installing". */
     BOOL    agent_online;
+    BOOL    idd_ready;              /* Windows guest: VDD driver up (from the agent's idd_status);
+                                       gates display_ready. macOS guests leave this NO. */
     uint64_t agent_last_heartbeat_ms;
     BOOL    ssh_enabled;            /* user-configured at create time */
     int     ssh_port;               /* host loopback port, 0 = unassigned */
@@ -60,7 +71,8 @@ int  asb_mac_vm_create(const char *name, const char *os_type,
                         const char *admin_user,
                         const char *admin_pass,
                         BOOL ssh_enabled,
-                        BOOL ssh_deploy_key);
+                        BOOL ssh_deploy_key,
+                        BOOL test_mode);
 int  asb_mac_vm_start(const char *name);
 int  asb_mac_vm_stop(const char *name, int force);
 int  asb_mac_vm_delete(const char *name);

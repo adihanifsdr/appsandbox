@@ -34,6 +34,7 @@ Environment:
 #include <cfgmgr32.h> /* CM_Locate_DevNode, CM_Disable_DevNode */
 #include <d3dkmthk.h>  /* D3DKMTSetProcessSchedulingPriorityClass */
 #include <setupapi.h>  /* SetupDiGetClassDevs, SetupDiEnumDeviceInfo */
+#include "../transport/asb_transport.h"  /* ivshmem frame channel (Windows-VMs-on-Mac path only) */
 
 /* ========================================================================= */
 /*  File-based logging (persists across crashes, no debugger needed)         */
@@ -123,135 +124,102 @@ static void VddCreateMonitorMode(DISPLAYCONFIG_VIDEO_SIGNAL_INFO* sig, UINT vSyn
 }
 
 /* ========================================================================= */
-/*  HvSocket / networking definitions                                        */
+/*  Host frame transport                                                     */
+/*                                                                           */
+/*  The frame channel (listen/accept/send on the ch2 service a5b0cafe-0002)  */
+/*  goes through asb_transport: asb_listen(ASB_CH_DISPLAY)/asb_accept/       */
+/*  asb_send resolve to AF_HYPERV HvSocket on a Windows host and to the      */
+/*  ivshmem ch2 stream slot on a macOS host.                                 */
 /* ========================================================================= */
 
-#define AF_HYPERV       34
-#define HV_PROTOCOL_RAW 1
-
-typedef struct _SOCKADDR_HV {
-    ADDRESS_FAMILY Family;
-    USHORT Reserved;
-    GUID VmId;
-    GUID ServiceId;
-} SOCKADDR_HV;
-
-/* HV_GUID_WILDCARD — bind to accept from any partition */
-static const GUID HV_GUID_WILDCARD =
-    { 0, 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } };
-
-/* Frame channel service GUID: {A5B0CAFE-0002-4000-8000-000000000001} */
-static const GUID FRAME_SERVICE_GUID =
-    { 0xa5b0cafe, 0x0002, 0x4000, { 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 } };
-
-/* Send exactly len bytes. Returns 0 on success, -1 on failure. */
-static int VddSendAll(SOCKET s, const char* data, int len)
+/* Send exactly len bytes over the transport. Returns 0 on success, -1 on failure
+   (asb_send loops until all bytes are sent on both backends). */
+static int VddSendAll(AsbConn* c, const char* data, int len)
 {
-    int sent = 0;
-    while (sent < len) {
-        int n = send(s, data + sent, len - sent, 0);
-        if (n <= 0) return -1;
-        sent += n;
+    return asb_send(c, data, len) == len ? 0 : -1;
+}
+
+/* Close a client connection and clear *pc. PC: graceful shutdown(SD_BOTH) then closesocket; ivshmem:
+   asb_close marks the slot CLOSING. */
+static void VddCloseConn(AsbConn* volatile* pc)
+{
+    AsbConn* c = *pc;
+    if (!c) return;
+    {
+        unsigned long long s = asb_conn_socket_u64(c);
+        if (s != ~0ull) shutdown((SOCKET)s, SD_BOTH);   /* PC only; ivshmem returns ~0 */
     }
-    return 0;
+    asb_close(c);
+    *pc = NULL;
 }
 
 /* ========================================================================= */
 /*  Network listener thread (accepts host connections over HvSocket)         */
 /* ========================================================================= */
 
+/* One-shot transport backend selection (PC AF_HYPERV vs Mac ivshmem). Done off the loader lock
+   (in the network thread, never in DllMain) since the ivshmem probe enumerates device interfaces. */
+static volatile LONG g_transportInited = 0;
+static void VddEnsureTransportInit(void)
+{
+    if (InterlockedCompareExchange(&g_transportInited, 1, 0) == 0)
+        asb_transport_init();   /* selects ivshmem if the host published the directory, else AF_HYPERV */
+}
+
 static DWORD WINAPI VddNetworkThread(LPVOID lpParameter)
 {
     VDD_SWAP_PROC* proc = (VDD_SWAP_PROC*)lpParameter;
-    SOCKET listen_s = INVALID_SOCKET;
-    SOCKADDR_HV addr;
+    AsbListener* l = NULL;
 
     VddLog("Network: starting");
+    VddEnsureTransportInit();
 
     while (!proc->bStopNetwork) {
-        /* (Re)create listen socket */
-        listen_s = socket(AF_HYPERV, SOCK_STREAM, HV_PROTOCOL_RAW);
-        if (listen_s == INVALID_SOCKET) {
-            VddLog("Network: socket failed (%d), retrying in 3s", WSAGetLastError());
+        /* (Re)create the listener. PC: socket(AF_HYPERV)+bind(ch2 GUID, wildcard)+listen;
+           Mac: bind the ivshmem ch2 slot. */
+        l = asb_listen(ASB_CH_DISPLAY);
+        if (!l) {
+            VddLog("Network: asb_listen(ch2) failed, retrying in 3s (transport=%s)",
+                   asb_transport_is_ivshmem() ? "ivshmem" : "hyperv");
             for (int w = 0; w < 3000 && !proc->bStopNetwork; w += 500)
                 Sleep(500);
             continue;
         }
 
-        memset(&addr, 0, sizeof(addr));
-        addr.Family = AF_HYPERV;
-        addr.VmId = HV_GUID_WILDCARD;
-        addr.ServiceId = FRAME_SERVICE_GUID;
+        VddLog("Network: listening for host connections (transport=%s)",
+               asb_transport_is_ivshmem() ? "ivshmem" : "hyperv");
 
-        if (bind(listen_s, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-            VddLog("Network: bind failed (%d), retrying in 3s", WSAGetLastError());
-            closesocket(listen_s);
-            listen_s = INVALID_SOCKET;
-            for (int w = 0; w < 3000 && !proc->bStopNetwork; w += 500)
-                Sleep(500);
-            continue;
-        }
-
-        if (listen(listen_s, 1) != 0) {
-            VddLog("Network: listen failed (%d), retrying in 3s", WSAGetLastError());
-            closesocket(listen_s);
-            listen_s = INVALID_SOCKET;
-            for (int w = 0; w < 3000 && !proc->bStopNetwork; w += 500)
-                Sleep(500);
-            continue;
-        }
-
-        VddLog("Network: listening for host connections");
-
-        /* Accept loop — breaks out on error to retry socket creation */
+        /* Accept loop — 1s timeout so we re-check bStopNetwork between accepts. */
         while (!proc->bStopNetwork) {
-        fd_set fds;
-        struct timeval tv;
-        SOCKET new_s;
+            AsbConn* nc = asb_accept(l, 1000);
+            if (!nc)
+                continue;
 
-        FD_ZERO(&fds);
-        FD_SET(listen_s, &fds);
-        tv.tv_sec = 1;
-        tv.tv_usec = 0;
+            VddLog("Network: host connected");
 
-        if (select(0, &fds, NULL, NULL, &tv) <= 0)
-            continue;
-
-        new_s = accept(listen_s, NULL, NULL);
-        if (new_s == INVALID_SOCKET)
-            continue;
-
-        VddLog("Network: host connected");
-
-        /* If a previous pending socket wasn't picked up yet, close it */
-        {
-            SOCKET old = (SOCKET)InterlockedExchange64(
-                (volatile LONG64*)&proc->hPendingSocket, (LONG64)new_s);
-            if (old != INVALID_SOCKET) {
-                shutdown(old, SD_BOTH);
-                closesocket(old);
-                VddLog("Network: replaced unclaimed pending connection");
+            /* If a previous pending connection wasn't picked up yet, close it. */
+            {
+                AsbConn* old = (AsbConn*)InterlockedExchangePointer(
+                    (PVOID volatile*)&proc->hPendingConn, nc);
+                if (old) {
+                    VddCloseConn(&old);
+                    VddLog("Network: replaced unclaimed pending connection");
+                }
             }
-        }
         } /* end accept loop */
 
-        /* Clean up listen socket before retrying */
-        closesocket(listen_s);
-        listen_s = INVALID_SOCKET;
+        asb_close_listener(l);
+        l = NULL;
     } /* end retry loop */
 
-    /* Close any pending socket */
+    /* Close any pending connection. */
     {
-        SOCKET pending = (SOCKET)InterlockedExchange64(
-            (volatile LONG64*)&proc->hPendingSocket, (LONG64)INVALID_SOCKET);
-        if (pending != INVALID_SOCKET) {
-            shutdown(pending, SD_BOTH);
-            closesocket(pending);
-        }
+        AsbConn* pending = (AsbConn*)InterlockedExchangePointer(
+            (PVOID volatile*)&proc->hPendingConn, NULL);
+        if (pending) VddCloseConn(&pending);
     }
 
-    if (listen_s != INVALID_SOCKET)
-        closesocket(listen_s);
+    if (l) asb_close_listener(l);
 
     VddLog("Network: stopped");
     return 0;
@@ -425,13 +393,13 @@ static void VddSendCursorUpdate(VDD_SWAP_PROC* proc)
     IDARG_IN_QUERY_HWCURSOR inArgs = {};
     IDARG_OUT_QUERY_HWCURSOR3 outArgs = {};
     VDD_WIRE_CURSOR_HEADER chdr;
-    SOCKET s;
+    AsbConn* s;
 
     if (!proc->hCursorEvent || !proc->pCursorShapeBuffer || !proc->hMonitor)
         return;
 
-    s = proc->hClientSocket;
-    if (s == INVALID_SOCKET)
+    s = proc->hClientConn;
+    if (s == NULL)
         return;
 
     inArgs.LastShapeId = proc->lastShapeId;
@@ -475,9 +443,7 @@ static void VddSendCursorUpdate(VDD_SWAP_PROC* proc)
     /* Send cursor header */
     if (VddSendAll(s, (const char*)&chdr, sizeof(chdr)) != 0) {
         VddLog("Cursor: send header failed, disconnecting");
-        shutdown(s, SD_BOTH);
-        closesocket(s);
-        proc->hClientSocket = INVALID_SOCKET;
+        VddCloseConn(&proc->hClientConn);
         return;
     }
 
@@ -485,9 +451,7 @@ static void VddSendCursorUpdate(VDD_SWAP_PROC* proc)
     if (chdr.shape_data_size > 0) {
         if (VddSendAll(s, (const char*)proc->pCursorShapeBuffer, (int)chdr.shape_data_size) != 0) {
             VddLog("Cursor: send shape data failed, disconnecting");
-            shutdown(s, SD_BOTH);
-            closesocket(s);
-            proc->hClientSocket = INVALID_SOCKET;
+            VddCloseConn(&proc->hClientConn);
             return;
         }
     }
@@ -550,18 +514,23 @@ static void VddSwapChainRunCore(VDD_SWAP_PROC* proc)
 
         /* Check for pending new connection from network thread */
         {
-            SOCKET pending = (SOCKET)InterlockedExchange64(
-                (volatile LONG64*)&proc->hPendingSocket, (LONG64)INVALID_SOCKET);
-            if (pending != INVALID_SOCKET) {
-                /* Close old connection if any */
-                if (proc->hClientSocket != INVALID_SOCKET) {
-                    shutdown(proc->hClientSocket, SD_BOTH);
-                    closesocket(proc->hClientSocket);
-                    VddLog("Frame: closed previous client connection");
+            AsbConn* pending = (AsbConn*)InterlockedExchangePointer(
+                (PVOID volatile*)&proc->hPendingConn, NULL);
+            if (pending) {
+                /* Drop the previous client. On PC the old socket is distinct -> close it. On ivshmem
+                   the pending connection is the SAME single slot the host just re-armed, so closing
+                   the old wrapper would mark the shared slot CLOSING and kill the new one — abandon
+                   the stale wrapper instead. */
+                if (proc->hClientConn) {
+                    if (asb_conn_socket_u64(proc->hClientConn) != ~0ull)
+                        VddCloseConn(&proc->hClientConn);          /* PC: real close */
+                    else { asb_abandon(proc->hClientConn); proc->hClientConn = NULL; }  /* ivshmem */
+                    VddLog("Frame: replaced previous client connection");
                 }
-                proc->hClientSocket = pending;
+                asb_stream_reset(pending);   /* ivshmem: align the fresh full frame at ring offset 0 (no-op on PC) */
+                proc->hClientConn = pending;
                 proc->frameSeq = 0;
-                bSentFullFrame = FALSE;
+                bSentFullFrame = FALSE;   /* new connection -> first frame is full (the reconnect trigger) */
                 VddLog("Frame: new client connection active");
             }
         }
@@ -587,7 +556,7 @@ static void VddSwapChainRunCore(VDD_SWAP_PROC* proc)
                 break;  /* Terminate */
             }
             if (waitResult == WAIT_OBJECT_0 + 2) {
-                /* Cursor event — query and send cursor update */
+                /* Cursor event — query and send cursor update over the transport */
                 VddSendCursorUpdate(proc);
                 continue;
             }
@@ -599,7 +568,7 @@ static void VddSwapChainRunCore(VDD_SWAP_PROC* proc)
             /* On timeout with a connected client and a cached frame, resend
                the staging texture contents to keep the connection alive. */
             if (waitResult == WAIT_TIMEOUT && bHasFrame &&
-                proc->hClientSocket != INVALID_SOCKET && proc->pStagingTex)
+                proc->hClientConn != NULL && proc->pStagingTex)
             {
                 D3D11_MAPPED_SUBRESOURCE mapped = {};
                 hr = proc->pDeviceContext->Map(proc->pStagingTex, 0, D3D11_MAP_READ, 0, &mapped);
@@ -608,7 +577,7 @@ static void VddSwapChainRunCore(VDD_SWAP_PROC* proc)
                     VDD_WIRE_FRAME_HEADER whdr;
                     UINT32 data_size = VDD_STRIDE * VDD_HEIGHT;
                     BOOL send_ok = TRUE;
-                    SOCKET s = proc->hClientSocket;
+                    AsbConn* s = proc->hClientConn;
 
                     proc->frameSeq++;
                     whdr.magic            = VDD_FRAME_MAGIC;
@@ -636,9 +605,7 @@ static void VddSwapChainRunCore(VDD_SWAP_PROC* proc)
 
                     if (!send_ok) {
                         VddLog("Frame: resend failed, disconnecting (seq=%llu)", proc->frameSeq);
-                        shutdown(s, SD_BOTH);
-                        closesocket(s);
-                        proc->hClientSocket = INVALID_SOCKET;
+                        VddCloseConn(&proc->hClientConn);
                         bSentFullFrame = FALSE;
                     }
                 }
@@ -666,7 +633,7 @@ static void VddSwapChainRunCore(VDD_SWAP_PROC* proc)
                         bHasFrame = TRUE;
                         cachedRowPitch = mapped.RowPitch;
 
-                        if (proc->hClientSocket != INVALID_SOCKET)
+                        if (proc->hClientConn != NULL)
                         {
                             RECT dirtyRects[VDD_MAX_DIRTY_RECTS];
                             UINT32 rectCount = 0;
@@ -693,7 +660,7 @@ static void VddSwapChainRunCore(VDD_SWAP_PROC* proc)
 
                             VDD_WIRE_FRAME_HEADER whdr;
                             BOOL send_ok = TRUE;
-                            SOCKET s = proc->hClientSocket;
+                            AsbConn* s = proc->hClientConn;
 
                             proc->frameSeq++;
                             whdr.magic            = VDD_FRAME_MAGIC;
@@ -773,9 +740,7 @@ static void VddSwapChainRunCore(VDD_SWAP_PROC* proc)
 
                             if (!send_ok) {
                                 VddLog("Frame: send failed, disconnecting (seq=%llu)", proc->frameSeq);
-                                shutdown(s, SD_BOTH);
-                                closesocket(s);
-                                proc->hClientSocket = INVALID_SOCKET;
+                                VddCloseConn(&proc->hClientConn);
                                 bSentFullFrame = FALSE;
                             } else if (proc->frameSeq == 1) {
                                 VddLog("Frame: first frame sent (%ux%u, %u bytes)",
@@ -859,20 +824,14 @@ static void VddDestroySwapProc(VDD_SWAP_PROC* proc)
         CloseHandle(proc->hNetworkThread);
     }
 
-    /* Close any remaining client socket */
-    VddLog("DestroySwapProc: closing client socket (sock=%lld)", (long long)proc->hClientSocket);
-    if (proc->hClientSocket != INVALID_SOCKET) {
-        shutdown(proc->hClientSocket, SD_BOTH);
-        closesocket(proc->hClientSocket);
-    }
-    VddLog("DestroySwapProc: closing pending socket");
+    /* Close any remaining client connection */
+    VddLog("DestroySwapProc: closing client connection (%p)", (void*)proc->hClientConn);
+    VddCloseConn(&proc->hClientConn);
+    VddLog("DestroySwapProc: closing pending connection");
     {
-        SOCKET pending = (SOCKET)InterlockedExchange64(
-            (volatile LONG64*)&proc->hPendingSocket, (LONG64)INVALID_SOCKET);
-        if (pending != INVALID_SOCKET) {
-            shutdown(pending, SD_BOTH);
-            closesocket(pending);
-        }
+        AsbConn* pending = (AsbConn*)InterlockedExchangePointer(
+            (PVOID volatile*)&proc->hPendingConn, NULL);
+        if (pending) VddCloseConn(&pending);
     }
 
     VddLog("DestroySwapProc: closing terminate event");
@@ -1005,6 +964,9 @@ static void VddInitAdapter(VDD_DEVICE_CONTEXT* ctx)
         pWrapper->pContext = ctx;
 
         VddLog("InitAdapter: IddCxAdapterInitAsync succeeded (adapter=%p)", (void*)adapterInitOut.AdapterObject);
+
+        /* Render-adapter selection is left to IddCx / the OS default (WARP); the VDD is
+           display-only and pins no render adapter. */
     }
     else
     {
@@ -1175,8 +1137,8 @@ NTSTATUS VddMonitorAssignSwapChain(
 
     /* Initialize network state */
     VddLog("AssignSwapChain: initializing network state");
-    proc->hClientSocket  = INVALID_SOCKET;
-    proc->hPendingSocket = INVALID_SOCKET;
+    proc->hClientConn    = NULL;
+    proc->hPendingConn   = NULL;
     proc->bStopNetwork   = FALSE;
     proc->frameSeq       = 0;
 

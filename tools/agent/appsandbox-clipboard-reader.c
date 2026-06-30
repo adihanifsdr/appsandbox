@@ -23,6 +23,7 @@
 #include <stdarg.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include "../transport/asb_transport.h"   /* AF_HYPERV on PC, ivshmem on Mac */
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "user32.lib")
@@ -79,7 +80,7 @@ typedef struct {
 
 /* ---- Globals ---- */
 
-static volatile SOCKET g_client_sock = INVALID_SOCKET;
+static AsbConn * volatile g_client_sock = NULL;
 static CRITICAL_SECTION g_send_cs;
 static HWND g_msg_hwnd = NULL;
 static char g_log_path[MAX_PATH];
@@ -121,46 +122,28 @@ static void reader_log(const char *fmt, ...)
 
 /* ---- Reliable send/recv (socket) ---- */
 
-static BOOL send_all(SOCKET s, const void *buf, int len)
+static BOOL send_all(AsbConn *s, const void *buf, int len)
 {
-    const char *p = (const char *)buf;
-    int remaining = len;
-    while (remaining > 0) {
-        int n = send(s, p, remaining, 0);
+    return asb_send(s, buf, len) == len;
+}
+
+static BOOL recv_exact(AsbConn *s, void *buf, int len)
+{
+    int got = 0;
+    while (got < len) {
+        int n = asb_recv(s, (char *)buf + got, len - got);
         if (n <= 0) return FALSE;
-        p += n;
-        remaining -= n;
+        got += n;
     }
     return TRUE;
 }
 
-static BOOL recv_exact(SOCKET s, void *buf, int len)
-{
-    char *p = (char *)buf;
-    int remaining = len;
-    while (remaining > 0) {
-        int n = recv(s, p, remaining, 0);
-        if (n <= 0) return FALSE;
-        p += n;
-        remaining -= n;
-    }
-    return TRUE;
-}
-
-/* Send on socket (caller must hold g_send_cs) */
+/* Send on the connection (caller must hold g_send_cs) */
 static BOOL send_all_locked(const void *buf, int len)
 {
-    SOCKET s = g_client_sock;
-    const char *p = (const char *)buf;
-    int remaining = len;
-    if (s == INVALID_SOCKET) return FALSE;
-    while (remaining > 0) {
-        int n = send(s, p, remaining, 0);
-        if (n <= 0) return FALSE;
-        p += n;
-        remaining -= n;
-    }
-    return TRUE;
+    AsbConn *s = g_client_sock;
+    if (!s) return FALSE;
+    return asb_send(s, buf, len) == len;
 }
 
 /* ---- Skip non-transferable formats ---- */
@@ -285,7 +268,7 @@ static void clip_send_format_list(void)
     int offset = 4;
     UINT32 count = 0;
 
-    if (g_client_sock == INVALID_SOCKET) return;
+    if (g_client_sock == NULL) return;
 
     if (!OpenClipboard(g_msg_hwnd)) {
         reader_log("clip_send_format_list: OpenClipboard failed (%lu).", GetLastError());
@@ -426,7 +409,7 @@ static void clip_handle_data_request(UINT fmt)
 
 static DWORD WINAPI recv_thread_proc(LPVOID param)
 {
-    SOCKET s = (SOCKET)(UINT_PTR)param;
+    AsbConn *s = (AsbConn *)param;
     ClipHeader hdr;
 
     reader_log("Recv thread started.");
@@ -525,14 +508,14 @@ static DWORD WINAPI msg_window_thread(LPVOID param)
 
 /* ---- Handle one host connection ---- */
 
-static void handle_client(SOCKET s)
+static void handle_client(AsbConn *s)
 {
     UINT32 ready = CLIP_READY_MAGIC;
     HANDLE recv_th;
 
     /* Send ready signal */
-    if (send(s, (const char *)&ready, sizeof(ready), 0) != sizeof(ready)) {
-        reader_log("Failed to send ready signal (%d).", WSAGetLastError());
+    if (asb_send(s, &ready, sizeof(ready)) != (int)sizeof(ready)) {
+        reader_log("Failed to send ready signal.");
         return;
     }
     reader_log("Sent ready signal to host.");
@@ -540,10 +523,10 @@ static void handle_client(SOCKET s)
     g_client_sock = s;
 
     /* Start recv thread */
-    recv_th = CreateThread(NULL, 0, recv_thread_proc, (LPVOID)(UINT_PTR)s, 0, NULL);
+    recv_th = CreateThread(NULL, 0, recv_thread_proc, (LPVOID)s, 0, NULL);
     if (!recv_th) {
         reader_log("Failed to create recv thread (%lu).", GetLastError());
-        g_client_sock = INVALID_SOCKET;
+        g_client_sock = NULL;
         return;
     }
 
@@ -551,7 +534,7 @@ static void handle_client(SOCKET s)
     WaitForSingleObject(recv_th, INFINITE);
     CloseHandle(recv_th);
 
-    g_client_sock = INVALID_SOCKET;
+    g_client_sock = NULL;
     reader_log("Host disconnected.");
 }
 
@@ -559,10 +542,8 @@ static void handle_client(SOCKET s)
 
 int main(void)
 {
-    WSADATA wsa;
-    SOCKET listen_s;
-    SOCKADDR_HV addr;
     HANDLE msg_th;
+    AsbListener *l;
     char tmp[MAX_PATH];
 
     /* Set up log path in user temp dir */
@@ -572,11 +553,6 @@ int main(void)
     reader_log("Starting (PID=%lu, session=%lu).",
                GetCurrentProcessId(),
                WTSGetActiveConsoleSessionId());
-
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        reader_log("WSAStartup failed (%d).", WSAGetLastError());
-        return 1;
-    }
 
     InitializeCriticalSection(&g_send_cs);
 
@@ -589,64 +565,36 @@ int main(void)
     if (!msg_th) {
         reader_log("Failed to create message window thread (%lu).", GetLastError());
         DeleteCriticalSection(&g_send_cs);
-        WSACleanup();
         return 1;
     }
 
     /* Wait a moment for message window to be created */
     Sleep(100);
 
-    listen_s = socket(AF_HYPERV, SOCK_STREAM, 1 /* HV_PROTOCOL_RAW */);
-    if (listen_s == INVALID_SOCKET) {
-        reader_log("socket(AF_HYPERV) failed (%d).", WSAGetLastError());
+    if (asb_transport_init() != 0) {
+        reader_log("asb_transport_init failed.");
         DeleteCriticalSection(&g_send_cs);
-        WSACleanup();
         return 1;
     }
 
-    memset(&addr, 0, sizeof(addr));
-    addr.Family = AF_HYPERV;
-    addr.VmId = HV_GUID_WILDCARD;
-    addr.ServiceId = CLIPBOARD_READER_SERVICE_GUID;
-
-    {
-        int bind_tries;
-        for (bind_tries = 0; bind_tries < 10; bind_tries++) {
-            if (bind(listen_s, (struct sockaddr *)&addr, sizeof(addr)) == 0)
-                break;
-            reader_log("bind attempt %d failed (%d), retrying...",
-                        bind_tries + 1, WSAGetLastError());
-            Sleep(500);
-        }
-        if (bind_tries == 10) {
-            reader_log("bind failed after 10 attempts, exiting.");
-            closesocket(listen_s);
-            DeleteCriticalSection(&g_send_cs);
-            WSACleanup();
-            return 1;
-        }
-    }
-
-    if (listen(listen_s, 2) != 0) {
-        reader_log("listen failed (%d).", WSAGetLastError());
-        closesocket(listen_s);
+    l = asb_listen(ASB_CH_CLIPBOARD_READER);
+    if (!l) {
+        reader_log("asb_listen(ASB_CH_CLIPBOARD_READER) failed.");
         DeleteCriticalSection(&g_send_cs);
-        WSACleanup();
         return 1;
     }
-
-    reader_log("Listening on GUID a5b0cafe-0006-4000-8000-000000000001.");
+    reader_log("Listening on clipboard-reader channel (transport=%s).",
+               asb_transport_is_ivshmem() ? "ivshmem" : "hyperv");
 
     /* Accept loop — one client at a time */
     for (;;) {
-        SOCKET client_s = accept(listen_s, NULL, NULL);
-        if (client_s == INVALID_SOCKET) {
-            reader_log("accept failed (%d).", WSAGetLastError());
-            Sleep(1000);
+        AsbConn *c = asb_accept(l, -1);
+        if (!c) {
+            Sleep(100);
             continue;
         }
         reader_log("Host connected.");
-        handle_client(client_s);
-        closesocket(client_s);
+        handle_client(c);
+        asb_close(c);
     }
 }

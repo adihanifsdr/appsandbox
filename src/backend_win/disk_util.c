@@ -1,5 +1,6 @@
 #include "disk_util.h"
 #include "ui.h"
+#include "../../tools/provision/win_provision.h"
 #include <virtdisk.h>
 #include <stdio.h>
 #include <wincrypt.h>
@@ -1364,7 +1365,11 @@ HRESULT iso_create_instance_resources(const wchar_t *iso_path,
 
 /* Generate unattend.xml for VHDX-first boot.
    No windowsPE pass (DISM already applied the image).
-   Only specialize + oobeSystem for first-boot mini-setup. */
+   Only specialize + oobeSystem for first-boot mini-setup.
+   Delegates to the shared platform-neutral generator (tools/provision/win_provision.c)
+   so the Windows-host and macOS-host builders stage byte-identical answer files. The
+   wide inputs are converted to UTF-8 and the file is opened "wb" (the generator writes
+   the UTF-8 BOM itself). */
 BOOL generate_unattend_vhdx(const wchar_t *output_path,
                              const wchar_t *vm_name,
                              const wchar_t *admin_user,
@@ -1373,130 +1378,35 @@ BOOL generate_unattend_vhdx(const wchar_t *output_path,
                              const wchar_t *lang)
 {
     FILE *f;
-    wchar_t comp_name[16];
-    wchar_t b64_pass[512];
+    char vm_u[64], user_u[256], pass_u[512], lang_u[32];
+    int rc;
 
     if (!output_path || !vm_name || !admin_user || !admin_pass)
         return FALSE;
 
-    wcsncpy_s(comp_name, 16, vm_name, 15);
-
-    if (!encode_unattend_password(admin_pass, b64_pass, 512)) {
+    /* Convert the wide inputs to UTF-8 for the shared generator. A 0 return means the
+       value didn't fit its buffer (WideCharToMultiByte leaves it unterminated), so bail
+       rather than emit garbage. Realistic name/user/pass/lang values fit comfortably. */
+    if (!WideCharToMultiByte(CP_UTF8, 0, vm_name, -1, vm_u, sizeof vm_u, NULL, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, 0, admin_user, -1, user_u, sizeof user_u, NULL, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, 0, admin_pass, -1, pass_u, sizeof pass_u, NULL, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, 0, lang ? lang : L"en-US", -1, lang_u, sizeof lang_u, NULL, NULL)) {
+        SecureZeroMemory(pass_u, sizeof pass_u);
         return FALSE;
     }
 
-    if (_wfopen_s(&f, output_path, L"w,ccs=UTF-8") != 0 || !f) {
-        SecureZeroMemory(b64_pass, sizeof(b64_pass));
+    if (_wfopen_s(&f, output_path, L"wb") != 0 || !f) {
+        SecureZeroMemory(pass_u, sizeof pass_u);
         return FALSE;
     }
 
-    /* specialize pass: ComputerName + BypassNRO + optional testsigning */
-    fwprintf(f,
-        L"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
-        L"<unattend xmlns=\"urn:schemas-microsoft-com:unattend\"\n"
-        L"          xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\">\n"
-        L"\n"
-        L"    <settings pass=\"specialize\">\n"
-        L"        <component name=\"Microsoft-Windows-Shell-Setup\"\n"
-        L"                   processorArchitecture=\"" ASB_UA_ARCH L"\"\n"
-        L"                   publicKeyToken=\"31bf3856ad364e35\"\n"
-        L"                   language=\"neutral\" versionScope=\"nonSxS\">\n"
-        L"            <ComputerName>%s</ComputerName>\n"
-        L"        </component>\n"
-        L"        <component name=\"Microsoft-Windows-Deployment\"\n"
-        L"                   processorArchitecture=\"" ASB_UA_ARCH L"\"\n"
-        L"                   publicKeyToken=\"31bf3856ad364e35\"\n"
-        L"                   language=\"neutral\" versionScope=\"nonSxS\">\n"
-        L"            <RunSynchronous>\n"
-        L"                <RunSynchronousCommand wcm:action=\"add\">\n"
-        L"                    <Order>1</Order>\n"
-        L"                    <Path>reg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path>\n"
-        L"                </RunSynchronousCommand>\n",
-        comp_name);
-
-    {
-        int order = 2;
-        fwprintf(f,
-            L"                <RunSynchronousCommand wcm:action=\"add\">\n"
-            L"                    <Order>%d</Order>\n"
-            L"                    <Path>bcdedit /set recoveryenabled No</Path>\n"
-            L"                </RunSynchronousCommand>\n"
-            L"                <RunSynchronousCommand wcm:action=\"add\">\n"
-            L"                    <Order>%d</Order>\n"
-            L"                    <Path>bcdedit /set bootstatuspolicy IgnoreAllFailures</Path>\n"
-            L"                </RunSynchronousCommand>\n", order, order + 1);
-        order += 2;
-        if (test_mode) {
-            fwprintf(f,
-                L"                <RunSynchronousCommand wcm:action=\"add\">\n"
-                L"                    <Order>%d</Order>\n"
-                L"                    <Path>bcdedit /set testsigning on</Path>\n"
-                L"                </RunSynchronousCommand>\n", order++);
-        }
-#if ASB_IS_ARM64
-        write_tpm_bypass_commands(f, order);
-#endif
-    }
-
-    fwprintf(f,
-        L"            </RunSynchronous>\n"
-        L"        </component>\n"
-        L"    </settings>\n"
-        L"\n");
-
-    /* oobeSystem pass: locale, OOBE hiding, user account, FirstLogonCommand (on-disk path) */
-    fwprintf(f,
-        L"    <settings pass=\"oobeSystem\">\n"
-        L"        <component name=\"Microsoft-Windows-International-Core\"\n"
-        L"                   processorArchitecture=\"" ASB_UA_ARCH L"\"\n"
-        L"                   publicKeyToken=\"31bf3856ad364e35\"\n"
-        L"                   language=\"neutral\" versionScope=\"nonSxS\">\n"
-        L"            <InputLocale>%s</InputLocale>\n"
-        L"            <SystemLocale>%s</SystemLocale>\n"
-        L"            <UILanguage>%s</UILanguage>\n"
-        L"            <UserLocale>%s</UserLocale>\n"
-        L"        </component>\n"
-        L"        <component name=\"Microsoft-Windows-Shell-Setup\"\n"
-        L"                   processorArchitecture=\"" ASB_UA_ARCH L"\"\n"
-        L"                   publicKeyToken=\"31bf3856ad364e35\"\n"
-        L"                   language=\"neutral\" versionScope=\"nonSxS\">\n"
-        L"            <OOBE>\n"
-        L"                <HideEULAPage>true</HideEULAPage>\n"
-        L"                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>\n"
-        L"                <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>\n"
-        L"                <ProtectYourPC>3</ProtectYourPC>\n"
-        L"            </OOBE>\n"
-        L"            <UserAccounts><LocalAccounts>\n"
-        L"                <LocalAccount wcm:action=\"add\">\n"
-        L"                    <Name>%s</Name>\n"
-        L"                    <Group>Administrators</Group>\n"
-        L"                    <Password><Value>%s</Value><PlainText>false</PlainText></Password>\n"
-        L"                </LocalAccount>\n"
-        L"            </LocalAccounts></UserAccounts>\n"
-        L"            <AutoLogon>\n"
-        L"                <Enabled>true</Enabled>\n"
-        L"                <Username>%s</Username>\n"
-        L"                <Password><Value>%s</Value><PlainText>false</PlainText></Password>\n"
-        L"                <LogonCount>1</LogonCount>\n"
-        L"            </AutoLogon>\n"
-        L"            <FirstLogonCommands>\n"
-        L"                <SynchronousCommand wcm:action=\"add\">\n"
-        L"                    <Order>1</Order>\n"
-        L"                    <Description>Run AppSandbox setup</Description>\n"
-        L"                    <CommandLine>C:\\Windows\\AppSandbox\\setup.cmd</CommandLine>\n"
-        L"                    <RequiresUserInput>false</RequiresUserInput>\n"
-        L"                </SynchronousCommand>\n"
-        L"            </FirstLogonCommands>\n"
-        L"        </component>\n"
-        L"    </settings>\n"
-        L"</unattend>\n",
-        lang_to_input_locale(lang), lang, lang, lang,
-        admin_user, b64_pass,
-        admin_user, b64_pass);
+    rc = asb_provision_unattend(f, vm_u, user_u, pass_u,
+                                ASB_IS_ARM64 ? "arm64" : "amd64",
+                                test_mode ? 1 : 0, ASB_IS_ARM64, lang_u);
 
     fclose(f);
-    SecureZeroMemory(b64_pass, sizeof(b64_pass));
-    return TRUE;
+    SecureZeroMemory(pass_u, sizeof pass_u);
+    return rc == 0;
 }
 
 /* Generate unattend.xml for VHDX-first *template* boot.
@@ -1613,90 +1523,36 @@ BOOL generate_unattend_vhdx_template(const wchar_t *output_path,
     return TRUE;
 }
 
-/* Generate setup.cmd for VHDX-first boot (agent already on disk) */
+/* Generate setup.cmd for VHDX-first boot (agent already on disk).
+   Delegates to the shared platform-neutral generator (tools/provision/win_provision.c)
+   so the Windows-host and macOS-host builders stage byte-identical scripts. "wb" keeps
+   the generator's exact CRLF bytes (no text-mode \r doubling). */
 BOOL generate_vhdx_setup_cmd(const wchar_t *output_path)
 {
     FILE *cmd;
-    if (_wfopen_s(&cmd, output_path, L"w") != 0 || !cmd)
+    int rc;
+    if (_wfopen_s(&cmd, output_path, L"wb") != 0 || !cmd)
         return FALSE;
-    fputs(
-        "@echo off\r\n"
-        "set LOG=%SystemRoot%\\AppSandbox\\setup.log\r\n"
-        "echo === setup.cmd started === >> \"%LOG%\"\r\n"
-        "REM Agent already at C:\\Windows\\AppSandbox\\ from VHDX staging\r\n"
-        "\"%SystemRoot%\\AppSandbox\\appsandbox-agent.exe\" --install >> \"%LOG%\" 2>&1\r\n"
-        "echo === setup.cmd finished === >> \"%LOG%\"\r\n",
-        cmd);
+    rc = asb_provision_setup_cmd(cmd);
     fclose(cmd);
-    return TRUE;
+    return rc == 0;
 }
 
-/* Generate SetupComplete.cmd for VHDX-first boot (VDD driver files on disk) */
+/* Generate SetupComplete.cmd for VHDX-first boot (VDD driver files on disk).
+   Delegates to the shared platform-neutral generator (tools/provision/win_provision.c)
+   so the Windows-host and macOS-host builders stage byte-identical scripts. The shared
+   script additionally installs the AppSandboxSHM (ivshmem) + NetKVM (virtio-net) PCI
+   drivers; both steps are if-exist-guarded and a no-op on a Windows host (no 1af4 PCI
+   device present). "wb" keeps the generator's exact CRLF bytes. */
 BOOL generate_vhdx_setupcomplete(const wchar_t *output_path, BOOL ssh_enabled)
 {
     FILE *sc;
-    if (_wfopen_s(&sc, output_path, L"w") != 0 || !sc)
+    int rc;
+    if (_wfopen_s(&sc, output_path, L"wb") != 0 || !sc)
         return FALSE;
-    fputs(
-        "@echo off\r\n"
-        "set LOG=%SystemRoot%\\AppSandbox\\setup.log\r\n"
-        "mkdir \"%SystemRoot%\\AppSandbox\" 2>nul\r\n"
-        "echo === SetupComplete.cmd started === >> \"%LOG%\"\r\n"
-        "\r\n"
-        "set DRVDIR=%SystemRoot%\\AppSandbox\\drivers\r\n"
-        "if not exist \"%DRVDIR%\\AppSandboxVDD.inf\" goto :done\r\n"
-        "\r\n"
-        "echo [VDD] Enabling test signing... >> \"%LOG%\"\r\n"
-        "bcdedit /set testsigning on >> \"%LOG%\" 2>&1\r\n"
-        "\r\n"
-        "if exist \"%DRVDIR%\\AppSandboxVDD.cer\" (\r\n"
-        "    echo [VDD] Installing certificate... >> \"%LOG%\"\r\n"
-        "    certutil -addstore Root \"%DRVDIR%\\AppSandboxVDD.cer\" >> \"%LOG%\" 2>&1\r\n"
-        "    certutil -f -addstore TrustedPublisher \"%DRVDIR%\\AppSandboxVDD.cer\" >> \"%LOG%\" 2>&1\r\n"
-        ")\r\n"
-        "\r\n"
-        "echo [VDD] Installing driver with devcon... >> \"%LOG%\"\r\n"
-        "\"%DRVDIR%\\devcon.exe\" install \"%DRVDIR%\\AppSandboxVDD.inf\" Root\\AppSandboxVDD >> \"%LOG%\" 2>&1\r\n"
-        "echo [VDD] devcon exit code: %errorlevel% >> \"%LOG%\"\r\n"
-        "\r\n"
-        "REM Disable display sleep so IDD swap chain stays alive\r\n"
-        "powercfg /change monitor-timeout-ac 0\r\n"
-        "powercfg /change monitor-timeout-dc 0\r\n"
-        "powercfg /change standby-timeout-ac 0\r\n"
-        "powercfg /change standby-timeout-dc 0\r\n"
-        "echo [PWR] Display sleep disabled >> \"%LOG%\"\r\n"
-        "\r\n"
-        "REM Install VAD driver with devcon\r\n"
-        "if exist \"%DRVDIR%\\AppSandboxVAD.inf\" (\r\n"
-        "    echo [VAD] Installing driver with devcon... >> \"%LOG%\"\r\n"
-        "    \"%DRVDIR%\\devcon.exe\" install \"%DRVDIR%\\AppSandboxVAD.inf\" Root\\AppSandboxVAD >> \"%LOG%\" 2>&1\r\n"
-        "    echo [VAD] devcon exit code: %errorlevel% >> \"%LOG%\"\r\n"
-        ")\r\n"
-        "\r\n",
-        sc);
-
-    if (ssh_enabled) {
-        fputs(
-            "REM Install OpenSSH Server\r\n"
-            "set SSHDIR=%SystemRoot%\\AppSandbox\r\n"
-            "if exist \"%SSHDIR%\\" SSH_MSI_NAME_A "\" (\r\n"
-            "    echo [SSH] Installing OpenSSH Server... >> \"%LOG%\"\r\n"
-            "    msiexec /i \"%SSHDIR%\\" SSH_MSI_NAME_A "\" /qn /norestart >> \"%LOG%\" 2>&1\r\n"
-            "    echo [SSH] msiexec exit code: %errorlevel% >> \"%LOG%\"\r\n"
-            "    sc config sshd start= auto >> \"%LOG%\" 2>&1\r\n"
-            "    net start sshd >> \"%LOG%\" 2>&1\r\n"
-            "    echo [SSH] Done >> \"%LOG%\"\r\n"
-            ")\r\n"
-            "\r\n",
-            sc);
-    }
-
-    fputs(
-        ":done\r\n"
-        "echo === SetupComplete.cmd finished === >> \"%LOG%\"\r\n",
-        sc);
+    rc = asb_provision_setupcomplete(sc, ssh_enabled ? SSH_MSI_NAME_A : NULL);
     fclose(sc);
-    return TRUE;
+    return rc == 0;
 }
 
 /* Find the exe directory (directory containing AppSandbox.exe) */
@@ -1894,6 +1750,92 @@ int generate_vhdx_manifest(const wchar_t *manifest_path,
                 swprintf_s(src, MAX_PATH, L"%s\\%s", vad_dir, vad_files[vf]);
                 if (GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES) {
                     fwprintf(mf, L"%s\t\\Windows\\AppSandbox\\drivers\\%s\n", src, vad_files[vf]);
+                    count++;
+                }
+            }
+        }
+    }
+
+    /* 3a-i. AppSandboxSHM (ivshmem shared-memory transport) driver files.
+       Harmless on a Windows host (no ivshmem PCI device, so SetupComplete's devcon
+       update is a no-op) but staged for parity with the macOS builder and so a
+       release-signed Windows build carries the same payload. Existence-gated: if the
+       driver isn't built into res_dir\drivers/exe_dir\drivers, nothing is staged. */
+    {
+        const wchar_t *shm_files[] = {
+            L"AppSandboxSHM.sys", L"AppSandboxSHM.inf",
+            L"AppSandboxSHM.cat", L"AppSandboxSHM.cer"
+        };
+        wchar_t shm_dir[MAX_PATH];
+        BOOL found_shm = FALSE;
+        int vf;
+
+        if (res_dir) {
+            swprintf_s(shm_dir, MAX_PATH, L"%s\\drivers", res_dir);
+            swprintf_s(src, MAX_PATH, L"%s\\AppSandboxSHM.sys", shm_dir);
+            if (GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES)
+                found_shm = TRUE;
+        }
+        if (!found_shm) {
+            swprintf_s(shm_dir, MAX_PATH, L"%s\\drivers", exe_dir);
+            swprintf_s(src, MAX_PATH, L"%s\\AppSandboxSHM.sys", shm_dir);
+            if (GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES)
+                found_shm = TRUE;
+        }
+        if (!found_shm) {
+            wcscpy_s(shm_dir, MAX_PATH, exe_dir);
+            swprintf_s(src, MAX_PATH, L"%s\\AppSandboxSHM.sys", shm_dir);
+            if (GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES)
+                found_shm = TRUE;
+        }
+
+        if (found_shm) {
+            for (vf = 0; vf < 4; vf++) {
+                swprintf_s(src, MAX_PATH, L"%s\\%s", shm_dir, shm_files[vf]);
+                if (GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES) {
+                    fwprintf(mf, L"%s\t\\Windows\\AppSandbox\\drivers\\%s\n", src, shm_files[vf]);
+                    count++;
+                }
+            }
+        }
+    }
+
+    /* 3a-ii. NetKVM (virtio-net NIC) driver files + netkvmp.exe + license. WHQL-signed
+       (no cert). No-op on a Windows host (Hyper-V synthetic NIC; no virtio-net device).
+       netkvmp.exe must sit beside the INF (the INF CopyFiles-es it). Existence-gated. */
+    {
+        const wchar_t *net_files[] = {
+            L"netkvm.inf", L"netkvm.sys", L"netkvm.cat",
+            L"netkvmp.exe", L"virtio-win_license.txt"
+        };
+        wchar_t net_dir[MAX_PATH];
+        BOOL found_net = FALSE;
+        int vf;
+
+        if (res_dir) {
+            swprintf_s(net_dir, MAX_PATH, L"%s\\drivers", res_dir);
+            swprintf_s(src, MAX_PATH, L"%s\\netkvm.inf", net_dir);
+            if (GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES)
+                found_net = TRUE;
+        }
+        if (!found_net) {
+            swprintf_s(net_dir, MAX_PATH, L"%s\\drivers", exe_dir);
+            swprintf_s(src, MAX_PATH, L"%s\\netkvm.inf", net_dir);
+            if (GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES)
+                found_net = TRUE;
+        }
+        if (!found_net) {
+            wcscpy_s(net_dir, MAX_PATH, exe_dir);
+            swprintf_s(src, MAX_PATH, L"%s\\netkvm.inf", net_dir);
+            if (GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES)
+                found_net = TRUE;
+        }
+
+        if (found_net) {
+            for (vf = 0; vf < 5; vf++) {
+                swprintf_s(src, MAX_PATH, L"%s\\%s", net_dir, net_files[vf]);
+                if (GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES) {
+                    fwprintf(mf, L"%s\t\\Windows\\AppSandbox\\drivers\\%s\n", src, net_files[vf]);
                     count++;
                 }
             }

@@ -1,41 +1,23 @@
 /*
  * appsandbox-input.exe — Console-session input injector for AppSandbox.
  *
- * Runs in the interactive console session (Session 1+), spawned by the
- * agent service via CreateProcessAsUser. Listens on AF_HYPERV socket
- * (service GUID :0003) for InputPacket messages from the host and calls
- * SendInput to inject mouse/keyboard events into the active desktop.
+ * Runs in the interactive console session (Session 1+), spawned by the agent
+ * service via CreateProcessAsUser. Receives InputPacket messages from the host
+ * over the AppSandbox transport (asb_transport, ASB_CH_INPUT: AF_HYPERV on a
+ * Windows host, ivshmem shared memory on a macOS host) and calls SendInput to
+ * inject mouse/keyboard events into the active desktop.
  *
  * Logs to C:\Windows\AppSandbox\input.log (beside agent.log).
  */
 
-#include <winsock2.h>
+#include "../transport/asb_transport.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdarg.h>
 
-#pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "user32.lib")
 
-/* ---- Hyper-V socket definitions ---- */
-
-#define AF_HYPERV 34
-
-typedef struct _SOCKADDR_HV {
-    ADDRESS_FAMILY Family;
-    USHORT Reserved;
-    GUID VmId;
-    GUID ServiceId;
-} SOCKADDR_HV;
-
-static const GUID HV_GUID_WILDCARD =
-    { 0, 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } };
-
-/* Input channel: {A5B0CAFE-0003-4000-8000-000000000001} */
-static const GUID INPUT_SERVICE_GUID =
-    { 0xa5b0cafe, 0x0003, 0x4000, { 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 } };
-
-/* ---- Input protocol (must match vm_display_idd.c) ---- */
+/* ---- Input protocol (must match the host sender) ---- */
 
 #define INPUT_MAGIC         0x4E495341  /* "ASIN" little-endian */
 #define INPUT_MOUSE_MOVE    0
@@ -45,6 +27,7 @@ static const GUID INPUT_SERVICE_GUID =
 #define INPUT_BTN_LEFT      0
 #define INPUT_BTN_RIGHT     1
 #define INPUT_BTN_MIDDLE    2
+#define INPUT_READY_MAGIC   0x59445249  /* "IRDY" little-endian */
 
 #pragma pack(push, 1)
 typedef struct {
@@ -159,113 +142,86 @@ static void inject_input(const InputPacket *pkt)
     }
 }
 
-/* ---- Handle one client connection ---- */
+/* ---- Receive exactly len bytes (transport may deliver partial reads) ---- */
 
-#define INPUT_READY_MAGIC  0x59445249  /* "IRDY" little-endian */
+static int recv_full(AsbConn *c, void *buf, int len)
+{
+    int got = 0;
+    while (got < len) {
+        int n = asb_recv(c, (char *)buf + got, len - got);
+        if (n <= 0)
+            return n;   /* 0 = peer closed, <0 = error */
+        got += n;
+    }
+    return got;
+}
 
-static void handle_client(SOCKET s)
+/* ---- Handle one host connection ---- */
+
+static void handle_conn(AsbConn *c)
 {
     InputPacket pkt;
     UINT pkt_count = 0;
     UINT32 ready = INPUT_READY_MAGIC;
 
-    /* Tell the host we're ready to receive input */
-    if (send(s, (const char *)&ready, sizeof(ready), 0) != sizeof(ready)) {
-        input_log("Failed to send ready signal (%d).", WSAGetLastError());
+    /* Tell the host we're ready to receive input. */
+    if (asb_send(c, &ready, sizeof(ready)) != (int)sizeof(ready)) {
+        input_log("Failed to send ready signal.");
         return;
     }
-    input_log("Sent ready signal to host.");
+    input_log("Sent ready signal to host. Entering recv loop.");
 
-    input_log("Entering recv loop.");
-
-    while (1) {
-        int total = 0;
-        char *p = (char *)&pkt;
-        int pkt_size = (int)sizeof(pkt);
-
-        while (total < pkt_size) {
-            int n = recv(s, p + total, pkt_size - total, 0);
-            if (n <= 0) {
-                if (n == 0) {
-                    input_log("Client disconnected after %u packets.", pkt_count);
-                    return;
-                }
-                input_log("recv error %d (n=%d) after %u packets.", WSAGetLastError(), n, pkt_count);
-                return;
-            }
-            total += n;
+    for (;;) {
+        int n = recv_full(c, &pkt, (int)sizeof(pkt));
+        if (n <= 0) {
+            input_log("%s after %u packets.",
+                       n == 0 ? "Host disconnected" : "recv error", pkt_count);
+            return;
         }
-
         if (pkt.magic != INPUT_MAGIC) {
             input_log("Bad magic 0x%08X, skipping.", pkt.magic);
             continue;
         }
-
         pkt_count++;
         if (pkt_count == 1)
             input_log("First packet: type=%u p1=%u p2=%u p3=%u",
                        pkt.type, pkt.param1, pkt.param2, pkt.param3);
-
         inject_input(&pkt);
     }
 }
 
-/* ---- Main: listen on AF_HYPERV, accept connections ---- */
+/* ---- Main: listen on the input channel, accept connections ---- */
 
 int main(void)
 {
-    WSADATA wsa;
-    SOCKET listen_s;
-    SOCKADDR_HV addr;
+    AsbListener *l;
 
     input_log("Starting (PID=%lu, session=%lu).",
               GetCurrentProcessId(),
               WTSGetActiveConsoleSessionId());
 
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        input_log("WSAStartup failed (%d).", WSAGetLastError());
+    if (asb_transport_init() != 0) {
+        input_log("asb_transport_init failed.");
         return 1;
     }
 
-    listen_s = socket(AF_HYPERV, SOCK_STREAM, 1 /* HV_PROTOCOL_RAW */);
-    if (listen_s == INVALID_SOCKET) {
-        input_log("socket(AF_HYPERV) failed (%d).", WSAGetLastError());
-        WSACleanup();
+    l = asb_listen(ASB_CH_INPUT);
+    if (!l) {
+        input_log("asb_listen(ASB_CH_INPUT) failed.");
         return 1;
     }
+    input_log("Listening on input channel (transport=%s).",
+              asb_transport_is_ivshmem() ? "ivshmem" : "hyperv");
 
-    memset(&addr, 0, sizeof(addr));
-    addr.Family = AF_HYPERV;
-    addr.VmId = HV_GUID_WILDCARD;
-    addr.ServiceId = INPUT_SERVICE_GUID;
-
-    if (bind(listen_s, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        input_log("bind failed (%d).", WSAGetLastError());
-        closesocket(listen_s);
-        WSACleanup();
-        return 1;
-    }
-
-    if (listen(listen_s, 2) != 0) {
-        input_log("listen failed (%d).", WSAGetLastError());
-        closesocket(listen_s);
-        WSACleanup();
-        return 1;
-    }
-
-    input_log("Listening on GUID a5b0cafe-0003-4000-8000-000000000001.");
-
-    /* Accept loop — one client at a time */
+    /* Accept loop — one host connection at a time. */
     for (;;) {
-        SOCKET client_s = accept(listen_s, NULL, NULL);
-        if (client_s == INVALID_SOCKET) {
-            input_log("accept failed (%d).", WSAGetLastError());
-            Sleep(1000);
+        AsbConn *c = asb_accept(l, -1);
+        if (!c) {
+            Sleep(100);
             continue;
         }
         input_log("Host connected.");
-        handle_client(client_s);
-        closesocket(client_s);
+        handle_conn(c);
+        asb_close(c);
     }
-
 }

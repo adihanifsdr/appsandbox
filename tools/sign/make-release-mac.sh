@@ -121,6 +121,32 @@ xcodebuild -project "$PROJECT" -scheme "$SCHEME" -configuration "$CONFIGURATION"
 xcodebuild -project "$PROJECT" -scheme "$SCHEME" -configuration "$CONFIGURATION" build >/dev/null
 [[ -d "$APP_PATH" ]] || die "build produced no app at $APP_PATH"
 
+# --- 1b. sign the embedded QEMU (Resources/ Mach-O that Xcode does not sign) ---
+# qemu + its dylibs live under Contents/Resources/qemu — not an Xcode code location, so the build
+# left them ad-hoc. Sign them with Developer ID + hardened runtime + a secure timestamp (all
+# required for notarization), then re-seal the .app so its resource envelope covers the re-signed
+# qemu. This runs here (not in the Xcode build phase) because the build script-phase sandbox can't
+# reach the signing keychain. The qemu binary keeps its HVF entitlement; the dylibs share the team.
+step "Signing embedded QEMU + re-sealing the app"
+SIGNID="$(jget "$LOCAL" signingIdentity)"
+[[ -n "$SIGNID" ]] || SIGNID="$EXPECTED_IDENTITY"
+[[ -n "$SIGNID" ]] || die "no signingIdentity in $LOCAL (or expectedIdentity in config)"
+QDIR="$APP_PATH/Contents/Resources/qemu"
+if [[ -d "$QDIR" ]]; then
+    for d in "$QDIR"/lib/*.dylib; do
+        [[ -e "$d" ]] && codesign --force --options runtime --timestamp --sign "$SIGNID" "$d"
+    done
+    codesign --force --options runtime --timestamp \
+        --entitlements "$ROOT/vendor/qemu-ivshmem/qemu.entitlements" \
+        --sign "$SIGNID" "$QDIR/bin/qemu-system-aarch64"
+    # re-seal the app bundle so CodeResources covers the re-signed qemu (preserve the app's own
+    # entitlements/identifier/flags; nested frameworks keep their existing Developer ID signatures).
+    codesign --force --options runtime --timestamp \
+        --preserve-metadata=identifier,entitlements,flags \
+        --sign "$SIGNID" "$APP_PATH"
+    echo "    signed qemu + $(ls "$QDIR"/lib/*.dylib 2>/dev/null | wc -l | tr -d ' ') dylibs, re-sealed app"
+fi
+
 # --- 2. verify signature ---
 step "Verifying signature"
 codesign --verify --deep --strict --verbose=1 "$APP_PATH"

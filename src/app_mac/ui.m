@@ -57,7 +57,7 @@ static NSDictionary *vmToJsDict(const AsbVmMac *vm) {
     return @{
         @"name":            [NSString stringWithUTF8String:vm->name],
         @"osType":          [NSString stringWithUTF8String:vm->os_type],
-        @"running":         @(vm->running || (!vm->install_complete && vm->install_progress >= 0)),
+        @"running":         @(vm->running || (!vm->disk_built && vm->install_progress >= 0)),
         @"shuttingDown":    @(vm->shutting_down ? YES : NO),
         @"agentOnline":     @(vm->agent_online ? YES : NO),
         @"ramMb":           @(vm->ram_mb),
@@ -69,8 +69,13 @@ static NSDictionary *vmToJsDict(const AsbVmMac *vm) {
         @"netAdapter":      @"",
         @"isTemplate":      @NO,
         @"hypervVideoOff":  @NO,
-        @"buildingVhdx":    @NO,
-        @"vhdxStaging":     @NO,
+        /* Disk-build phase: feed the shared web/app.js "Building Disk (X%)" / "Staging
+         * files..." branch (which keys on buildingVhdx/vhdxStaging/vhdxProgress), matching
+         * the Windows GUI. True only while the local disk build runs (install_progress is a
+         * real 0..100 percent; it becomes -1 when the guest first-boot takes over). */
+        @"buildingVhdx":    @(!vm->disk_built && vm->install_progress >= 0),
+        @"vhdxStaging":     @(!vm->disk_built && vm->install_progress >= 0 &&
+                              strstr(vm->install_status, "Staging") != NULL),
         @"vhdxProgress":    @(vm->install_progress < 0 ? 0 : vm->install_progress),
         @"installComplete": @(vm->install_complete ? YES : NO),
         @"installStatus":   [NSString stringWithUTF8String:vm->install_status],
@@ -267,6 +272,7 @@ static void handleCreateVm(NSDictionary *msg) {
     NSString *adminPass = msg[@"adminPass"] ?: @"test123";
     BOOL sshEnabled     = [msg[@"sshEnabled"] boolValue];
     BOOL sshDeployKey   = [msg[@"sshDeployKey"] boolValue];
+    BOOL testMode       = [msg[@"testMode"] boolValue];
     int ramMb           = [msg[@"ramMb"] intValue];
     int hddGb           = [msg[@"hddGb"] intValue];
     int cpuCores        = [msg[@"cpuCores"] intValue];
@@ -278,7 +284,7 @@ static void handleCreateVm(NSDictionary *msg) {
                                 ramMb, hddGb, cpuCores,
                                 gpuMode, networkMode, imagePath,
                                 [adminUser UTF8String], [adminPass UTF8String],
-                                sshEnabled, sshDeployKey);
+                                sshEnabled, sshDeployKey, testMode);
     if (rc != 0) {
         sendAlert([NSString stringWithFormat:@"Create failed (error %d)", rc]);
     }
@@ -335,8 +341,15 @@ static void handleBrowseImage(NSDictionary *msg) {
         panel.canChooseFiles = YES;
         panel.canChooseDirectories = NO;
         panel.allowsMultipleSelection = NO;
-        panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"ipsw"]];
-        panel.message = @"Select a macOS restore image (.ipsw)";
+        /* .iso for a Windows guest (built from a Microsoft ISO), .ipsw for a
+         * macOS restore image. Both guest types are now creatable on a Mac host. */
+        NSMutableArray<UTType *> *types = [NSMutableArray array];
+        UTType *iso  = [UTType typeWithFilenameExtension:@"iso"];
+        UTType *ipsw = [UTType typeWithFilenameExtension:@"ipsw"];
+        if (iso)  [types addObject:iso];
+        if (ipsw) [types addObject:ipsw];
+        panel.allowedContentTypes = types;
+        panel.message = @"Select a Windows ISO (.iso) or macOS restore image (.ipsw)";
         [panel beginWithCompletionHandler:^(NSModalResponse result) {
             NSString *path = @"";
             if (result == NSModalResponseOK && panel.URL) path = panel.URL.path;

@@ -32,10 +32,16 @@
 #include <grp.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <CommonCrypto/CommonKeyDerivation.h>
+#include "../transport/asb_shm_layout.h"   /* authoritative ivshmem region table + asb_shm_publish */
+#include "engine/win_disk.h"               /* from-scratch Windows-disk builder (apply WIM + stage) */
+#include "engine/wim.h"                    /* WIM XML reader -> install image's default UI language */
+#include "../provision/win_provision.h"    /* shared unattend/setup.cmd/SetupComplete.cmd generators */
+#include "../provision/mac_account_hash.h"  /* shared macOS ShadowHash + kcpassword encoders */
 
 /* ---- stdout protocol helpers ---- */
 
@@ -49,6 +55,7 @@ static void emit_progress(int pct, NSString *step) {
     fflush(stdout);
 }
 static void emit_log(NSString *msg)      { emit(@"LOG",      msg); }
+static void emit_lang(NSString *tag)     { emit(@"LANG",     tag); }   /* detected ISO language (mirrors Windows iso-patch.c) */
 static void emit_done(NSString *path)    { emit(@"DONE",     path); }
 static void emit_error(NSString *msg)    { emit(@"ERROR",    msg); }
 
@@ -381,50 +388,10 @@ static BOOL stage_entry(StageEntry e, NSString *mountPt, NSString **errOut) {
 
 /* ---- User injection (dslocal) ---- */
 
-static NSData *shadow_hash_data_for_password(const char *pw, size_t pwLen) {
-    unsigned char salt[32];
-    arc4random_buf(salt, 32);
-    const int iterations = 150000;
-    unsigned char entropy[128];
-    int rc = CCKeyDerivationPBKDF(kCCPBKDF2, pw, pwLen,
-                                   salt, sizeof(salt),
-                                   kCCPRFHmacAlgSHA512,
-                                   iterations,
-                                   entropy, sizeof(entropy));
-    if (rc != 0) return nil;
-
-    NSDictionary *inner = @{
-        @"SALTED-SHA512-PBKDF2": @{
-            @"entropy":    [NSData dataWithBytes:entropy length:sizeof(entropy)],
-            @"iterations": @(iterations),
-            @"salt":       [NSData dataWithBytes:salt length:sizeof(salt)],
-        }
-    };
-    NSData *plist = [NSPropertyListSerialization dataWithPropertyList:inner
-                                                                format:NSPropertyListBinaryFormat_v1_0
-                                                               options:0
-                                                                 error:NULL];
-    memset(entropy, 0, sizeof(entropy));
-    memset(salt,    0, sizeof(salt));
-    return plist;
-}
-
-/* macOS autologin password obfuscation (/etc/kcpassword). */
-static NSData *kcpassword_for(const char *pw, size_t pwLen) {
-    static const unsigned char cipher[] = {
-        0x7D, 0x89, 0x52, 0x23, 0xD2, 0xBC, 0xDD, 0xEA, 0xA3, 0xB9, 0x1F
-    };
-    size_t outLen = ((pwLen / 12) + 1) * 12; /* round up to next multiple of 12 */
-    unsigned char *buf = malloc(outLen);
-    for (size_t i = 0; i < outLen; i++) {
-        unsigned char src = (i < pwLen) ? (unsigned char)pw[i] : cipher[i % 11];
-        buf[i] = src ^ cipher[i % 11];
-    }
-    NSData *result = [NSData dataWithBytes:buf length:outLen];
-    memset(buf, 0, outLen);
-    free(buf);
-    return result;
-}
+/* ShadowHash + kcpassword live in tools/provision/mac_account_hash.{h,m}, shared with the host
+ * daemon so it can compute them in-process and hand this applier only the non-plaintext result
+ * (--shadowhash-file / --kcpassword-file). The plaintext --user-password-file path remains for
+ * direct CLI use, where this applier computes them itself via the same shared functions. */
 
 static BOOL write_plist(NSDictionary *plist, NSString *path,
                          uid_t uid, gid_t gid, mode_t mode,
@@ -481,13 +448,12 @@ static BOOL add_user_to_admin_group(NSString *mountPt, NSString *shortname,
 
 static BOOL inject_user(NSString *mountPt,
                         NSString *shortname, NSString *realname, int uid,
-                        const char *password, size_t passwordLen,
+                        NSData *shd,
                         NSString **errOut) {
     emit_status([NSString stringWithFormat:@"Creating user '%@'", shortname]);
 
-    NSData *shd = shadow_hash_data_for_password(password, passwordLen);
     if (!shd) {
-        if (errOut) *errOut = @"PBKDF2 failed";
+        if (errOut) *errOut = @"missing ShadowHashData";
         return NO;
     }
 
@@ -674,7 +640,7 @@ static BOOL enable_ssh(NSString *mountPt, NSString **errOut) {
 }
 
 static BOOL enable_autologin(NSString *mountPt, NSString *shortname,
-                             const char *password, size_t passwordLen,
+                             NSData *kc,
                              NSString **errOut) {
     emit_status(@"Enabling auto-login");
 
@@ -688,7 +654,7 @@ static BOOL enable_autologin(NSString *mountPt, NSString *shortname,
     if (!write_plist(lw, lwPath, 0, 0, 0644, errOut)) return NO;
 
     /* /etc/kcpassword: obfuscated password bytes (XOR cipher). */
-    NSData *kc = kcpassword_for(password, passwordLen);
+    if (!kc) { if (errOut) *errOut = @"missing kcpassword"; return NO; }
     NSString *kcPath = [mountPt stringByAppendingPathComponent:@"private/etc/kcpassword"];
     [[NSFileManager defaultManager] createDirectoryAtPath:
         [kcPath stringByDeletingLastPathComponent]
@@ -758,6 +724,8 @@ static int cmd_stage(int argc, char **argv) {
     NSString *userReal  = nil;
     int userUid = 501;
     NSString *passFile = nil;
+    NSString *shadowhashFile = nil;   /* daemon-supplied precomputed ShadowHashData (no plaintext) */
+    NSString *kcpasswordFile = nil;   /* daemon-supplied precomputed /etc/kcpassword bytes */
     NSString *computerName = nil;
     BOOL skipSA = NO;
     BOOL autoLogin = NO;
@@ -775,6 +743,10 @@ static int cmd_stage(int argc, char **argv) {
             userUid = atoi(argv[++i]);
         else if (strcmp(argv[i], "--user-password-file") == 0 && i + 1 < argc)
             passFile = [NSString stringWithUTF8String:argv[++i]];
+        else if (strcmp(argv[i], "--shadowhash-file") == 0 && i + 1 < argc)
+            shadowhashFile = [NSString stringWithUTF8String:argv[++i]];
+        else if (strcmp(argv[i], "--kcpassword-file") == 0 && i + 1 < argc)
+            kcpasswordFile = [NSString stringWithUTF8String:argv[++i]];
         else if (strcmp(argv[i], "--computer-name") == 0 && i + 1 < argc)
             computerName = [NSString stringWithUTF8String:argv[++i]];
         else if (strcmp(argv[i], "--skip-setup-assistant") == 0)
@@ -797,7 +769,11 @@ static int cmd_stage(int argc, char **argv) {
     NSArray *entries = load_manifest(manifest, &err);
     if (!entries) { emit_error(err); return 3; }
 
-    /* Read password file into a buffer we'll wipe before exit. */
+    /* Resolve the account credential material. In the daemon flow the host computes the ShadowHash +
+     * kcpassword IN-PROCESS and passes them as files -- this applier never sees the plaintext (the
+     * mirror of the Windows path, where the password is encoded in the daemon, not the disk-applier).
+     * Direct CLI use passes --user-password-file instead; we then compute them here via the same
+     * shared encoders. The password buffer is wiped before exit. */
     char passBuf[256] = {0};
     size_t passLen = 0;
     if (passFile) {
@@ -809,6 +785,20 @@ static int cmd_stage(int argc, char **argv) {
         ssize_t n = read(pfd, passBuf, sizeof(passBuf) - 1);
         close(pfd);
         if (n > 0) passLen = (size_t)n;
+    }
+
+    NSData *shdData = nil, *kcData = nil;
+    if (shadowhashFile) {
+        shdData = [NSData dataWithContentsOfFile:shadowhashFile];
+        if (!shdData) { memset(passBuf, 0, sizeof(passBuf)); emit_error(@"stage: cannot read --shadowhash-file"); return 3; }
+    } else if (passLen > 0) {
+        shdData = asb_macos_shadow_hash_data(passBuf, passLen);
+    }
+    if (kcpasswordFile) {
+        kcData = [NSData dataWithContentsOfFile:kcpasswordFile];
+        if (!kcData) { memset(passBuf, 0, sizeof(passBuf)); emit_error(@"stage: cannot read --kcpassword-file"); return 3; }
+    } else if (passLen > 0) {
+        kcData = asb_macos_kcpassword(passBuf, passLen);
     }
 
     emit_progress(5, @"Loaded manifest");
@@ -841,10 +831,10 @@ static int cmd_stage(int argc, char **argv) {
     }
 
     /* Optional: create user, skip Setup Assistant, enable autologin. */
-    if (userShort && passLen > 0) {
+    if (userShort && shdData) {
         emit_progress(75, @"Creating user account");
         if (!inject_user(g_mount.mountPt, userShort, userReal ?: userShort,
-                         userUid, passBuf, passLen, &err)) {
+                         userUid, shdData, &err)) {
             unmount_and_detach(&g_mount);
             memset(passBuf, 0, sizeof(passBuf));
             emit_error(err);
@@ -860,9 +850,9 @@ static int cmd_stage(int argc, char **argv) {
             return 7;
         }
     }
-    if (autoLogin && userShort && passLen > 0) {
+    if (autoLogin && userShort && kcData) {
         emit_progress(90, @"Enabling auto-login");
-        if (!enable_autologin(g_mount.mountPt, userShort, passBuf, passLen, &err)) {
+        if (!enable_autologin(g_mount.mountPt, userShort, kcData, &err)) {
             unmount_and_detach(&g_mount);
             memset(passBuf, 0, sizeof(passBuf));
             emit_error(err);
@@ -1336,6 +1326,353 @@ static int cmd_install(int argc, char **argv) {
     return exitCode;
 }
 
+/* ---- "publish-shm" subcommand ----
+ * Write the asb_transport directory (region table + slot caps) into the ivshmem backing file
+ * before QEMU boots, so every guest service's asb_transport_init() sees ASB_SHM_DIR_MAGIC at start
+ * and selects the ivshmem backend. The VM launcher owns the directory; the viewer/host attach as
+ * consumers. The product QemuVm launcher calls asb_shm_publish() in-process from the same header;
+ * this subcommand is the equivalent for the raw-QEMU dev harness (and builds via Xcode, not clang). */
+static int cmd_publish_shm(int argc, char **argv) {
+    NSString *shmPath = nil;
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--shm") == 0 && i + 1 < argc)
+            shmPath = [NSString stringWithUTF8String:argv[++i]];
+    }
+    if (!shmPath) { emit_error(@"publish-shm: --shm <path> required"); return 2; }
+
+    int fd = open(shmPath.fileSystemRepresentation, O_RDWR);
+    if (fd < 0) {
+        emit_error([NSString stringWithFormat:@"open %@: %s", shmPath, strerror(errno)]);
+        return 3;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0) { close(fd); emit_error(@"fstat failed"); return 3; }
+    if ((uint64_t)st.st_size < ASB_P9_REGION_OFF + ASB_P9_REGION_SIZE) {
+        close(fd);
+        emit_error([NSString stringWithFormat:@"backing file too small: %lld bytes (need >= %llu)",
+                    (long long)st.st_size,
+                    (unsigned long long)(ASB_P9_REGION_OFF + ASB_P9_REGION_SIZE)]);
+        return 3;
+    }
+    void *bar = mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (bar == MAP_FAILED) { close(fd); emit_error(@"mmap failed"); return 3; }
+
+    asb_shm_publish((uint8_t *)bar, (uint64_t)st.st_size);
+    msync(bar, 4096, MS_SYNC);
+    munmap(bar, (size_t)st.st_size);
+    close(fd);
+    emit_log([NSString stringWithFormat:@"published %d regions to %@", ASB_SHM_N_REGIONS, shmPath]);
+    emit_done(shmPath);
+    return 0;
+}
+
+/* ======================================================================== *
+ *  "build-windows" subcommand
+ *
+ *  From-scratch Windows 11 ARM64 VM disk creation on macOS. Mirrors the Windows
+ *  VHDX-first deploy path (generate_unattend_vhdx + generate_vhdx_setup_cmd +
+ *  generate_vhdx_setupcomplete + generate_vhdx_manifest) but writes our OWN NTFS
+ *  via win_disk_build() instead of DISM:
+ *    1. mount the Microsoft ISO read-only -> sources/install.wim
+ *    2. generate unattend.xml + setup.cmd + SetupComplete.cmd into a temp dir
+ *    3. build a "<host-src>\t<guest-dest>" manifest: answer file at
+ *       \Windows\Panther, agent EXEs + test-signed drivers + devcon at
+ *       \Windows\AppSandbox[\drivers], SetupComplete.cmd at \Windows\Setup\Scripts
+ *    4. win_disk_build() applies the WIM image then stages our files at those
+ *       real guest paths (mkdir -p over the apply-built dir map)
+ *    5. unmount the ISO + remove the temp dir
+ *
+ *  The SetupComplete.cmd differs from the Windows one in one way: it also installs
+ *  the AppSandboxSHM PCI driver (pnputil), since the Mac transport is ivshmem rather
+ *  than AF_HYPERV. testMode (Secure Boot off + test signing on) is mandatory: the
+ *  guest drivers are test-signed. ======================================================================== */
+
+/* Append "<src>\t<dest>\n" to the manifest if src exists on the host. */
+static int bw_manifest_add(FILE *mf, NSString *src, const char *dest) {
+    if (!src || ![[NSFileManager defaultManager] fileExistsAtPath:src]) return 0;
+    fprintf(mf, "%s\t%s\n", src.UTF8String, dest);
+    return 1;
+}
+
+/* ---- ISO mount lifecycle ---- */
+typedef struct { NSString *diskDev; NSString *mountPt; NSString *shadowPath; } IsoMount;
+
+/* Attach the ISO and locate the mount point that actually contains sources/install.wim (a Windows ISO
+ * exposes both ISO9660 and UDF volumes).
+ *
+ * CONCURRENCY: each build attaches with its OWN unique copy-on-write SHADOW file, which gives it an
+ * INDEPENDENT device + mount point. hdiutil de-duplicates a plain re-attach of the same image to one
+ * shared device, so without the shadow two concurrent builds would share a device and detaching one
+ * would tear the ISO out from under the other. The shadow stays ~empty (we only READ install.wim) and
+ * is deleted on unmount. */
+static BOOL bw_mount_iso(NSString *isoPath, IsoMount *out, NSString **errOut) {
+    out->diskDev = nil; out->mountPt = nil; out->shadowPath = nil;
+    NSString *shadow = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                        [NSString stringWithFormat:@"asb-iso-%08x.shadow", arc4random()]];
+    NSString *sout = nil, *serr = nil;
+    int rc = run_tool(@"/usr/bin/hdiutil",
+                      @[@"attach", @"-nobrowse", @"-shadow", shadow, @"-plist", isoPath],
+                      &sout, &serr);
+    if (rc != 0) { if (errOut) *errOut = [NSString stringWithFormat:@"hdiutil attach failed (%d): %@", rc, serr]; return NO; }
+    out->shadowPath = shadow;
+
+    NSData *d = [sout dataUsingEncoding:NSUTF8StringEncoding];
+    id parsed = [NSPropertyListSerialization propertyListWithData:d options:0 format:NULL error:NULL];
+    NSArray *ents = [parsed isKindOfClass:[NSDictionary class]] ? parsed[@"system-entities"] : nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSDictionary *e in ents) {
+        NSString *dev = e[@"dev-entry"];
+        /* the whole-image parent has no "s<N>" suffix: record it for detach */
+        if (dev && !out->diskDev &&
+            [dev rangeOfString:@"s" options:0 range:NSMakeRange(@"/dev/disk".length, dev.length-@"/dev/disk".length)].location == NSNotFound)
+            out->diskDev = dev;
+        NSString *mp = e[@"mount-point"];
+        if (mp.length) {
+            NSString *wim = [mp stringByAppendingPathComponent:@"sources/install.wim"];
+            if ([fm fileExistsAtPath:wim]) out->mountPt = mp;
+        }
+    }
+    /* Fallback for detach: first dev-entry. */
+    if (!out->diskDev && ents.count) out->diskDev = [ents firstObject][@"dev-entry"];
+    if (!out->mountPt) {
+        /* No install.wim found at any mount point; detach + fail. */
+        if (out->diskDev) (void)run_tool(@"/usr/bin/hdiutil", @[@"detach", @"-force", out->diskDev], NULL, NULL);
+        [[NSFileManager defaultManager] removeItemAtPath:shadow error:nil];
+        if (errOut) *errOut = @"ISO mounted but sources/install.wim not found";
+        return NO;
+    }
+    return YES;
+}
+
+static void bw_unmount_iso(IsoMount *m) {
+    if (m->diskDev) (void)run_tool(@"/usr/bin/hdiutil", @[@"detach", @"-force", m->diskDev], NULL, NULL);
+    if (m->shadowPath) [[NSFileManager defaultManager] removeItemAtPath:m->shadowPath error:nil];   /* COW shadow */
+    m->diskDev = nil; m->mountPt = nil; m->shadowPath = nil;
+}
+
+/* win_disk_build progress -> PROGRESS/STATUS lines. */
+static void bw_progress(int pct, const char *msg) {
+    emit_progress(pct, msg ? [NSString stringWithUTF8String:msg] : @"");
+}
+
+static int cmd_build_windows(int argc, char **argv) {
+    NSString *iso = nil, *out = nil, *sshMsi = nil, *signedZip = nil, *netkvmZip = nil;
+    NSString *vmName = @"WIN11-VM", *user = @"user", *pass = @"test123";
+    NSString *provDir = nil;   /* host-generated unattend.xml/setup.cmd/SetupComplete.cmd (password encoded host-side) */
+    NSString *lang = @"";   /* empty => auto-detect from the install.wim XML (else en-US) */
+    int diskGb = 64, imageIdx = 1, testMode = 1;   /* testMode optional (mirrors Windows disk builder) */
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--iso") == 0 && i+1 < argc) iso = @(argv[++i]);
+        else if (strcmp(argv[i], "--out") == 0 && i+1 < argc) out = @(argv[++i]);
+        else if (strcmp(argv[i], "--signed-payload-zip") == 0 && i+1 < argc) signedZip = @(argv[++i]);
+        else if (strcmp(argv[i], "--netkvm-zip") == 0 && i+1 < argc) netkvmZip = @(argv[++i]);
+        else if (strcmp(argv[i], "--ssh-msi") == 0 && i+1 < argc) sshMsi = @(argv[++i]);
+        else if (strcmp(argv[i], "--vm-name") == 0 && i+1 < argc) vmName = @(argv[++i]);
+        else if (strcmp(argv[i], "--user") == 0 && i+1 < argc) user = @(argv[++i]);
+        else if (strcmp(argv[i], "--pass") == 0 && i+1 < argc) pass = @(argv[++i]);
+        else if (strcmp(argv[i], "--prov-dir") == 0 && i+1 < argc) provDir = @(argv[++i]);
+        else if (strcmp(argv[i], "--lang") == 0 && i+1 < argc) lang = @(argv[++i]);
+        else if (strcmp(argv[i], "--disk-gb") == 0 && i+1 < argc) diskGb = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--image-index") == 0 && i+1 < argc) imageIdx = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--test-mode") == 0 && i+1 < argc) testMode = atoi(argv[++i]);
+    }
+    if (!iso || !out || !signedZip) {
+        emit_error(@"build-windows: --iso, --out and --signed-payload-zip are required");
+        return 2;
+    }
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    /* 1) temp staging dir for the generated answer file + scripts */
+    NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                     [NSString stringWithFormat:@"asb-winbuild-%d", getpid()]];
+    [fm removeItemAtPath:tmp error:nil];
+    NSError *mkErr = nil;
+    if (![fm createDirectoryAtPath:tmp withIntermediateDirectories:YES attributes:nil error:&mkErr]) {
+        emit_error([NSString stringWithFormat:@"mkdir staging: %@", mkErr.localizedDescription]); return 3;
+    }
+
+    /* The guest payload comes ONLY from the downloaded, signed release zip -- there is no bundled
+     * fallback. Extract the whole zip into this per-build temp (its own tmp, so concurrent creates
+     * never collide). A full extract (not a path-filtered subset) is required because the Windows-built
+     * zip stores entries with backslash separators that forward-slash unzip include-patterns never
+     * match (unzip would exit 11 and extract nothing); a full extract makes Info-ZIP rewrite the
+     * backslashes into real resources/ + drivers/ subdirs. Such zips make unzip exit 1 (warning), so
+     * the exit code is not a reliable signal -- the probe file decides. binDir holds the signed EXEs;
+     * drvDir holds the signed drivers (VDD/VAD/SHM) + devcon. */
+    NSString *signedDir = [tmp stringByAppendingPathComponent:@"signed"];
+    (void)run_tool(@"/usr/bin/unzip", @[@"-o", @"-q", signedZip, @"-d", signedDir], NULL, NULL);
+    NSString *binDir = [signedDir stringByAppendingPathComponent:@"resources"];
+    NSString *drvDir = [signedDir stringByAppendingPathComponent:@"drivers"];
+    NSString *devconPath = [drvDir stringByAppendingPathComponent:@"devcon.exe"];
+    if (![fm fileExistsAtPath:[binDir stringByAppendingPathComponent:@"appsandbox-agent.exe"]]) {
+        [fm removeItemAtPath:tmp error:nil];
+        emit_error(@"build-windows: signed payload zip did not yield resources/appsandbox-agent.exe");
+        return 3;
+    }
+    emit_log(@"using downloaded signed guest payload");
+
+    /* NetKVM (virtio-net) ships in its own small vendored zip (BSD-3-Clause), pulled + cached
+     * separately because it changes independently of the signed release. Best-effort: a VM without it
+     * still comes online over ivshmem (it just has no guest network). The zip is flat -- extract into
+     * netkvmDir and stage from there below. */
+    NSString *netkvmDir = nil;
+    if (netkvmZip.length && [fm fileExistsAtPath:netkvmZip]) {
+        netkvmDir = [tmp stringByAppendingPathComponent:@"netkvm"];
+        (void)run_tool(@"/usr/bin/unzip", @[@"-o", @"-q", netkvmZip, @"-d", netkvmDir], NULL, NULL);
+        if (![fm fileExistsAtPath:[netkvmDir stringByAppendingPathComponent:@"netkvm.sys"]]) {
+            emit_log(@"netkvm zip extract failed; VM will build without a network driver");
+            netkvmDir = nil;
+        }
+    } else {
+        emit_log(@"no netkvm zip provided; VM will build without a network driver");
+    }
+
+    /* Mount the ISO + locate install.wim FIRST so the OS language can be read from the
+     * WIM before the answer file is generated; the mount stays live for the build below. */
+    emit_progress(2, @"Mounting ISO");
+    IsoMount iso_m = {0};
+    NSString *err = nil;
+    if (!bw_mount_iso(iso, &iso_m, &err)) {
+        [fm removeItemAtPath:tmp error:nil];
+        emit_error(err); return 4;
+    }
+    NSString *wim = [iso_m.mountPt stringByAppendingPathComponent:@"sources/install.wim"];
+    emit_log([NSString stringWithFormat:@"install.wim: %@", wim]);
+
+    /* OS language: unless an explicit --lang was given (lang non-empty), auto-detect the
+     * install image's default UI language from the WIM XML (<IMAGE INDEX=n><WINDOWS>
+     * <LANGUAGES><DEFAULT>), reading the same index we apply. Falls back to en-US. The tag
+     * flows unchanged into the shared asb_provision_unattend() below. */
+    if (lang.length == 0) {
+        wim_t *lw = wim_open(wim.fileSystemRepresentation);
+        if (lw) {
+            char lbuf[32];
+            if (wim_image_default_language(lw, (uint32_t)imageIdx, lbuf, sizeof lbuf) == 0 &&
+                ((lbuf[0] >= 'A' && lbuf[0] <= 'Z') || (lbuf[0] >= 'a' && lbuf[0] <= 'z'))) {  /* BCP-47 starts with a letter */
+                lang = @(lbuf);
+                emit_lang(@(lbuf));   /* daemon surfaces this as "Detected ISO language: <tag>" in the create log */
+            }
+            wim_close(lw);
+        }
+        if (lang.length == 0) { lang = @"en-US"; emit_log(@"ISO language not detected; using en-US"); }
+    }
+
+    /* Provisioning files. In the daemon flow they are generated IN-PROCESS by the host (the password
+     * is encoded there via the shared asb_provision_unattend and never reaches this child) and handed
+     * over via --prov-dir -- the exact mirror of the Windows backend, where vhdx_create_thread
+     * generates unattend.xml/setup.cmd/SetupComplete.cmd and iso-patch.exe only consumes the --stage
+     * manifest. Direct CLI use (no --prov-dir) falls back to generating them here from
+     * --pass/--user/--vm-name/--lang. */
+    NSString *provBase = provDir.length ? provDir : tmp;
+    NSString *unattend = [provBase stringByAppendingPathComponent:@"unattend.xml"];
+    NSString *setupCmd = [provBase stringByAppendingPathComponent:@"setup.cmd"];
+    NSString *setupComplete = [provBase stringByAppendingPathComponent:@"SetupComplete.cmd"];
+    /* SSH MSI basename: staged to \Windows\AppSandbox\<basename> in the manifest below; SetupComplete
+     * (generated host-side in --prov-dir mode, or here otherwise) references it to install OpenSSH. */
+    NSString *sshMsiName = (sshMsi.length && [fm fileExistsAtPath:sshMsi]) ? sshMsi.lastPathComponent : nil;
+    if (provDir.length) {
+        /* Host generated them; the language is still auto-detected below and reported via LANG: so the
+         * host re-generates unattend.xml in place before we stage it. Just verify they exist. */
+        for (NSString *p in @[unattend, setupCmd, setupComplete]) {
+            if (![fm fileExistsAtPath:p]) {
+                bw_unmount_iso(&iso_m);
+                [fm removeItemAtPath:tmp error:nil];
+                emit_error([NSString stringWithFormat:@"prov-dir missing %@", p.lastPathComponent]);
+                return 3;
+            }
+        }
+    } else {
+        emit_progress(3, @"Generating answer file + setup scripts");
+        /* Generate the provisioning files via the SHARED generator (same source the Windows backend
+         * uses -- no mac/pc fork). testMode is the caller's choice (mirrors the Windows disk builder,
+         * which passes config.test_mode): when on it bakes `bcdedit /set testsigning on` so the
+         * test-signed guest drivers load. arm64. */
+        BOOL scriptsOK = NO;
+        {
+            FILE *fu = fopen(unattend.fileSystemRepresentation, "wb");
+            FILE *fs = fopen(setupCmd.fileSystemRepresentation, "wb");
+            FILE *fc = fopen(setupComplete.fileSystemRepresentation, "wb");
+            if (fu && fs && fc) {
+                asb_provision_unattend(fu, vmName.UTF8String, user.UTF8String, pass.UTF8String,
+                                       "arm64", testMode, /*is_arm64=*/1, lang.UTF8String);
+                asb_provision_setup_cmd(fs);
+                asb_provision_setupcomplete(fc, sshMsiName.length ? sshMsiName.UTF8String : NULL);
+                scriptsOK = YES;
+            }
+            if (fu) fclose(fu);
+            if (fs) fclose(fs);
+            if (fc) fclose(fc);
+        }
+        if (!scriptsOK) {
+            bw_unmount_iso(&iso_m);
+            [fm removeItemAtPath:tmp error:nil];
+            emit_error(@"failed to write staging scripts"); return 3;
+        }
+    }
+
+    /* 2) build the manifest: "<host-src>\t<guest-dest>" (mirrors generate_vhdx_manifest) */
+    NSString *manifest = [tmp stringByAppendingPathComponent:@"manifest.tsv"];
+    FILE *mf = fopen(manifest.fileSystemRepresentation, "w");
+    if (!mf) { bw_unmount_iso(&iso_m); [fm removeItemAtPath:tmp error:nil]; emit_error(@"cannot open manifest"); return 3; }
+    int n = 0;
+    n += bw_manifest_add(mf, unattend,      "\\Windows\\Panther\\unattend.xml");
+    n += bw_manifest_add(mf, setupCmd,      "\\Windows\\AppSandbox\\setup.cmd");
+    n += bw_manifest_add(mf, setupComplete, "\\Windows\\Setup\\Scripts\\SetupComplete.cmd");
+    /* agent + channel helper EXEs (existence-gated -- mirrors generate_vhdx_manifest's bin set;
+     * appsandbox-displays.exe is staged when present in the payload). */
+    const char *bins[] = { "appsandbox-agent.exe", "appsandbox-input.exe", "appsandbox-displays.exe",
+                           "appsandbox-clipboard.exe", "appsandbox-clipboard-reader.exe",
+                           "appsandbox-audio.exe" };
+    for (size_t i = 0; i < sizeof(bins)/sizeof(bins[0]); i++) {
+        NSString *src = [binDir stringByAppendingPathComponent:@(bins[i])];
+        n += bw_manifest_add(mf, src, [NSString stringWithFormat:@"\\Windows\\AppSandbox\\%s", bins[i]].UTF8String);
+    }
+    /* Our signed drivers (VDD + VAD + ivshmem SHM) + their certs, from the signed payload. Existence-gated. */
+    const char *drv[] = { "AppSandboxVDD.inf", "AppSandboxVDD.dll", "AppSandboxVDD.cat", "AppSandboxVDD.cer",
+                          "AppSandboxVAD.inf", "AppSandboxVAD.sys", "AppSandboxVAD.cat", "AppSandboxVAD.cer",
+                          "AppSandboxSHM.inf", "AppSandboxSHM.sys", "AppSandboxSHM.cat", "AppSandboxSHM.cer" };
+    for (size_t i = 0; i < sizeof(drv)/sizeof(drv[0]); i++) {
+        NSString *src = [drvDir stringByAppendingPathComponent:@(drv[i])];
+        n += bw_manifest_add(mf, src, [NSString stringWithFormat:@"\\Windows\\AppSandbox\\drivers\\%s", drv[i]].UTF8String);
+    }
+    /* NetKVM (virtio-net) -- vendored from virtio-win (BSD-3-Clause; license staged alongside), from its
+     * own zip (netkvmDir). Mac payload only; never in the Windows-host manifest. */
+    if (netkvmDir) {
+        const char *nk[] = { "netkvm.inf", "netkvm.sys", "netkvm.cat", "netkvmp.exe", "virtio-win_license.txt" };
+        for (size_t i = 0; i < sizeof(nk)/sizeof(nk[0]); i++) {
+            NSString *src = [netkvmDir stringByAppendingPathComponent:@(nk[i])];
+            n += bw_manifest_add(mf, src, [NSString stringWithFormat:@"\\Windows\\AppSandbox\\drivers\\%s", nk[i]].UTF8String);
+        }
+    }
+    /* devcon.exe (ARM64) -- installs the root-enumerated VDD/VAD devnodes */
+    if (devconPath) n += bw_manifest_add(mf, devconPath, "\\Windows\\AppSandbox\\drivers\\devcon.exe");
+    /* OpenSSH MSI (downloaded at create) -- SetupComplete.cmd installs it for SSH-over-ivshmem ch7 */
+    if (sshMsiName)
+        n += bw_manifest_add(mf, sshMsi, [NSString stringWithFormat:@"\\Windows\\AppSandbox\\%@", sshMsiName].UTF8String);
+    fclose(mf);
+    emit_log([NSString stringWithFormat:@"manifest: %d file(s) to stage", n]);
+
+    /* build the disk (apply WIM image -> NTFS -> stage our files -> ESP + BCD); the ISO is
+     * already mounted + install.wim located above (for language detection). Use LOG (not
+     * STATUS) so the apply monitor's percentage isn't reset to the indeterminate sentinel. */
+    emit_log(@"Building Windows disk");
+    int rc = win_disk_build(wim.fileSystemRepresentation,
+                            out.fileSystemRepresentation,
+                            (uint32_t)imageIdx,
+                            (uint64_t)(diskGb > 0 ? diskGb : 64),
+                            manifest.fileSystemRepresentation,
+                            bw_progress);
+
+    /* 5) unmount + cleanup */
+    bw_unmount_iso(&iso_m);
+    [fm removeItemAtPath:tmp error:nil];
+
+    if (rc != 0) { emit_error([NSString stringWithFormat:@"win_disk_build failed (%d)", rc]); return 5; }
+    emit_progress(100, @"Disk complete");
+    emit_done(out);
+    return 0;
+}
+
 /* ---- Entry ---- */
 
 static void print_usage(void) {
@@ -1353,7 +1690,20 @@ static void print_usage(void) {
         "\n"
         "  stage --disk <path> --manifest <path>\n"
         "      Mount the VM disk image, apply TSV manifest, unmount.\n"
-        "      Must run as root (invoked via AEWP).\n"
+        "      Must run as root (invoked via AEWP). Account credential: --shadowhash-file +\n"
+        "      --kcpassword-file (host-precomputed; no plaintext) or --user-password-file (computed here).\n"
+        "\n"
+        "  publish-shm --shm <path>\n"
+        "      Write the asb_transport directory into the ivshmem backing file\n"
+        "      before QEMU boots (launcher owns it; guest services then select ivshmem).\n"
+        "\n"
+        "  build-windows --iso <path> --out <disk.img> --signed-payload-zip <zip> [--netkvm-zip <zip>]\n"
+        "                [--devcon <devcon.exe>] [--ssh-msi <OpenSSH .msi>] [--vm-name <n>]\n"
+        "                [--user <u>] [--pass <p>] [--prov-dir <dir>] [--lang <bcp47>] [--disk-gb <n>] [--image-index <n>]\n"
+        "      --prov-dir supplies host-generated unattend.xml/setup.cmd/SetupComplete.cmd (password\n"
+        "      encoded host-side); without it they are generated here from --user/--pass/--vm-name.\n"
+        "      From-scratch Windows VM disk: mount the ISO, apply install.wim with our\n"
+        "      own NTFS writer, and stage the answer file + agent + test-signed drivers.\n"
         "\n");
 }
 
@@ -1369,6 +1719,12 @@ int main(int argc, char *argv[]) {
         }
         if (strcmp(cmd, "install") == 0) {
             return cmd_install(argc - 2, argv + 2);
+        }
+        if (strcmp(cmd, "publish-shm") == 0) {
+            return cmd_publish_shm(argc - 2, argv + 2);
+        }
+        if (strcmp(cmd, "build-windows") == 0) {
+            return cmd_build_windows(argc - 2, argv + 2);
         }
         if (strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0) {
             print_usage();

@@ -46,11 +46,16 @@ def run_vm_lifecycle(spec):
             image = helpers.IPSW_MAC
     ONLINE_T = 600 if os_type == "Linux" else 1800   # boot-to-online budget
     GRACE_T  = 240 if os_type == "Linux" else 600    # graceful-shutdown budget
-    # The build/install/download phase has NO fixed deadline: the daemon
-    # reports live progress (progress % / installStatus), so the wait below is
-    # stall-based -- it fails only after BUILD_STALL seconds of zero observable
-    # movement, however long a healthy download/install takes.
-    BUILD_STALL = 600
+    # The build/install/download phase is stall-based -- it fails only after
+    # BUILD_STALL seconds of zero observable movement, however long a healthy
+    # download/install takes. EXCEPTION: a Windows guest's first boot (OOBE +
+    # SetupComplete + driver/agent install) reports NO host-side progress -- it
+    # stays "Installing Windows" (indeterminate) until the guest agent connects,
+    # exactly like Windows-on-Windows -- so that phase is a legitimately
+    # signal-less window. It can run 10+ minutes (longer under concurrent
+    # multi-VM load), so give Windows a real budget; Linux/macOS stream live
+    # progress and keep the tight 600 s stall.
+    BUILD_STALL = 3600 if os_type == "Windows" else 600
 
     c = asb.connect()
     caps = c.version().get("capabilities", {})

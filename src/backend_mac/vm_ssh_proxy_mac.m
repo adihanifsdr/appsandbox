@@ -1,4 +1,5 @@
 #import "vm_ssh_proxy_mac.h"
+#import "asb_ivshmem_transport.h"
 
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -26,6 +27,7 @@ typedef struct {
     pthread_mutex_t _relaysLock;
 }
 @property (nonatomic, strong) VZVirtioSocketDevice *socketDevice;
+@property (nonatomic, strong) AsbIvshmemTransport *ivshmemTransport;   /* set => Windows/ivshmem path */
 @property (nonatomic, copy)   NSString *vmName;
 @property (nonatomic, assign) int       port;
 @property (nonatomic, assign) int       preferredPort;
@@ -51,6 +53,15 @@ typedef struct {
             _relays[i].stop     = 0;
         }
         _workQueue = dispatch_queue_create("com.appsandbox.ssh-proxy", DISPATCH_QUEUE_SERIAL);
+    }
+    return self;
+}
+
+- (instancetype)initWithName:(NSString *)vmName
+            ivshmemTransport:(AsbIvshmemTransport *)transport
+                 initialPort:(int)preferredPort {
+    if ((self = [self initWithName:vmName socketDevice:nil initialPort:preferredPort])) {
+        _ivshmemTransport = transport;
     }
     return self;
 }
@@ -190,6 +201,11 @@ bound:
 #pragma mark - Vsock connect
 
 - (int)connectVsock {
+    /* Windows/ivshmem guest: relay to the guest agent's ssh_proxy over ch7. The relay loop above
+     * is identical (fd in, fd out). */
+    if (self.ivshmemTransport) {
+        return [self.ivshmemTransport connectChannel:VM_SSH_PROXY_VSOCK_PORT timeoutMs:5000];
+    }
     if (!self.socketDevice) return -1;
     __block int fd = -1;
     __block BOOL claimed = NO;   /* set once the waiter gives up; late handler then owns its dup */
@@ -270,6 +286,28 @@ bound:
     pthread_mutex_unlock(&_relaysLock);
 }
 
+/* Write ALL len bytes. send() legitimately returns a short count when the
+ * socket send buffer fills (the ivshmem vsock_fd is a socketpair endpoint whose
+ * buffer is ~SSH_RELAY_BUF, so a large burst short-writes), or on EINTR. Dropping
+ * the unsent tail would truncate an SSH packet -> the peer reports "message
+ * authentication code incorrect" / "padding error", so loop until every byte is
+ * written. Returns 0 ok. */
+static int ssh_send_all(int fd, const char *p, ssize_t len) {
+    ssize_t off = 0;
+    while (off < len) {
+        ssize_t w = send(fd, p + off, (size_t)(len - off), 0);
+        if (w > 0) { off += w; continue; }
+        if (w < 0 && errno == EINTR) continue;
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            fd_set wf; FD_ZERO(&wf); FD_SET(fd, &wf);
+            if (select(fd + 1, NULL, &wf, NULL, NULL) < 0 && errno != EINTR) return -1;
+            continue;   /* writable (or retryable) -> try again */
+        }
+        return -1;      /* real error or peer closed */
+    }
+    return 0;
+}
+
 static void *relay_main(void *arg) {
     SshRelay *r = (SshRelay *)arg;
     char buf[SSH_RELAY_BUF];
@@ -288,12 +326,12 @@ static void *relay_main(void *arg) {
         if (FD_ISSET(r->tcp_fd, &rfds)) {
             ssize_t rd = recv(r->tcp_fd, buf, SSH_RELAY_BUF, 0);
             if (rd <= 0) break;
-            if (send(r->vsock_fd, buf, rd, 0) != rd) break;
+            if (ssh_send_all(r->vsock_fd, buf, rd) != 0) break;
         }
         if (FD_ISSET(r->vsock_fd, &rfds)) {
             ssize_t rd = recv(r->vsock_fd, buf, SSH_RELAY_BUF, 0);
             if (rd <= 0) break;
-            if (send(r->tcp_fd, buf, rd, 0) != rd) break;
+            if (ssh_send_all(r->tcp_fd, buf, rd) != 0) break;
         }
     }
 

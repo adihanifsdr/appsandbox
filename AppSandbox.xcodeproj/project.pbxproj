@@ -35,6 +35,9 @@
 		2030000000000000000000BB /* iso_patch_mac.m in Sources */ = {isa = PBXBuildFile; fileRef = 101E000000000000000000AA /* iso_patch_mac.m */; };
 		2031000000000000000000BB /* vm_ssh_proxy_mac.m in Sources */ = {isa = PBXBuildFile; fileRef = 1020000000000000000000AA /* vm_ssh_proxy_mac.m */; };
 		2032000000000000000000BB /* vm_clipboard_mac.m in Sources */ = {isa = PBXBuildFile; fileRef = 1022000000000000000000AA /* vm_clipboard_mac.m */; };
+		2060000000000000000000BB /* asb_ivshmem_transport.m in Sources */ = {isa = PBXBuildFile; fileRef = 1060000000000000000000AA /* asb_ivshmem_transport.m */; };
+		2061000000000000000000BB /* qemu_vm.m in Sources */ = {isa = PBXBuildFile; fileRef = 1062000000000000000000AA /* qemu_vm.m */; };
+		2064000000000000000000BB /* idd_display.m in Sources */ = {isa = PBXBuildFile; fileRef = 1064000000000000000000AA /* idd_display.m */; };
 		/* appsandbox-clipboard CLI target */
 		2040000000000000000000EE /* appsandbox-clipboard.m in Sources */ = {isa = PBXBuildFile; fileRef = 1040000000000000000000EE /* appsandbox-clipboard.m */; };
 		4040000000000000000000EE /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3006000000000000000000AA /* Foundation.framework */; };
@@ -43,6 +46,23 @@
 		6035000000000000000000DD /* com.appsandbox.clipboard.plist in Embed agent_mac */ = {isa = PBXBuildFile; fileRef = 1034000000000000000000DD /* com.appsandbox.clipboard.plist */; };
 		/* iso-patch-mac CLI target */
 		2020000000000000000000CC /* iso-patch-mac.m in Sources */ = {isa = PBXBuildFile; fileRef = 1020000000000000000000CC /* iso-patch-mac.m */; };
+		20E100000000000000000001 /* win_disk.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E100000000000000000001 /* win_disk.c */; };
+		20E100000000000000000002 /* blockio.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E100000000000000000002 /* blockio.c */; };
+		20E100000000000000000003 /* gpt.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E100000000000000000003 /* gpt.c */; };
+		20E100000000000000000004 /* ntfs.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E100000000000000000004 /* ntfs.c */; };
+		20E100000000000000000005 /* fat32.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E100000000000000000005 /* fat32.c */; };
+		20E100000000000000000006 /* bcd_patch.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E100000000000000000006 /* bcd_patch.c */; };
+		20E100000000000000000007 /* wim.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E100000000000000000007 /* wim.c */; };
+		20E100000000000000000008 /* wimimg.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E100000000000000000008 /* wimimg.c */; };
+		20E100000000000000000009 /* sha1.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E100000000000000000009 /* sha1.c */; };
+		20E10000000000000000000A /* lzx.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E10000000000000000000A /* lzx.c */; };
+		20E10000000000000000000B /* xpress.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E10000000000000000000B /* xpress.c */; };
+		20E10000000000000000000C /* lzms.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E10000000000000000000C /* lzms.c */; };
+		20E10000000000000000000D /* resource.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E10000000000000000000D /* resource.c */; };
+		20E1000000000000000000C1 /* win_provision.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E1000000000000000000C1 /* win_provision.c */; };
+		20E1000000000000000000C2 /* win_provision.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E1000000000000000000C1 /* win_provision.c */; };
+		20E2000000000000000000D1 /* mac_account_hash.m in Sources */ = {isa = PBXBuildFile; fileRef = 10E2000000000000000000D1 /* mac_account_hash.m */; };
+		20E2000000000000000000D2 /* mac_account_hash.m in Sources */ = {isa = PBXBuildFile; fileRef = 10E2000000000000000000D1 /* mac_account_hash.m */; };
 		4020000000000000000000CC /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3006000000000000000000AA /* Foundation.framework */; };
 		4021000000000000000000CC /* Virtualization.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3003000000000000000000AA /* Virtualization.framework */; };
 		6020000000000000000000CC /* iso-patch-mac in Embed Resources */ = {isa = PBXBuildFile; fileRef = C020000000000000000000CC /* iso-patch-mac */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
@@ -58,6 +78,7 @@
 		4012000000000000000000BB /* Virtualization.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3003000000000000000000AA /* Virtualization.framework */; };
 		4013000000000000000000BB /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3004000000000000000000AA /* Metal.framework */; };
 		4014000000000000000000BB /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3005000000000000000000AA /* Security.framework */; };
+		4015000000000000000000BB /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3007000000000000000000AA /* AudioToolbox.framework */; };
 		/* Framework target — Headers (public) */
 		6012000000000000000000BB /* asb_types.h in Headers */ = {isa = PBXBuildFile; fileRef = 1018000000000000000000AA /* asb_types.h */; settings = {ATTRIBUTES = (Public, ); }; };
 /* End PBXBuildFile section */
@@ -166,6 +187,12 @@
 		1020000000000000000000AA /* vm_ssh_proxy_mac.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = vm_ssh_proxy_mac.m; sourceTree = "<group>"; };
 		1021000000000000000000AA /* vm_clipboard_mac.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = vm_clipboard_mac.h; sourceTree = "<group>"; };
 		1022000000000000000000AA /* vm_clipboard_mac.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = vm_clipboard_mac.m; sourceTree = "<group>"; };
+		1060000000000000000000AA /* asb_ivshmem_transport.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = asb_ivshmem_transport.m; sourceTree = "<group>"; };
+		1061000000000000000000AA /* asb_ivshmem_transport.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = asb_ivshmem_transport.h; sourceTree = "<group>"; };
+		1062000000000000000000AA /* qemu_vm.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = qemu_vm.m; sourceTree = "<group>"; };
+		1063000000000000000000AA /* qemu_vm.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = qemu_vm.h; sourceTree = "<group>"; };
+		1064000000000000000000AA /* idd_display.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = idd_display.m; sourceTree = "<group>"; };
+		1065000000000000000000AA /* idd_display.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = idd_display.h; sourceTree = "<group>"; };
 		1034000000000000000000DD /* com.appsandbox.clipboard.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = com.appsandbox.clipboard.plist; sourceTree = "<group>"; };
 		1040000000000000000000EE /* appsandbox-clipboard.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "appsandbox-clipboard.m"; sourceTree = "<group>"; };
 		C040000000000000000000EE /* appsandbox-clipboard */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "appsandbox-clipboard"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -177,7 +204,23 @@
 		3004000000000000000000AA /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 		3005000000000000000000AA /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		3006000000000000000000AA /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
+		3007000000000000000000AA /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
 		1020000000000000000000CC /* iso-patch-mac.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "iso-patch-mac.m"; sourceTree = "<group>"; };
+		10E100000000000000000001 /* win_disk.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = win_disk.c; path = "tools/iso-patch-mac/engine/win_disk.c"; sourceTree = SOURCE_ROOT; };
+		10E100000000000000000002 /* blockio.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = blockio.c; path = "tools/iso-patch-mac/engine/blockio.c"; sourceTree = SOURCE_ROOT; };
+		10E100000000000000000003 /* gpt.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = gpt.c; path = "tools/iso-patch-mac/engine/gpt.c"; sourceTree = SOURCE_ROOT; };
+		10E100000000000000000004 /* ntfs.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = ntfs.c; path = "tools/iso-patch-mac/engine/ntfs.c"; sourceTree = SOURCE_ROOT; };
+		10E100000000000000000005 /* fat32.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = fat32.c; path = "tools/iso-patch-mac/engine/fat32.c"; sourceTree = SOURCE_ROOT; };
+		10E100000000000000000006 /* bcd_patch.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = bcd_patch.c; path = "tools/iso-patch-mac/engine/bcd_patch.c"; sourceTree = SOURCE_ROOT; };
+		10E100000000000000000007 /* wim.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = wim.c; path = "tools/iso-patch-mac/engine/wim.c"; sourceTree = SOURCE_ROOT; };
+		10E100000000000000000008 /* wimimg.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = wimimg.c; path = "tools/iso-patch-mac/engine/wimimg.c"; sourceTree = SOURCE_ROOT; };
+		10E100000000000000000009 /* sha1.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = sha1.c; path = "tools/iso-patch-mac/engine/sha1.c"; sourceTree = SOURCE_ROOT; };
+		10E10000000000000000000A /* lzx.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = lzx.c; path = "tools/iso-patch-mac/engine/lzx.c"; sourceTree = SOURCE_ROOT; };
+		10E10000000000000000000B /* xpress.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = xpress.c; path = "tools/iso-patch-mac/engine/xpress.c"; sourceTree = SOURCE_ROOT; };
+		10E10000000000000000000C /* lzms.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = lzms.c; path = "tools/iso-patch-mac/engine/lzms.c"; sourceTree = SOURCE_ROOT; };
+		10E10000000000000000000D /* resource.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = resource.c; path = "tools/iso-patch-mac/engine/resource.c"; sourceTree = SOURCE_ROOT; };
+		10E1000000000000000000C1 /* win_provision.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = win_provision.c; path = "tools/provision/win_provision.c"; sourceTree = SOURCE_ROOT; };
+		10E2000000000000000000D1 /* mac_account_hash.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = mac_account_hash.m; path = "tools/provision/mac_account_hash.m"; sourceTree = SOURCE_ROOT; };
 		1021000000000000000000CC /* iso-patch-mac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "iso-patch-mac.entitlements"; sourceTree = "<group>"; };
 		C020000000000000000000CC /* iso-patch-mac */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "iso-patch-mac"; sourceTree = BUILT_PRODUCTS_DIR; };
 		1030000000000000000000DD /* appsandbox-agent.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "appsandbox-agent.m"; sourceTree = "<group>"; };
@@ -214,6 +257,7 @@
 				4012000000000000000000BB /* Virtualization.framework in Frameworks */,
 				4013000000000000000000BB /* Metal.framework in Frameworks */,
 				4014000000000000000000BB /* Security.framework in Frameworks */,
+				4015000000000000000000BB /* AudioToolbox.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -272,10 +316,31 @@
 			children = (
 				1020000000000000000000CC /* iso-patch-mac.m */,
 				1021000000000000000000CC /* iso-patch-mac.entitlements */,
+				70E1000000000000000000EE /* engine */,
 			);
 			name = "iso-patch-mac";
 			path = "tools/iso-patch-mac";
 			sourceTree = SOURCE_ROOT;
+		};
+		70E1000000000000000000EE /* engine */ = {
+			isa = PBXGroup;
+			children = (
+				10E100000000000000000001 /* win_disk.c */,
+				10E100000000000000000002 /* blockio.c */,
+				10E100000000000000000003 /* gpt.c */,
+				10E100000000000000000004 /* ntfs.c */,
+				10E100000000000000000005 /* fat32.c */,
+				10E100000000000000000006 /* bcd_patch.c */,
+				10E100000000000000000007 /* wim.c */,
+				10E100000000000000000008 /* wimimg.c */,
+				10E100000000000000000009 /* sha1.c */,
+				10E10000000000000000000A /* lzx.c */,
+				10E10000000000000000000B /* xpress.c */,
+				10E10000000000000000000C /* lzms.c */,
+				10E10000000000000000000D /* resource.c */,
+			);
+			name = engine;
+			sourceTree = "<group>";
 		};
 		7030000000000000000000DD /* agent_mac */ = {
 			isa = PBXGroup;
@@ -356,6 +421,12 @@
 				1020000000000000000000AA /* vm_ssh_proxy_mac.m */,
 				1021000000000000000000AA /* vm_clipboard_mac.h */,
 				1022000000000000000000AA /* vm_clipboard_mac.m */,
+				1061000000000000000000AA /* asb_ivshmem_transport.h */,
+				1060000000000000000000AA /* asb_ivshmem_transport.m */,
+				1063000000000000000000AA /* qemu_vm.h */,
+				1062000000000000000000AA /* qemu_vm.m */,
+				1065000000000000000000AA /* idd_display.h */,
+				1064000000000000000000AA /* idd_display.m */,
 			);
 			name = backend_mac;
 			path = src/backend_mac;
@@ -370,6 +441,7 @@
 				3004000000000000000000AA /* Metal.framework */,
 				3005000000000000000000AA /* Security.framework */,
 				3006000000000000000000AA /* Foundation.framework */,
+				3007000000000000000000AA /* AudioToolbox.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -411,6 +483,7 @@
 				A004000000000000000000BB /* Embed Frameworks */,
 				A022000000000000000000CC /* Embed iso-patch-mac */,
 				A032000000000000000000DD /* Embed agent_mac */,
+				A014000000000000000000CC /* Embed QEMU */,
 				A008000000000000000000AA /* Stamp version */,
 			);
 			buildRules = (
@@ -575,6 +648,21 @@
 			shellPath = /bin/sh;
 			shellScript = "\"${SRCROOT}/tools/sign/stamp-version.sh\"\n";
 		};
+		A014000000000000000000CC /* Embed QEMU */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Embed QEMU (vendored qemu + EDK2)";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "bash $SRCROOT/vendor/qemu-ivshmem/embed-into-bundle.sh\n";
+		};
 		A013000000000000000000BB /* Stamp version */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
@@ -630,8 +718,13 @@
 				2027000000000000000000BB /* vz_vm.m in Sources */,
 				2029000000000000000000BB /* vm_agent_mac.m in Sources */,
 				2030000000000000000000BB /* iso_patch_mac.m in Sources */,
+				20E1000000000000000000C2 /* win_provision.c in Sources */,
+				20E2000000000000000000D2 /* mac_account_hash.m in Sources */,
 				2031000000000000000000BB /* vm_ssh_proxy_mac.m in Sources */,
 				2032000000000000000000BB /* vm_clipboard_mac.m in Sources */,
+				2060000000000000000000BB /* asb_ivshmem_transport.m in Sources */,
+				2061000000000000000000BB /* qemu_vm.m in Sources */,
+				2064000000000000000000BB /* idd_display.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -640,6 +733,21 @@
 			buildActionMask = 2147483647;
 			files = (
 				2020000000000000000000CC /* iso-patch-mac.m in Sources */,
+				20E100000000000000000001 /* win_disk.c in Sources */,
+				20E100000000000000000002 /* blockio.c in Sources */,
+				20E100000000000000000003 /* gpt.c in Sources */,
+				20E100000000000000000004 /* ntfs.c in Sources */,
+				20E100000000000000000005 /* fat32.c in Sources */,
+				20E100000000000000000006 /* bcd_patch.c in Sources */,
+				20E100000000000000000007 /* wim.c in Sources */,
+				20E100000000000000000008 /* wimimg.c in Sources */,
+				20E100000000000000000009 /* sha1.c in Sources */,
+				20E10000000000000000000A /* lzx.c in Sources */,
+				20E10000000000000000000B /* xpress.c in Sources */,
+				20E10000000000000000000C /* lzms.c in Sources */,
+				20E10000000000000000000D /* resource.c in Sources */,
+				20E1000000000000000000C1 /* win_provision.c in Sources */,
+				20E2000000000000000000D1 /* mac_account_hash.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
