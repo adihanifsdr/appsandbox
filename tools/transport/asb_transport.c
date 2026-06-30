@@ -1,6 +1,6 @@
 /*
  * asb_transport.c — AppSandbox guest transport (PC: AF_HYPERV; Mac: ivshmem shared memory).
- * See asb_transport.h + TODO/asb-transport-design.md. No third-party code.
+ * See asb_transport.h. No third-party code.
  *
  * Build: part of each guest binary (agent, the 4 channel EXEs, p9copy, vdd). Links setupapi/ws2_32.
  * NOTE: written from the validated ivshmem primitive + the exact agent.c socket surface; needs a

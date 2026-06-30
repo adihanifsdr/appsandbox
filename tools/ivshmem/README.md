@@ -3,8 +3,7 @@
 Our own KMDF driver (no third-party code) that maps the QEMU `ivshmem-plain` PCI BAR2 into
 user space so the Windows guest and the macOS host share a memory region (frame buffers +
 control). The macOS host mmaps the same `memory-backend-file`; the guest reaches it through
-this driver. See `TODO/qemu-ivshmem-build.md` for the patched QEMU that provides the
-device, and `[[ivshmem-on-macos-qemu]]` / `[[no-external-deps-constraint]]` in memory.
+this driver. The patched QEMU that provides the device is vendored at `../../vendor/qemu-ivshmem/`.
 
 ## Files
 - `AppSandboxSHM.h`  — shared IOCTL/GUID/struct contract (driver + user-mode clients).

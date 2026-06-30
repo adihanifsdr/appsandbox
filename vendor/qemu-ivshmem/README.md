@@ -1,7 +1,7 @@
 # QEMU + ivshmem (macOS/HVF)
 
 The patched QEMU that gives a Windows guest a shared-memory BAR (ivshmem-plain) on macOS/HVF,
-vendored and embedded into AppSandbox.app. Background: `../../TODO/qemu-ivshmem-build.md`.
+vendored and embedded into AppSandbox.app.
 
 ## Source of truth
 The QEMU source is our fork **github.com/jamesstringer90/asb-qemu**, branch

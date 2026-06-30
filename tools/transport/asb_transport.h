@@ -9,7 +9,7 @@
  * below). Each guest sub-program (its own process) runs its own thread that reads/writes ONLY its
  * region — no cross-service locks. The byte protocols above the transport are identical on both.
  *
- * Design: TODO/asb-transport-design.md. No third-party code.
+ * No third-party code.
  */
 #ifndef ASB_TRANSPORT_H
 #define ASB_TRANSPORT_H
