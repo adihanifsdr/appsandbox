@@ -45,7 +45,7 @@
 #define ASB_CLIP_RING_CAP       0x100000u             /* 1 MiB per ring */
 
 #define ASB_AGENT_REGION_OFF    (ASB_CLIPR_REGION_OFF + ASB_CLIPR_REGION_SIZE)   /* ch1 */
-#define ASB_AGENT_REGION_SIZE   0x20000ull            /* 128 KiB */
+#define ASB_AGENT_REGION_SIZE   0x21000ull            /* 132 KiB -- must be >= ASB_AGENT_SLOT_STRIDE so the slot fits the region */
 #define ASB_AGENT_RING_CAP      0x10000u              /* 64 KiB per ring */
 
 #define ASB_SSH_REGION_OFF      (ASB_AGENT_REGION_OFF + ASB_AGENT_REGION_SIZE)   /* ch7 */
@@ -66,6 +66,20 @@
 #define ASB_AGENT_SLOT_STRIDE   (ASB_SLOT_HDR + 2u * (ASB_RING_HDR + ASB_AGENT_RING_CAP))
 #define ASB_SSH_SLOT_STRIDE     (ASB_SLOT_HDR + 2u * (ASB_RING_HDR + ASB_SSH_RING_CAP))
 #define ASB_P9_SLOT_STRIDE      (ASB_SLOT_HDR + 2u * (ASB_RING_HDR + ASB_P9_RING_CAP))
+
+/* Each region must hold all its slots: n_slots * slot_stride <= region_size. These compile-time
+ * checks fail the build (negative array dimension) if a region is too small to contain its slot(s),
+ * so a region/ring-cap mismatch cannot silently overlap the next region. File scope (no
+ * unused-typedef warning); compiled only on the host/publisher side -- the guest reads geometry
+ * from the published directory. */
+typedef char asb_fits_display[(ASB_DISPLAY_SLOT_STRIDE <= ASB_FRAME_REGION_SIZE) ? 1 : -1];
+typedef char asb_fits_input  [(ASB_INPUT_SLOT_STRIDE   <= ASB_INPUT_REGION_SIZE) ? 1 : -1];
+typedef char asb_fits_audio  [(ASB_AUDIO_SLOT_STRIDE   <= ASB_AUDIO_REGION_SIZE) ? 1 : -1];
+typedef char asb_fits_clipw  [(ASB_CLIP_SLOT_STRIDE    <= ASB_CLIPW_REGION_SIZE) ? 1 : -1];
+typedef char asb_fits_clipr  [(ASB_CLIP_SLOT_STRIDE    <= ASB_CLIPR_REGION_SIZE) ? 1 : -1];
+typedef char asb_fits_agent  [(ASB_AGENT_SLOT_STRIDE   <= ASB_AGENT_REGION_SIZE) ? 1 : -1];
+typedef char asb_fits_ssh    [((uint64_t)ASB_SSH_N_SLOTS * ASB_SSH_SLOT_STRIDE <= ASB_SSH_REGION_SIZE) ? 1 : -1];
+typedef char asb_fits_p9     [((uint64_t)ASB_P9_N_SLOTS  * ASB_P9_SLOT_STRIDE  <= ASB_P9_REGION_SIZE)  ? 1 : -1];
 
 #define ASB_SHM_N_REGIONS       8
 

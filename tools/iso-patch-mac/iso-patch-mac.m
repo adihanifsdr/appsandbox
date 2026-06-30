@@ -790,7 +790,7 @@ static int cmd_stage(int argc, char **argv) {
     NSData *shdData = nil, *kcData = nil;
     if (shadowhashFile) {
         shdData = [NSData dataWithContentsOfFile:shadowhashFile];
-        if (!shdData) { emit_error(@"stage: cannot read --shadowhash-file"); return 3; }
+        if (!shdData) { memset(passBuf, 0, sizeof(passBuf)); emit_error(@"stage: cannot read --shadowhash-file"); return 3; }
     } else if (passLen > 0) {
         shdData = asb_macos_shadow_hash_data(passBuf, passLen);
     }

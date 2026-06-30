@@ -548,11 +548,10 @@ static BOOL write_prov_scripts(NSString *dir, NSString *sshMsiName) {
  * the root daemon + GUI. build-windows extracts the needed members into its own per-build temp. */
 + (nullable NSString *)ensureSignedWinPayloadZipCached {
     /* Signed ARM64 release: EV-signed agent EXEs + MS-attestation-signed drivers (VDD/VAD/AppSandboxSHM/
-     * devcon). The GitHub attachment id is embedded in the cached filename, so changing the URL below
-     * (even at the same app version) auto-invalidates the cache. The URL must stay publicly fetchable
-     * by an unauthenticated client. */
-    NSString *name   = @"AppSandbox-0.1.3-win-arm64-29486776.zip";
-    NSString *urlStr = @"https://github.com/user-attachments/files/29486776/AppSandbox-0.1.3-win-arm64.zip";
+     * devcon). The release version is pinned in the cached filename, so a newer release auto-invalidates
+     * the cache. The URL must stay publicly fetchable by an unauthenticated client. */
+    NSString *name   = @"AppSandbox-0.1.4-win-arm64.zip";
+    NSString *urlStr = @"https://github.com/jamesstringer90/appsandbox/releases/download/v0.1.4/AppSandbox-0.1.4-win-arm64.zip";
     NSString *cacheDir = [[VmDir vmsRootDirectory] URLByDeletingLastPathComponent].path;
     [[NSFileManager defaultManager] createDirectoryAtPath:cacheDir
                               withIntermediateDirectories:YES attributes:nil error:nil];

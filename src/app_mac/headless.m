@@ -33,6 +33,7 @@
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>           /* NSApplication run loop (display windows in a GUI session) */
 #import <Virtualization/Virtualization.h>
+#include <strings.h>               /* strcasecmp */
 #import "asb_core_mac.h"
 #import "vz_display.h"              /* VzDisplayWindow.userClosed (displayOpen status) */
 #import "host_info.h"
@@ -941,15 +942,17 @@ static int handle_request(int fd, HttpReq *r) {
                 return 0;
             }
             if (isGET) {
-                /* Pollable + passive: reads flags, opens no window, touches no
-                   frame channel. macOS binds the in-process framebuffer directly,
-                   so ready == running && agent_online -- nothing to probe. */
+                /* Pollable + passive: reads flags, opens no window, touches no frame channel.
+                   A macOS guest binds the in-process framebuffer (ready == running && agent_online);
+                   a Windows guest streams VDD frames over ivshmem and is ready only once its IDD
+                   driver is up (idd_ready) -- matching the open precondition (asb_mac_open_display). */
                 __block BOOL open = NO, ready = NO;
                 on_main(^{
                     AsbVmMac *v = asb_mac_vm_find(name.UTF8String);
                     if (!v) return;
+                    BOOL is_win = (strcasecmp(v->os_type, "Windows") == 0);
                     open  = (v->display != nil && !v->display.userClosed);
-                    ready = open || (v->running && v->agent_online);
+                    ready = open || (v->running && v->agent_online && (!is_win || v->idd_ready));
                 });
                 send_json(fd, 200, "OK",
                           json_str(@{ @"open": open ? @YES : @NO,

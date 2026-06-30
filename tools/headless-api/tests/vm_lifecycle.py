@@ -55,7 +55,7 @@ def run_vm_lifecycle(spec):
     # signal-less window. It can run 10+ minutes (longer under concurrent
     # multi-VM load), so give Windows a real budget; Linux/macOS stream live
     # progress and keep the tight 600 s stall.
-    BUILD_STALL = 1800 if os_type == "Windows" else 600
+    BUILD_STALL = 3600 if os_type == "Windows" else 600
 
     c = asb.connect()
     caps = c.version().get("capabilities", {})

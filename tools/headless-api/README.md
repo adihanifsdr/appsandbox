@@ -69,7 +69,7 @@ in create-validation (wrong `osType` → `400`); the host-feature row mirrors
 
 | | Windows host | macOS host |
 |---|:---:|:---:|
-| **Windows guest** | ✅ | ❌ |
+| **Windows guest** | ✅ | ✅ (Apple silicon) |
 | **Linux guest** (Ubuntu) | ✅ | ❌ |
 | **macOS guest** | ❌ | ✅ (Apple silicon) |
 | Snapshots & branches | ✅ | ❌ `501` |
@@ -78,7 +78,7 @@ in create-validation (wrong `osType` → `400`); the host-feature row mirrors
 | GPU, NAT/network modes, SSH server, SSH-key auto-deploy, SSE events | ✅ | ✅ |
 
 Only `snapshots`/`templates` are advertised in the `capabilities` object; guest
-OS is host-fixed (Windows host → Windows + Linux; macOS host → macOS only), so
+OS is host-fixed (Windows host → Windows + Linux; macOS host → macOS + Windows), so
 a client picks its `osType` from `version()["hostOs"]`, not from `capabilities`.
 
 ## Requirements
@@ -91,7 +91,7 @@ a client picks its `osType` from `version()["hostOs"]`, not from `capabilities`.
 | **Administrator** | HCS VM operations and the `http.sys` bind both require elevation. |
 | **`VirtualMachinePlatform` feature** | The HCS backend the core uses. Enable with `dism /online /Enable-Feature /FeatureName:VirtualMachinePlatform /All` then reboot. |
 
-**macOS host** (runs macOS guests only — Virtualization.framework):
+**macOS host** (runs macOS guests via Virtualization.framework, and Windows guests via QEMU+HVF):
 
 | Requirement | Why |
 |---|---|
@@ -303,7 +303,7 @@ rather than forwarding bad input to the core.
 | Key | Notes |
 |---|---|
 | `name` | guest hostname; **set at create, not editable later**. Letters/digits/hyphens; not all-digits; no leading/trailing hyphen. Windows ≤15 chars (NetBIOS); Linux ≤63 and lowercase. Must be unique across VMs *and* templates. |
-| `osType` | `"Linux"` or `"Windows"` |
+| `osType` | `"Linux"` or `"Windows"` on a Windows host; `"macOS"` or `"Windows"` on a macOS host. |
 | `imagePath` | path to an install ISO — **required unless** `templateName` is given |
 | `templateName` | create from a Windows template instead of an ISO |
 | `ramMb` | ≥512, **2 MB-aligned** (even). The SDK rounds down to even for you. |
