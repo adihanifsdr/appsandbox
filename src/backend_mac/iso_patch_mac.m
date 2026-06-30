@@ -2,6 +2,8 @@
 #import "vm_dir.h"               /* AppSandbox support root (sibling of VMs/) for the driver cache */
 #import <Security/Security.h>
 #import <Security/AuthorizationTags.h>
+#import "../../tools/provision/win_provision.h"  /* shared answer-file generator (same source the Windows backend uses) */
+#import "../../tools/provision/mac_account_hash.h"  /* shared macOS ShadowHash + kcpassword encoders */
 
 /* AuthorizationExecuteWithPrivileges has been deprecated since 10.7 but is
  * still functional. Suppress the warning locally; we'll migrate to
@@ -157,6 +159,16 @@ static dispatch_source_t g_authKeepAlive = NULL;
     }
     if ([line hasPrefix:@"LOG:"]) {
         NSLog(@"iso-patch-mac: %@", [line substringFromIndex:4]);
+        return;
+    }
+    if ([line hasPrefix:@"LANG:"]) {
+        /* Detected ISO language -> delivered raw via the LANG sentinel. buildWindowsDiskWithISO
+         * re-generates unattend.xml in-process with this tag (mirrors the Windows backend's
+         * asb_core.c LANG: re-gen) and re-emits the "Detected ISO language" log to the caller. */
+        NSString *tag = [line substringFromIndex:5];
+        if (progressBlock) {
+            dispatch_async(dispatch_get_main_queue(), ^{ progressBlock(ISO_PATCH_PROGRESS_LANG, tag); });
+        }
         return;
     }
     if ([line hasPrefix:@"DONE:"]) {
@@ -392,6 +404,32 @@ static void ensure_fetch_registry(void) {
 
 #pragma mark - build-windows (unprivileged)
 
+/* Generate unattend.xml in-process -- the password is encoded HERE (in the daemon) and only the
+ * obfuscated answer file is ever handed to the build-windows child, which never sees the plaintext.
+ * This is the exact mirror of generate_unattend_vhdx -> asb_provision_unattend in the Windows
+ * backend (src/backend_win/disk_util.c / asb_core.c vhdx_create_thread). */
+static BOOL write_unattend_xml(NSString *path, NSString *vmName, NSString *user,
+                               NSString *pass, NSString *lang, BOOL testMode) {
+    FILE *fu = fopen(path.fileSystemRepresentation, "wb");
+    if (!fu) return NO;
+    int rc = asb_provision_unattend(fu, vmName.UTF8String, user.UTF8String,
+                                    pass.length ? pass.UTF8String : "",
+                                    "arm64", testMode ? 1 : 0, /*is_arm64=*/1,
+                                    lang.length ? lang.UTF8String : "en-US");
+    fclose(fu);
+    return rc == 0;
+}
+
+/* Generate setup.cmd + SetupComplete.cmd in-process (no secrets; same shared source as Windows). */
+static BOOL write_prov_scripts(NSString *dir, NSString *sshMsiName) {
+    BOOL ok = YES;
+    FILE *fs = fopen([dir stringByAppendingPathComponent:@"setup.cmd"].fileSystemRepresentation, "wb");
+    if (fs) { if (asb_provision_setup_cmd(fs) != 0) ok = NO; fclose(fs); } else ok = NO;
+    FILE *fc = fopen([dir stringByAppendingPathComponent:@"SetupComplete.cmd"].fileSystemRepresentation, "wb");
+    if (fc) { if (asb_provision_setupcomplete(fc, sshMsiName.length ? sshMsiName.UTF8String : NULL) != 0) ok = NO; fclose(fc); } else ok = NO;
+    return ok;
+}
+
 + (void)buildWindowsDiskWithISO:(NSURL *)isoURL
                         outDisk:(NSURL *)outDiskURL
                signedPayloadZip:(NSString *)signedPayloadZip
@@ -405,23 +443,73 @@ static void ensure_fetch_registry(void) {
                        testMode:(BOOL)testMode
                        progress:(nullable IsoPatchProgress)progressBlock
                      completion:(IsoPatchCompletion)completion {
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    /* Generate the provisioning files IN-PROCESS (mirrors the Windows daemon's vhdx_create_thread:
+     * it generates unattend.xml/setup.cmd/SetupComplete.cmd itself and hands iso-patch.exe only a
+     * --stage manifest). The password is encoded here via the shared asb_provision_unattend and the
+     * child receives only --prov-dir -- the plaintext never crosses the process boundary. The initial
+     * unattend uses en-US; build-windows reports the install.wim language via the LANG sentinel and we
+     * re-generate it below, exactly like asb_core.c re-runs generate_unattend_vhdx on "LANG:". */
+    NSString *provDir = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                            [NSString stringWithFormat:@"asb-winprov-%u", arc4random()]];
+    [fm removeItemAtPath:provDir error:nil];
+    [fm createDirectoryAtPath:provDir withIntermediateDirectories:YES
+                   attributes:@{NSFilePosixPermissions: @(0700)} error:nil];
+
+    NSString *sshMsiName = (sshMsiPath.length && [fm fileExistsAtPath:sshMsiPath])
+                              ? sshMsiPath.lastPathComponent : nil;
+    BOOL hasOverride = (lang.length > 0);
+    NSString *initialLang = hasOverride ? lang : @"en-US";
+    if (!write_unattend_xml([provDir stringByAppendingPathComponent:@"unattend.xml"],
+                            vmName, adminUser, adminPass, initialLang, testMode) ||
+        !write_prov_scripts(provDir, sshMsiName)) {
+        [fm removeItemAtPath:provDir error:nil];
+        completion([NSError errorWithDomain:@"IsoPatchMac" code:7
+                     userInfo:@{NSLocalizedDescriptionKey:
+                                @"failed to generate provisioning files"}]);
+        return;
+    }
+
     NSMutableArray *args = [@[
         @"build-windows",
-        @"--iso",     isoURL.path,
-        @"--out",     outDiskURL.path,
+        @"--iso",      isoURL.path,
+        @"--out",      outDiskURL.path,
         @"--signed-payload-zip", signedPayloadZip,
-        @"--vm-name", vmName,
-        @"--user",    adminUser,
-        @"--pass",    adminPass,
-        @"--lang",    (lang.length ? lang : @"en-US"),
-        @"--disk-gb", [NSString stringWithFormat:@"%d", diskGb > 0 ? diskGb : 64],
+        @"--prov-dir", provDir,                     /* daemon-generated answer file + scripts (no password on argv) */
+        @"--disk-gb",  [NSString stringWithFormat:@"%d", diskGb > 0 ? diskGb : 64],
         @"--test-mode", (testMode ? @"1" : @"0"),   /* honor the create-time choice (mirrors Windows) */
     ] mutableCopy];
+    /* Pass --lang ONLY for an explicit override; without it build-windows auto-detects the ISO's
+     * language and reports it via LANG: so we re-generate unattend.xml in-process below. */
+    if (hasOverride)       { [args addObject:@"--lang"];       [args addObject:lang]; }
     if (netkvmZip.length)  { [args addObject:@"--netkvm-zip"]; [args addObject:netkvmZip]; }
     if (sshMsiPath.length) { [args addObject:@"--ssh-msi"];    [args addObject:sshMsiPath]; }
+
+    /* Wrap progress: intercept the LANG sentinel to re-generate unattend.xml in-process with the
+     * detected language (the staging file build-windows copies in is overwritten before it stages,
+     * just like the Windows backend overwrites _vhdx_staging\unattend.xml on "LANG:"). */
+    IsoPatchProgress wrapped = ^(double frac, NSString *step) {
+        if (frac == ISO_PATCH_PROGRESS_LANG) {
+            if (!hasOverride) {
+                (void)write_unattend_xml([provDir stringByAppendingPathComponent:@"unattend.xml"],
+                                         vmName, adminUser, adminPass, step, testMode);
+            }
+            if (progressBlock)
+                progressBlock(ISO_PATCH_PROGRESS_LOG,
+                              [@"Detected ISO language: " stringByAppendingString:step]);
+            return;
+        }
+        if (progressBlock) progressBlock(frac, step);
+    };
+
     [self runUnprivilegedArgs:args
-                     progress:progressBlock
-                   completion:completion];
+                     progress:wrapped
+                   completion:^(NSError * _Nullable err) {
+        /* unattend.xml holds the obfuscated password; drop the staging dir once the build is done. */
+        [[NSFileManager defaultManager] removeItemAtPath:provDir error:nil];
+        completion(err);
+    }];
 }
 
 /* Mirror of ensure_ssh_msi_cached: download the OpenSSH ARM64 MSI once, cache it under
@@ -449,7 +537,8 @@ static void ensure_fetch_registry(void) {
         dispatch_semaphore_signal(sem);
     }];
     [t resume];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)180 * NSEC_PER_SEC));
+    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)180 * NSEC_PER_SEC)) != 0)
+        [t cancel];   /* timeout: don't leak the in-flight task */
     if (data.length && [data writeToFile:dst atomically:YES]) return dst;
     return nil;
 }
@@ -580,14 +669,13 @@ static void ensure_fetch_registry(void) {
         }
     }
 
-    /* Write manifest + password to temp files (both mode 0600). Password
-     * goes to its own file — we don't pass it as a command-line arg so `ps`
-     * can't see it. Files are deleted as soon as the CLI exits. */
+    /* Write the manifest (0600). The account password is NEVER written to disk or put on argv: we
+     * compute the macOS ShadowHash + kcpassword IN-PROCESS (mirrors the Windows path, where the
+     * password is encoded in the daemon, not handed to the disk-applier) and pass only those derived,
+     * non-plaintext blobs to the privileged stage child via 0600 files. Files are deleted on exit. */
     NSString *manifest = [self formatManifestForAgentDir:agentResDir binarySrc:binPath];
     NSString *manifestPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
                                 [NSString stringWithFormat:@"iso-patch-mac-%u.tsv", arc4random()]];
-    NSString *passPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
-                            [NSString stringWithFormat:@"iso-patch-mac-%u.pass", arc4random()]];
 
     NSError *wErr = nil;
     if (![manifest writeToFile:manifestPath atomically:YES
@@ -597,16 +685,37 @@ static void ensure_fetch_registry(void) {
     [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @(0600)}
                                      ofItemAtPath:manifestPath error:nil];
 
-    NSData *passData = [adminPass dataUsingEncoding:NSUTF8StringEncoding];
-    if (![passData writeToFile:passPath atomically:YES]) {
-        [fm removeItemAtPath:manifestPath error:nil];
-        completion([NSError errorWithDomain:@"IsoPatchMac" code:6
-                     userInfo:@{NSLocalizedDescriptionKey:
-                                @"failed to write password tempfile"}]);
-        return;
+    /* Derive the credential blobs in-process (only when a password was set, matching the prior
+     * behaviour where an empty password created no account). The plaintext stays in this process. */
+    NSString *shadowhashPath = nil, *kcpasswordPath = nil;
+    if (adminPass.length) {
+        const char *pw = adminPass.UTF8String;
+        size_t pwLen = strlen(pw);
+        NSData *shd = asb_macos_shadow_hash_data(pw, pwLen);
+        NSData *kc  = asb_macos_kcpassword(pw, pwLen);
+        if (!shd || !kc) {
+            [fm removeItemAtPath:manifestPath error:nil];
+            completion([NSError errorWithDomain:@"IsoPatchMac" code:6
+                         userInfo:@{NSLocalizedDescriptionKey:@"failed to derive account credential"}]);
+            return;
+        }
+        shadowhashPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                            [NSString stringWithFormat:@"iso-patch-mac-%u.shd", arc4random()]];
+        kcpasswordPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                            [NSString stringWithFormat:@"iso-patch-mac-%u.kc", arc4random()]];
+        if (![shd writeToFile:shadowhashPath atomically:YES] ||
+            ![kc  writeToFile:kcpasswordPath atomically:YES]) {
+            [fm removeItemAtPath:manifestPath error:nil];
+            [fm removeItemAtPath:shadowhashPath error:nil];
+            [fm removeItemAtPath:kcpasswordPath error:nil];
+            completion([NSError errorWithDomain:@"IsoPatchMac" code:6
+                         userInfo:@{NSLocalizedDescriptionKey:@"failed to write credential tempfiles"}]);
+            return;
+        }
+        for (NSString *p in @[shadowhashPath, kcpasswordPath])
+            [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @(0600)}
+                                             ofItemAtPath:p error:nil];
     }
-    [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @(0600)}
-                                     ofItemAtPath:passPath error:nil];
 
     NSMutableArray *args = [@[
         @"stage",
@@ -615,10 +724,11 @@ static void ensure_fetch_registry(void) {
         @"--user-shortname", adminUser,
         @"--user-realname", adminUser,
         @"--user-uid", @"501",
-        @"--user-password-file", passPath,
         @"--skip-setup-assistant",
         @"--auto-login",
     ] mutableCopy];
+    if (shadowhashPath) { [args addObject:@"--shadowhash-file"]; [args addObject:shadowhashPath]; }
+    if (kcpasswordPath) { [args addObject:@"--kcpassword-file"]; [args addObject:kcpasswordPath]; }
     if (sshEnabled) [args addObject:@"--enable-ssh"];
     if (computerName.length) {
         [args addObject:@"--computer-name"];
@@ -628,15 +738,10 @@ static void ensure_fetch_registry(void) {
     [self runPrivilegedArgs:args
                    progress:progressBlock
                  completion:^(NSError * _Nullable err) {
-        /* Zero + remove tempfiles ASAP. */
-        int pfd = open(passPath.fileSystemRepresentation, O_WRONLY);
-        if (pfd >= 0) {
-            char zeros[256] = {0};
-            write(pfd, zeros, sizeof(zeros));
-            close(pfd);
-        }
+        /* Remove tempfiles ASAP (the credential blobs are derived, not plaintext). */
         [[NSFileManager defaultManager] removeItemAtPath:manifestPath error:nil];
-        [[NSFileManager defaultManager] removeItemAtPath:passPath error:nil];
+        if (shadowhashPath) [[NSFileManager defaultManager] removeItemAtPath:shadowhashPath error:nil];
+        if (kcpasswordPath) [[NSFileManager defaultManager] removeItemAtPath:kcpasswordPath error:nil];
         completion(err);
     }];
 }

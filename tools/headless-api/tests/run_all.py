@@ -21,10 +21,10 @@ from vm_lifecycle import run_vm_lifecycle
 
 # The harness chooses how many threads and each thread's create params.
 # Specs are per host platform: a Windows host (HCS) builds Linux + Windows
-# guests concurrently; a macOS host can ONLY boot macOS guests
-# (Virtualization.framework), so it runs TWO macOS guests concurrently --
-# multi-VM concurrency is still tested by construction. Same interface either
-# way; feature differences are capability-gated inside vm_lifecycle.
+# guests concurrently; a macOS host boots macOS guests (Virtualization.framework)
+# AND Windows guests (QEMU+HVF+ivshmem), so it runs macOS + Windows concurrently --
+# multi-VM + cross-hypervisor concurrency is tested by construction. Same interface
+# either way; feature differences are capability-gated inside vm_lifecycle.
 # One uniform guest size everywhere: 4096 MB / 2 cores / 64 GB.
 IS_MAC = sys.platform == "darwin"
 if IS_MAC:
@@ -50,6 +50,10 @@ if IS_MAC:
          # streams it in installStatus) rather than racing the shared fetch.
          "image": ORIG_IPSW if os.path.exists(ORIG_IPSW) else "",
          "await_download_of": None if os.path.exists(ORIG_IPSW) else "brk-mac1"},
+        {"name": "brk-win1", "os_type": "Windows", "ram": 4096, "hdd": 64, "cores": 2,
+         # Windows-on-Mac: QEMU+HVF+ivshmem disk build from the ISO, runs CONCURRENTLY
+         # with the two macOS guests. Image via ASB_ISO_WINDOWS (helpers.ISO_WIN).
+         "image": helpers.ISO_WIN},
     ]
 else:
     SPECS = [

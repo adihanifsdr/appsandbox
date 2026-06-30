@@ -288,10 +288,10 @@ bound:
 
 /* Write ALL len bytes. send() legitimately returns a short count when the
  * socket send buffer fills (the ivshmem vsock_fd is a socketpair endpoint whose
- * buffer is ~SSH_RELAY_BUF, so a large burst short-writes), or on EINTR. The old
- * `send(...) != rd -> break` dropped the unsent tail and tore down the relay,
- * truncating an SSH packet -> the peer reports "message authentication code
- * incorrect" / "padding error". Loop until every byte is written. Returns 0 ok. */
+ * buffer is ~SSH_RELAY_BUF, so a large burst short-writes), or on EINTR. Dropping
+ * the unsent tail would truncate an SSH packet -> the peer reports "message
+ * authentication code incorrect" / "padding error", so loop until every byte is
+ * written. Returns 0 ok. */
 static int ssh_send_all(int fd, const char *p, ssize_t len) {
     ssize_t off = 0;
     while (off < len) {

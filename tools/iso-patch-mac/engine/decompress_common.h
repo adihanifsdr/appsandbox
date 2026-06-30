@@ -75,6 +75,12 @@ static inline int huff_build(huff_t *h, const uint8_t *lens, unsigned n, unsigne
         counts[lens[s]]++;
     }
     counts[0] = 0;
+    /* Reject over-subscribed code-length sets (Kraft inequality): a malformed set
+     * whose codewords exceed the 2^max_len code space would overflow next_code[] and
+     * write past the table (heap OOB). Incomplete (under-subscribed) sets are tolerated. */
+    { int left = 1;
+      for (unsigned l = 1; l <= max_len; l++) { left <<= 1; left -= (int)counts[l];
+          if (left < 0) { free(h->table); h->table = NULL; return -1; } } }
     uint32_t code = 0, next_code[33], total = 0;
     for (unsigned l = 1; l <= max_len; l++) { next_code[l] = code; code = (code + counts[l]) << 1; total += counts[l]; }
     if (total == 0) return 0;                              /* empty code: decode sym 0, 0 bits */

@@ -42,9 +42,8 @@ static uint64_t       g_bar_size = 0;
 static AsbShmDirectory *g_dir = NULL;
 
 /* ivshmem slot-ownership identity (Mac path only). owner_id = (g_guest_pid<<32)|accept_seq stamps each
- * acceptance so the host pump can tell when a NEW acceptance takes a slot, and a respawned guest (fresh
- * pid) recognises + reclaims its dead predecessor's residue. g_accept_seq is seeded NONZERO at init so a
- * restarted process never reuses a predecessor's owner_id even on guest PID reuse. */
+ * acceptance so the host pump can tell when a NEW acceptance takes a slot. g_accept_seq is seeded NONZERO
+ * at init so a restarted process never reuses a predecessor's owner_id even on guest PID reuse. */
 static uint32_t       g_guest_pid = 0;
 static volatile LONG  g_accept_seq = 0;
 
@@ -173,10 +172,10 @@ static void hb_unregister(struct AsbConn *c) {
     LeaveCriticalSection(&g_hb_cs);
 }
 
-/* (Guest startup slot-reclaim REMOVED. With strict single-writer state the guest never writes `state`
- * on ch1-7, so it cannot reclaim. Host-crash recovery is now 100% host-side: the Mac host's
+/* No guest startup slot-reclaim. With strict single-writer state the guest never writes `state`
+ * on ch1-7, so it cannot reclaim. Host-crash recovery is 100% host-side: the Mac host's
  * connectChannel reclaims a dead host generation's residue via the host_gen word — see
- * asb_ivshmem_transport.m. No g_reclaimed_mask / channel_bit / per-channel startup pass remains.) */
+ * asb_ivshmem_transport.m. */
 
 /* SPSC ring: write up to len bytes; returns bytes written (0 if full). Single producer. */
 static int ring_write(AsbRing *r, uint8_t *data, const void *buf, int len) {

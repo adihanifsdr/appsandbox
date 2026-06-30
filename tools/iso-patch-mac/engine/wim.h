@@ -70,4 +70,18 @@ int wim_read_uncompressed(const wim_t *w, const wim_resource_t *r, uint8_t *out)
  * yet. Implemented in resource.c. */
 int wim_read_resource(const wim_t *w, const wim_resource_t *r, uint8_t *out);
 
+/* ---- WIM XML metadata (the rhXmlData resource @ header 0x48) ----
+ * The WIM carries a UTF-16LE XML blob describing each image. These read it for
+ * the build: the install image's default UI language (for the unattend locale)
+ * and its uncompressed byte total (for a real apply-progress denominator). */
+
+/* Default UI language (BCP-47, e.g. "en-US") of <IMAGE INDEX=image_index>, from
+ * <WINDOWS><LANGUAGES><DEFAULT> (falls back to the first <LANGUAGE>). Writes a
+ * NUL-terminated tag into out. Returns 0 on success, -1 if absent/unparsable. */
+int      wim_image_default_language(const wim_t *w, uint32_t image_index, char *out, size_t cap);
+
+/* Uncompressed total bytes of <IMAGE INDEX=image_index> (<TOTALBYTES> inside the
+ * image element). Returns 0 if absent. */
+uint64_t wim_image_total_bytes(const wim_t *w, uint32_t image_index);
+
 #endif /* ASB_WIM_H */

@@ -81,9 +81,10 @@ typedef struct {
     AsbRing *g2h; uint8_t *g2hData;   /* guest -> host (we read)  */
     AsbRing *h2g; uint8_t *h2gData;   /* host  -> guest (we write) */
     int      internal_fd;             /* our end of the socketpair; caller holds the other */
-    pthread_mutex_t *lock;            /* &transport->_lock: the pump's terminal FREE write takes it (R2 fix) */
+    pthread_mutex_t *lock;            /* &transport->_lock: serializes the pump's terminal *state=FREE write against a concurrent connectChannel arm */
     volatile int    *closed;          /* &transport->_closed: skip the terminal write while -close tears down */
     volatile int stop;
+    volatile int done;                /* set under *lock when the pump self-exits; connectChannel reaps it */
     pthread_t thread;
 } AsbPump;
 
@@ -100,8 +101,8 @@ typedef struct {
     uint32_t            _arm_seq;    /* per-arm counter (under _lock); low 32 bits of host_token */
     pthread_mutex_t     _lock;
     /* Set under _lock by -close before it munmaps _bar. connectChannel re-checks it (and _bar) under
-     * _lock before every BAR dereference, so a consumer's reconnect loop can't read a munmap'd BAR
-     * (the VM-shutdown use-after-munmap crash on the agent queue). -close is idempotent. */
+     * _lock before every BAR dereference, so a consumer's reconnect loop can never dereference an
+     * unmapped BAR while -close is unmapping it. -close is idempotent. */
     volatile int        _closed;
 }
 
@@ -258,6 +259,16 @@ typedef struct {
     /* Register the pump AND start its thread under one _lock with a final _closed recheck. */
     extern void *asb_ivshmem_pump_main(void *);
     pthread_mutex_lock(&_lock);
+    /* Reap pumps that self-exited (channel retired / peer disconnected): join + free + compact, so
+     * _pumpCount counts only live pumps. Without this the array fills with dead entries and reconnects
+     * eventually hit MAX_PUMPS and fail. Skip while -close tears down (it joins every pump itself). */
+    if (!_closed) {
+        for (int i = 0; i < _pumpCount; ) {
+            AsbPump *q = _pumps[i];
+            if (q && q->done) { pthread_join(q->thread, NULL); free(q); _pumps[i] = _pumps[--_pumpCount]; _pumps[_pumpCount] = NULL; }
+            else i++;
+        }
+    }
     if (_closed || !_bar || _pumpCount >= MAX_PUMPS) {
         pthread_mutex_unlock(&_lock);
         close(sp[0]); close(sp[1]); free(p);
@@ -283,7 +294,7 @@ typedef struct {
         AsbPump *p = _pumps[i];
         if (!p) continue;
         p->stop = 1;
-        shutdown(p->internal_fd, SHUT_RDWR);   /* unblock the pump's select/recv */
+        if (p->internal_fd >= 0) shutdown(p->internal_fd, SHUT_RDWR);   /* unblock the pump's select/recv (-1 once the pump closed it under _lock) */
     }
     int n = _pumpCount;
     pthread_mutex_unlock(&_lock);
@@ -367,8 +378,7 @@ void *asb_ivshmem_pump_main(void *arg)
                ESTABLISHED forever), so synthesize one — if the ring stays full this long, treat the
                acceptor as dead and exit, FREEing the slot so the connector can re-arm and a respawned
                guest helper can re-accept (the analog of an hvsocket RST). Data-driven: this only arms
-               while we are holding undeliverable bytes, so an IDLE channel never trips it — the reason
-               this is safe where the earlier always-on stale-heartbeat reaper was not. */
+               while we are holding undeliverable bytes, so an IDLE channel never trips it. */
             uint64_t now = asb_mono_ms();
             if (h2g_stall_since == 0) h2g_stall_since = now;
             else if (now - h2g_stall_since >= ASB_H2G_DEAD_MS) goto done;
@@ -395,13 +405,14 @@ void *asb_ivshmem_pump_main(void *arg)
 
         fd_set rfds, wfds;
         FD_ZERO(&rfds); FD_ZERO(&wfds);
-        FD_SET(p->internal_fd, &rfds);             /* want host->guest bytes (only if we can buffer) */
+        int want_read = (h2glen == 0);             /* only solicit host->guest bytes when we can stage them; */
+        if (want_read) FD_SET(p->internal_fd, &rfds);  /* else don't spin on a readable fd we can't yet drain */
         int want_write = (g2hoff < g2hlen);        /* still have guest->host bytes to flush */
         if (want_write) FD_SET(p->internal_fd, &wfds);
         struct timeval tv = { .tv_sec = 0, .tv_usec = 2000 };
-        int s = select(p->internal_fd + 1, &rfds, want_write ? &wfds : NULL, NULL, &tv);
+        int s = select(p->internal_fd + 1, want_read ? &rfds : NULL, want_write ? &wfds : NULL, NULL, &tv);
         if (s < 0) { if (errno == EINTR) continue; break; }
-        if (s > 0 && FD_ISSET(p->internal_fd, &rfds) && h2glen == 0) {
+        if (s > 0 && want_read && FD_ISSET(p->internal_fd, &rfds)) {
             ssize_t rd = recv(p->internal_fd, h2gbuf, sizeof(h2gbuf), 0);
             if (rd == 0) break;   /* caller closed its end */
             if (rd < 0 && errno != EAGAIN && errno != EWOULDBLOCK) break;
@@ -409,12 +420,13 @@ void *asb_ivshmem_pump_main(void *arg)
         }
     }
 done:
-    close(p->internal_fd);
-    p->internal_fd = -1;
-    /* Release the slot host-sole, serialized against a concurrent connectChannel arm via *p->lock, and
-     * guarded by host_token so a NEWER arm that already retook this slot is never clobbered (R2 fix). If
-     * *p->closed, -close is tearing down (it munmaps under the lock AFTER joining us) — skip the write. */
+    /* Close our fd AND release the slot under *p->lock, serialized against a concurrent connectChannel arm
+     * and against -close. Closing internal_fd under the lock means -close's shutdown(internal_fd)
+     * can never act on a fd number this pump already closed and the OS reused.
+     * Slot release is host_token-guarded so a newer arm that already retook this slot is never clobbered;
+     * if *p->closed, -close is tearing down (it munmaps under the lock AFTER joining us) — skip the write. */
     pthread_mutex_lock(p->lock);
+    if (p->internal_fd >= 0) { close(p->internal_fd); p->internal_fd = -1; }
     if (!*p->closed) {
         __sync_synchronize();
         if (*p->host_token == p->my_host_token) {
@@ -423,6 +435,7 @@ done:
         }
         __sync_synchronize();
     }
+    p->done = 1;          /* mark for reaping: connectChannel sweeps done pumps; -close joins the rest */
     pthread_mutex_unlock(p->lock);
     return NULL;
 }

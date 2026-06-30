@@ -965,8 +965,8 @@ static void VddInitAdapter(VDD_DEVICE_CONTEXT* ctx)
 
         VddLog("InitAdapter: IddCxAdapterInitAsync succeeded (adapter=%p)", (void*)adapterInitOut.AdapterObject);
 
-        /* ASB: do NOT force a preferred render adapter — let IddCx / the OS pick the default
-           render adapter (WARP). */
+        /* Render-adapter selection is left to IddCx / the OS default (WARP); the VDD is
+           display-only and pins no render adapter. */
     }
     else
     {

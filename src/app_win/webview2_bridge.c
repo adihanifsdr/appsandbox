@@ -549,10 +549,10 @@ BOOL json_get_string(const wchar_t *json, const wchar_t *key,
     if (*p != L'"') return FALSE;
     p++;
 
-    /* Copy the value into `out`, DECODING JSON string escapes. (A prior version copied the
-       slice verbatim, leaving \uXXXX -- what json.dumps/ensure_ascii and many HTTP clients
-       emit for non-ASCII -- and \" \\ as literal text, which corrupted e.g. non-ASCII
-       passwords on the headless path.) A \uXXXX yields one UTF-16 code unit directly; an
+    /* Copy the value into `out`, DECODING JSON string escapes. \uXXXX -- what
+       json.dumps/ensure_ascii and many HTTP clients emit for non-ASCII -- and \" \\ are
+       decoded rather than stored as literal text, so e.g. non-ASCII passwords on the
+       headless path stay intact. A \uXXXX yields one UTF-16 code unit directly; an
        astral character arrives as two \u escapes (a surrogate pair) and both units are
        stored, which is already valid UTF-16. */
     while (*p && *p != L'"') {

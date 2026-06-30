@@ -67,10 +67,10 @@ else:
 
 print("\n=== create-input validation (rejected before any build) ===")
 if IS_MAC:
-    # osType is locked to macOS on a macOS host (Windows/Linux guests are
-    # HCS-only); macOS name limit is 63 (LocalHostName), username follows the
-    # Windows-account ruleset (matches web/app.js on a macOS host), and an
-    # image is OPTIONAL (the daemon auto-fetches the restore IPSW).
+    # A macOS host supports macOS AND Windows guests (Linux is HCS-only); a
+    # Windows guest needs an ISO (imagePath), while a macOS guest's image is
+    # OPTIONAL (the daemon auto-fetches the restore IPSW). macOS name limit is
+    # 63 (LocalHostName); username follows the Windows-account ruleset.
     MAC = dict(osType="macOS", adminUser="user", adminPass="test123")
     CASES = [
         ("missing name",              dict(MAC, name=""),                          "name is required"),
@@ -78,7 +78,7 @@ if IS_MAC:
         ("illegal name chars",        dict(MAC, name="bad name"),                  "letters, digits"),
         ("name all digits",           dict(MAC, name="12345"),                     "only digits"),
         ("name leading hyphen",       dict(MAC, name="-bad"),                      "hyphen"),
-        ("Windows guest on macOS",    dict(MAC, name="okname", osType="Windows"),  "macOS host"),
+        ("Windows on macOS needs ISO",dict(MAC, name="okname", osType="Windows"),  "ISO"),
         ("Linux guest on macOS",      dict(MAC, name="okname", osType="Linux"),    "macOS host"),
         ("template (win-only)",       dict(MAC, name="okname", isTemplate=True),   "Windows"),
         ("reserved username",         dict(MAC, name="okname", adminUser="CON"),   "reserved"),

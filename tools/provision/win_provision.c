@@ -241,7 +241,7 @@ int asb_provision_setup_cmd(FILE *f) {
         "@echo off\r\n"
         "set LOG=%SystemRoot%\\AppSandbox\\setup.log\r\n"
         "echo === setup.cmd started === >> \"%LOG%\"\r\n"
-        "REM Agent already at C:\\Windows\\AppSandbox\\ from VHDX staging\r\n"
+        "REM Agent already staged at C:\\Windows\\AppSandbox\\ by the disk builder\r\n"
         "\"%SystemRoot%\\AppSandbox\\appsandbox-agent.exe\" --install >> \"%LOG%\" 2>&1\r\n"
         "echo === setup.cmd finished === >> \"%LOG%\"\r\n",
         f);

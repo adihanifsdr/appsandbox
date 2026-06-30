@@ -3,9 +3,9 @@
  * discipline: open() plans + reserves metafiles, add_*() buffers FILE records
  * and streams non-resident $DATA, close() serializes everything with USA fixups.
  *
- * v1 scope: single contiguous $DATA run per file; directories that fit in
- * $INDEX_ROOT (the $INDEX_ALLOCATION B-tree is added in a follow-up); a small
- * interned $Secure descriptor set; NTFS 3.1.
+ * Scope: single contiguous $DATA run per file; directories in $INDEX_ROOT, with
+ * an $INDEX_ALLOCATION B-tree for larger directories; a small interned $Secure
+ * descriptor set; NTFS 3.1.
  */
 #include "ntfs.h"
 #include <stdlib.h>
@@ -48,6 +48,7 @@ static int enc_single_run(uint8_t *out, uint64_t count, uint64_t first_lcn){
 /* USA / fixup: stamp the last 2 bytes of each `sectsz` sector with `usn`, saving
  * the originals into the USA. `size` and usa fields already set in the header. */
 static void apply_fixup(uint8_t *rec, uint32_t size, uint32_t sectsz, uint16_t usn){
+    if (usn == 0 || usn == 0xFFFF) usn = 1;   /* 0 and 0xFFFF are reserved USN sentinels (recno 65534/65535, +65536) */
     uint16_t usa_off = r16(rec+4), usa_cnt = r16(rec+6);
     uint8_t *usa = rec + usa_off;
     w16(usa, usn);
@@ -213,8 +214,8 @@ static int attr_resident(mftrec_t *r, uint32_t type, const uint16_t *name, int n
     w16(a+0x14, (uint16_t)val_off);
     /* $FILE_NAME (0x30) is ALWAYS indexed in the parent directory's $I30, so its
      * resident attribute MUST carry RESIDENT_ATTR_IS_INDEXED (0x01) -- Windows sets
-     * this on every resident $FILE_NAME. We were emitting 0x00 on
-     * every file -> a systematic inconsistency the kernel rejects at mount. */
+     * this on every resident $FILE_NAME. Emitting 0x00 here would be an
+     * inconsistency the kernel rejects at mount. */
     a[0x16] = indexed | (type == 0x30 ? 0x01 : 0x00);
     if (name_chars) memcpy(a+name_off, name, 2*name_chars);
     if (val_len)    memcpy(a+val_off, val, val_len);
@@ -321,8 +322,8 @@ static uint32_t to_disk_attrs(uint32_t win_attrs, int is_dir){
      * derives them from the file's actual on-disk state. We write every $DATA
      * PLAIN, so we never set COMPRESSED/SPARSE/ENCRYPTED; we DO honor REPARSE
      * (set on the 2 reparse points) and the internal directory/I30 bit.
-     * (Previously we kept extra non-settable bits like 0x80 NORMAL on 364 files
-     * and 0x800 COMPRESSED, which do not belong in the settable set.) */
+     * Non-settable bits like 0x80 NORMAL and 0x800 COMPRESSED do not belong in
+     * the settable set and are masked off. */
     uint32_t a = win_attrs & 0x3127u;       /* FILE_ATTR_SETTABLE */
     if (win_attrs & 0x400u) a |= 0x400u;     /* FILE_ATTR_REPARSE_POINT (structural, honored) */
     if (is_dir)             a |= 0x10000000u;/* FILE_ATTR_I30_INDEX_PRESENT */
@@ -338,7 +339,7 @@ static uint32_t build_std_info(uint8_t out[72], uint64_t c,uint64_t a,uint64_t m
     memset(out,0,72);
     w64(out+0x00, c); w64(out+0x08, m); w64(out+0x10, m); w64(out+0x18, a);
     /* FILE_ATTR_I30_INDEX_PRESENT (0x10000000) belongs ONLY in $FILE_NAME, never in
-     * $STANDARD_INFORMATION. Real Windows omits it here; emitting it on every dir
+     * $STANDARD_INFORMATION. Real Windows omits it here; emitting it on a dir
      * (root + $Extend included) is a malformed dos-attr the kernel rejects at mount. */
     w32(out+0x20, disk_attrs & ~0x10000000u);
     if (security_id == 0) return 48;
@@ -347,9 +348,7 @@ static uint32_t build_std_info(uint8_t out[72], uint64_t c,uint64_t a,uint64_t m
 }
 
 /* Build the metafile $SECURITY_DESCRIPTOR (the system-file default SD):
- * 0x64 bytes, Owner=SYSTEM, Group=BUILTIN\Administrators, DACL = {SYSTEM, Admins}.
- * (No longer used: metafiles now reference the shared $Secure id 0x100 instead of
- * carrying a standalone SD; kept for reference.) */
+ * 0x64 bytes, Owner=SYSTEM, Group=BUILTIN\Administrators, DACL = {SYSTEM, Admins}. */
 static uint32_t build_metafile_sd(uint8_t out[0x64], int read_only) __attribute__((unused));
 static uint32_t build_metafile_sd(uint8_t out[0x64], int read_only){
     memset(out, 0, 0x64);
@@ -409,10 +408,9 @@ static uint32_t build_file_name(uint8_t *out, uint64_t parent_ref,
     return 0x42 + 2*name_chars;
 }
 
-/* (Namespace is no longer chosen by an 8.3-structure test.) The NTFS
- * namespace keys solely on whether the WIM supplies a DOS alias:
+/* The NTFS namespace keys solely on whether the WIM supplies a DOS alias:
  * none -> POSIX, else WIN32+DOS or a collapsed WIN32_AND_DOS. See add_common
- * and names_collapsible.) */
+ * and names_collapsible. */
 
 /* ------------------------------------------------------------- index entries */
 /* Collation COLLATION_FILE_NAME: compare two $FILE_NAME keys case-insensitively
@@ -449,9 +447,8 @@ static int names_collapsible(const uint16_t *l, int ll, const uint16_t *s, int s
  * (A fuller Windows-identical table is a later fidelity upgrade; collation only
  * needs writer/$UpCase agreement, which this guarantees.) */
 /* The canonical NTFS $UpCase table (md5 7ff498a4..., Windows 8+). chkdsk rejects a
- * non-standard on-disk table ("bad on-disk uppercase table"); our prior simplified
- * ASCII+Latin1 table mis-collated. This is the canonical Windows $UpCase table,
- * embedded verbatim (a fixed Windows constant). g_upcase
+ * non-standard on-disk table ("bad on-disk uppercase table"), so the canonical
+ * Windows $UpCase table is embedded verbatim (a fixed Windows constant). g_upcase
  * also drives the writer's own index collation, so writer and $UpCase stay in sync. */
 #include "upcase_table.h"
 /* ECMA-182 reflected CRC-64: poly 0x9a6c9329ac4bc9b5, init &
@@ -1064,8 +1061,8 @@ static int build_directory_index(ntfs_writer_t *w, mftrec_t *d){
         uint32_t bm_bytes = (uint32_t)((idx_blocks+7)/8);
         /* Keep the index $BITMAP resident whenever it fits the record (what
          * Windows does); only spill to non-resident if attr_resident can't
-         * fit it. A fixed 0x40 cap wrongly forced non-resident for the giant
-         * WinSxS dirs (>512 INDX blocks), which chkdsk then "Corrects". */
+         * fit it. This avoids forcing non-resident for the giant WinSxS dirs
+         * (>512 INDX blocks), which chkdsk would otherwise "Correct". */
         uint8_t *rbm = calloc(1, align8u(bm_bytes));
         for (uint64_t b=0;b<idx_blocks;b++) rbm[b/8]|=1<<(b&7);
         if (attr_resident(d, NTFS_AT_BITMAP, I30, 4, rbm, align8u(bm_bytes), 0) == 0){
@@ -1343,8 +1340,8 @@ int ntfs_writer_close(ntfs_writer_t *w){
      * Sizes are left 0 here (the kernel reads real sizes from the target record;
      * the index entry's cached sizes are not a collation key). */
     {
-        /* $AttrDef name is "$AttrDef" = 8 chars; the count was wrongly 7 (it must be
-         * the full name length). Fixed here and at the rec-4 builder below. */
+        /* $AttrDef name is "$AttrDef" = 8 chars; the count must be the full name
+         * length. Matched here and at the rec-4 builder below. */
         struct { uint32_t rec; const uint16_t *nm; int nc; } sysf[] = {
             {NTFS_REC_MFT,N_MFT,4},   {NTFS_REC_MFTMIRR,N_MIR,8}, {NTFS_REC_LOGFILE,N_LOG,8},
             {NTFS_REC_VOLUME,N_VOL,7},{NTFS_REC_ATTRDEF,N_ATD,8}, {NTFS_REC_BITMAP,N_BMP,7},

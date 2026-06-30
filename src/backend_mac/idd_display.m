@@ -571,9 +571,12 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
         IOSurfaceLock(_surf[i], 0, NULL);
         uint8_t *dst = (uint8_t *)IOSurfaceGetBaseAddress(_surf[i]);
         size_t dstStride = IOSurfaceGetBytesPerRow(_surf[i]);
+        size_t dstRows = IOSurfaceGetHeight(_surf[i]);
         pthread_mutex_lock(&_fbLock);
         size_t copyStride = _fbStride < dstStride ? _fbStride : dstStride;
-        for (uint32_t r = 0; r < _fbH; r++)
+        /* Clamp rows to the surface height: the display thread may have grown _fbH after the
+           surface was sized (above, from an unlocked read), so never write past the IOSurface. */
+        for (uint32_t r = 0; r < _fbH && r < dstRows; r++)
             memcpy(dst + (size_t)r * dstStride, _fb + (size_t)r * _fbStride, copyStride);
         _renderSeq = _fbSeq;
         pthread_mutex_unlock(&_fbLock);
@@ -648,12 +651,11 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
 - (void)sendInput:(uint32_t)type p1:(uint32_t)p1 p2:(uint32_t)p2 p3:(uint32_t)p3 {
     InputPacket pkt = { INPUT_MAGIC, type, p1, p2, p3 };
     /* ENQUEUE ONLY — the AppKit main thread does ZERO ch3 socket I/O. The input worker thread
-       (inputLoop) drains this ring and does the actual blocking send + owns reconnect. This is the
-       fix for the window-wedge: any guest input-helper/agent/VDD restart (or desktop/session switch)
-       can stall ch3, but that backpressure now only ever stalls the worker thread — never the UI or
-       the HTTP API served on the main run loop. A non-blocking send on the main thread (MSG_DONTWAIT)
-       was NOT enough: the main thread stayed coupled to ch3's live state and still pinned in __sendto.
-       Bounded ring, drop-OLDEST when full (input is droppable; the latest position wins). */
+       (inputLoop) drains this ring and does the actual blocking send + owns reconnect. Any guest
+       input-helper/agent/VDD restart (or desktop/session switch) can stall ch3, but that backpressure
+       only ever stalls the worker thread — never the UI or the HTTP API served on the main run loop.
+       (A non-blocking main-thread send would not suffice: the main thread stays coupled to ch3's live
+       state and can pin in __sendto.) Bounded ring, drop-OLDEST when full (latest position wins). */
     pthread_mutex_lock(&_inqLock);
     uint32_t next = (_inqTail + 1) % IDD_INQ_CAP;
     if (next == _inqHead) _inqHead = (_inqHead + 1) % IDD_INQ_CAP;   /* full -> drop oldest */
@@ -746,10 +748,9 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
 
             if (fh.dirty_rect_count == 0) {
                 /* Full frame: data_size then height*stride bytes. Read into scratch FIRST (unlocked)
-                   so a multi-MB blocking recv never holds _fbLock — renderTick (main thread) also
-                   takes _fbLock, so holding it across the recv stalled the whole UI for the transfer
-                   (M1). Mirrors the Windows recv-into-recv_buf-before-frame_cs path and the dirty-rect
-                   path below. */
+                   so a multi-MB blocking recv never holds _fbLock: renderTick (main thread) also takes
+                   _fbLock, so holding it across the recv would stall the whole UI for the transfer.
+                   _fbLock is taken only for the memcpy into _fb (as in the dirty-rect path below). */
                 uint32_t data_size = 0;
                 if (!idd_rd_full(fd, &data_size, 4)) break;
                 uint32_t want = _fbStride * _fbH;
@@ -1123,6 +1124,7 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
                 for (uint32_t i = 0; i < cnt && o + 8 <= h.data_size; i++) {
                     uint32_t fmt = *(uint32_t *)(buf + o); o += 4;
                     uint32_t nl = *(uint32_t *)(buf + o); o += 4;
+                    if (nl > h.data_size - o) break;            /* name length must stay within the payload */
                     NSString *name = nl ? [[NSString alloc] initWithBytes:buf + o length:nl encoding:NSASCIIStringEncoding] : nil;
                     o += nl;
                     if (fmt == WF_TEXT) hT = YES;
@@ -1228,13 +1230,27 @@ static NSCursor *buildGuestCursor(AsbCursor *cur, double scale)
         free(pb);
         rel = [rel stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
         NSString *full = [root stringByAppendingPathComponent:rel];
+        /* Path-traversal guard (the daemon runs as root): reject absolute paths / ".." components
+           and require the standardized path to stay under `root`, so a malicious guest cannot
+           escape the staging dir and write arbitrary host files. Unsafe entries are skipped, but
+           their payload is still drained below so the stream stays aligned. */
+        BOOL safe = (rel.length > 0) && ![rel hasPrefix:@"/"];
+        if (safe) for (NSString *c in [rel pathComponents]) if ([c isEqualToString:@".."]) { safe = NO; break; }
+        if (safe) {
+            NSString *rootStd = [root stringByStandardizingPath];
+            NSString *fullStd = [full stringByStandardizingPath];
+            safe = [fullStd isEqualToString:rootStd] || [fullStd hasPrefix:[rootStd stringByAppendingString:@"/"]];
+        }
         NSString *top = [[rel pathComponents] firstObject];
-        if (top && ![tops containsObject:top]) [tops addObject:top];
+        if (safe && top && ![tops containsObject:top]) [tops addObject:top];
         if (fi.is_directory) {
-            [fm createDirectoryAtPath:full withIntermediateDirectories:YES attributes:nil error:nil];
+            if (safe) [fm createDirectoryAtPath:full withIntermediateDirectories:YES attributes:nil error:nil];
         } else {
-            [fm createDirectoryAtPath:[full stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
-            FILE *f = fopen(full.fileSystemRepresentation, "wb");
+            FILE *f = NULL;
+            if (safe) {
+                [fm createDirectoryAtPath:[full stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
+                f = fopen(full.fileSystemRepresentation, "wb");
+            }
             uint64_t rem = fi.file_size; uint8_t buf[65536];
             while (rem > 0) {
                 uint32_t chunk = rem > sizeof(buf) ? (uint32_t)sizeof(buf) : (uint32_t)rem;
@@ -1382,7 +1398,8 @@ static NSData *idd_cfhtml_to_html(const uint8_t *d, uint32_t n)
     NSString *s = [[NSString alloc] initWithBytes:d length:n encoding:NSUTF8StringEncoding];
     if (!s) return nil;
     NSRange sf = [s rangeOfString:@"StartFragment:"], ef = [s rangeOfString:@"EndFragment:"];
-    if (sf.location != NSNotFound && ef.location != NSNotFound) {
+    if (sf.location != NSNotFound && ef.location != NSNotFound &&
+        sf.location + 24 <= s.length && ef.location + 22 <= s.length) {   /* keep substringWithRange in bounds */
         int so = [[s substringWithRange:NSMakeRange(sf.location + 14, 10)] intValue];
         int eo = [[s substringWithRange:NSMakeRange(ef.location + 12, 10)] intValue];
         if (so >= 0 && eo > so && eo <= (int)n) return [NSData dataWithBytes:d + so length:eo - so];

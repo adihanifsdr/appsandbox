@@ -11,9 +11,9 @@
  * (with USA fixups), $Bitmap, $Secure, $UpCase, $Boot (+ backup) and the
  * 0xFF $LogFile.
  *
- * Scope (v1, per docs/appsandbox/NTFS-WIM-DESIGN.md §5): single contiguous
- * $DATA run per file, NTFS 3.1, names emitted as ns=3 (WIN32&DOS) when 8.3-
- * legal else a WIN32+DOS pair, $Secure interning a small descriptor set.
+ * Scope: single contiguous $DATA run per file, NTFS 3.1, names emitted as
+ * ns=3 (WIN32&DOS) when 8.3-legal else a WIN32+DOS pair, $Secure interning a
+ * small descriptor set.
  */
 #ifndef ASB_NTFS_H
 #define ASB_NTFS_H

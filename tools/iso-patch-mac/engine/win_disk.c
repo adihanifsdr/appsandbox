@@ -28,6 +28,18 @@ static double now_s(void){ struct timeval tv; gettimeofday(&tv,0); return (doubl
 static wim_t *W; static wim_image_t *IMG; static ntfs_writer_t *NW;
 static unsigned long g_dirs,g_files,g_empty,g_reparse,g_err,g_links; static unsigned long long g_bytes;
 
+/* Apply-progress: bytes durably written so far (worker pool + inline small files),
+ * read by a monitor thread vs g_total_bytes (the image's uncompressed total). The
+ * apply phase is the bulk of the build; the monitor maps written/total into the
+ * 4..80 band so the bar moves continuously instead of jumping 4 -> 82. g_written
+ * is updated from the worker threads AND the apply thread, so use __atomic. The
+ * monitor is the ONLY caller of progress() during apply (no stdout race). */
+static unsigned long long g_written;       /* via __atomic_fetch_add / __atomic_load_n */
+static unsigned long long g_total_bytes;
+static void (*g_prog)(int,const char*);
+static int                g_mon_stop;    /* via __atomic_* (set by main, polled by monitor) */
+static int                g_last_pct;
+
 /* WIM hard-link group_id -> NTFS inode ref (the first member written). Open-
  * addressing hash; group_id is never 0 for hard-linked files, so 0 = empty. */
 #define HL_BUCKETS (1u<<19)            /* 524288 slots for ~32k groups */
@@ -86,6 +98,7 @@ static void *worker_main(void *arg){
         else {
             if(wim_read_resource(W, it.res, buf) != 0) fail = 1;
             else if(blockio_pwrite(P.io, it.off, buf, (size_t)it.size) != 0) fail = 1;
+            else __atomic_fetch_add(&g_written, it.size, __ATOMIC_RELAXED);  /* apply progress */
         }
         free(buf);
         if(fail){ pthread_mutex_lock(&P.mtx); P.err++; pthread_mutex_unlock(&P.mtx); }
@@ -123,6 +136,58 @@ static unsigned long pool_finish(void){
     return e;
 }
 
+/* Progress monitor: while apply()+extract run, poll g_written and emit the apply
+ * percentage (4..80 band) on each integer-% change. Single emitter -> no race with
+ * the main thread, which only emits the 82..100 tail AFTER this thread is joined. */
+static void *progress_monitor(void *arg){
+    (void)arg;
+    while(!__atomic_load_n(&g_mon_stop, __ATOMIC_RELAXED)){
+        if(g_total_bytes){
+            unsigned long long w = __atomic_load_n(&g_written, __ATOMIC_RELAXED);
+            int p = 4 + (int)(76.0 * (double)w / (double)g_total_bytes);
+            if(p<4) p=4; if(p>80) p=80;
+            if(p!=g_last_pct){ g_last_pct=p; if(g_prog) g_prog(p,"Applying Windows image"); }
+        }
+        usleep(150000);   /* 150ms cadence */
+    }
+    return NULL;
+}
+
+/* Pre-walk: the EXACT byte total apply() will write, used as the progress denominator.
+ * Mirrors apply()'s write decision -- sums each non-reparse, non-empty file's resource
+ * orig_size, counting each hard-link group ONCE (subsequent members become NTFS hard
+ * links with no data write) but every non-grouped file individually (matching the
+ * g_bytes/g_written accounting). Metadata-only: decodes dentries from the in-memory
+ * image tree, no decompression, no I/O. This is why we do NOT use the WIM XML
+ * <TOTALBYTES> -- that is the logical size counting every hard-link member. */
+static uint64_t *g_pw_seen;   /* hard-link-group seen set (HL_BUCKETS slots) */
+static int pw_seen_gid(uint64_t gid){
+    uint32_t h=(uint32_t)(gid*0x9E3779B97F4A7C15ull>>45)&HL_MASK;
+    while(g_pw_seen[h]){ if(g_pw_seen[h]==gid) return 1; h=(h+1)&HL_MASK; }
+    g_pw_seen[h]=gid; return 0;
+}
+static unsigned long long pw_walk(uint64_t off, int depth){
+    if(depth>96) return 0;
+    unsigned long long sum=0;
+    for(;;){
+        wim_dentry_t d; int r=wim_dentry_at(IMG,off,&d);
+        if(r<=0) break;
+        if(d.attributes & WIM_FILE_ATTRIBUTE_DIRECTORY){
+            if(!(d.attributes & WIM_FILE_ATTRIBUTE_REPARSE_POINT) && d.subdir_offset)
+                sum += pw_walk(d.subdir_offset, depth+1);
+        } else if(!(d.attributes & WIM_FILE_ATTRIBUTE_REPARSE_POINT)){
+            int empty=1; for(int i=0;i<20;i++) if(d.hash[i]){ empty=0; break; }
+            if(!empty){
+                const wim_resource_t *res=wim_lookup_by_hash(W,d.hash);
+                if(res){ uint64_t gid=d.hard_link_group_id;
+                    if(!gid || !pw_seen_gid(gid)) sum += res->orig_size; }
+            }
+        }
+        off=d.self_offset+d.length;
+    }
+    return sum;
+}
+
 /* ---- WIM tree -> NTFS apply (validated in win2ntfs) ---- */
 static int32_t shared_sid;
 /* WIM security_id -> interned NTFS security_id. Built once from the WIM's
@@ -154,7 +219,7 @@ static int u16(const char*s, uint16_t*o){ int i=0; for(;s[i];i++) o[i]=(uint16_t
  * every OOBE screen (EULA, MSA, privacy, network) is skipped. processorArchitecture
  * MUST be arm64 or the components are ignored by ARM64 Windows. XML attribute
  * values use single quotes so the C literal needs no escaping. */
-/* Full hands-free answer file (validated to reach the desktop): specialize sets
+/* Full hands-free answer file: specialize sets
  * ComputerName + en-US locales; oobeSystem sets en-US locales (so OOBE skips the
  * region/language/keyboard screens), hides every OOBE page, creates local admin
  * user/test123, auto-logs that account on, sets TimeZone, and on first logon runs
@@ -309,7 +374,7 @@ static void apply(uint64_t parent_ref, uint64_t children_off, int depth, const c
                     uint8_t*buf=malloc((size_t)(res->orig_size?res->orig_size:1));
                     if(wim_read_resource(W,res,buf)!=0){ g_err++; free(buf); off=d.self_offset+d.length; continue; }
                     uint64_t ref=ntfs_add_file(NW,parent_ref,nm,nc,snp,snc,d.attributes,sid,d.creation_time,d.last_access_time,d.last_write_time,buf,res->orig_size);
-                    g_bytes+=res->orig_size; free(buf);
+                    g_bytes+=res->orig_size; __atomic_fetch_add(&g_written,res->orig_size,__ATOMIC_RELAXED); free(buf);
                     if(ref){ g_files++; if(gid && !hl_get(gid)) hl_put(gid,ref); } else g_err++;
                 } }
         }
@@ -354,7 +419,7 @@ static int detect_locale(char*out,int cap){
     return 0;
 }
 
-/* ---- Generic guest-file staging (P4: from-scratch create, mirrors iso-patch.exe --stage) ---- *
+/* ---- Generic guest-file staging (from-scratch create, mirrors iso-patch.exe --stage) ---- *
  * After the WIM apply we stage our own files at REAL guest paths via a manifest of
  * "<host-src>\t<guest-dest>" lines (same layout as generate_vhdx_manifest on Windows). The
  * from-scratch NTFS writer has no path lookup, so during apply() we record every directory's
@@ -398,8 +463,8 @@ static uint8_t *read_host_file(const char *path, uint64_t *len){
  * to SYSTEM's default DACL = SYSTEM:Full, Administrators:READ-ONLY. That breaks FirstLogon's setup.cmd
  * (append to setup.log -> Access denied -> agent never installs). This SD has INHERITABLE (OICI) ACEs
  * granting SYSTEM + Administrators Full and CREATOR OWNER Full (inherit-only) + Users RX, matching a
- * normal \Windows subdir, so runtime-created children are admin-writable. (Verified via icacls/SDDL +
- * a direct append test in the guest.) SDDL: O:BAG:SYD:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICIIO;FA;;;CO)(A;OICI;0x1200a9;;;BU) */
+ * normal \Windows subdir, so runtime-created children are admin-writable.
+ * SDDL: O:BAG:SYD:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICIIO;FA;;;CO)(A;OICI;0x1200a9;;;BU) */
 static int32_t g_dir_sid;
 static uint32_t asb_build_dir_sd(uint8_t *b){
     static const uint8_t SID_SY[12]={1,1,0,0,0,0,0,5, 18,0,0,0};            /* S-1-5-18  SYSTEM */
@@ -486,8 +551,12 @@ static unsigned long stage_manifest(const char *manifest_path, unsigned long *er
         uint64_t pref = mkdir_p(parent);
         if(!pref){ printf("stage: mkdir_p failed for %s\n",parent); (*errs)++; continue; }
         uint64_t len=0; uint8_t *data=read_host_file(src,&len);
-        if(!data && len){ printf("stage: read failed %s\n",src); (*errs)++; continue; }
-        uint16_t n16[256]; int nlc=u16(leaf,n16); if(nlc>255)nlc=255;
+        /* read_host_file returns NULL on any real failure (missing/unreadable/short read/OOM);
+         * a genuinely empty 0-byte file returns non-NULL with len==0. So NULL => error out,
+         * rather than silently staging a missing source as an empty file. */
+        if(!data){ printf("stage: read failed %s\n",src); (*errs)++; continue; }
+        char lo[256]; snprintf(lo,sizeof lo,"%s",leaf);   /* bound the leaf so u16's UTF-16 expansion can't overflow n16[256] */
+        uint16_t n16[256]; int nlc=u16(lo,n16); if(nlc>255)nlc=255;
         uint64_t fr=ntfs_add_file(NW,pref,n16,nlc,NULL,0,0x20,shared_sid,g_ts_c,g_ts_a,g_ts_w,(const char*)data,len);
         free(data);
         if(fr){ staged++; printf("  staged %s (%llu bytes)\n",dest,(unsigned long long)len); }
@@ -506,8 +575,10 @@ int win_disk_build(const char *wimp, const char *imgp, uint32_t idx, uint64_t gi
     if(gib==0) gib=34;
     #define PROG(p,m) do{ if(progress) progress((p),(m)); }while(0)
 
-    W=wim_open(wimp); IMG=wim_image_open(W,idx);
-    if(!W||!IMG){ printf("wim open fail\n"); return 2; }
+    W=wim_open(wimp);
+    if(!W){ printf("wim open fail\n"); return 2; }
+    IMG=wim_image_open(W,idx);
+    if(!IMG){ printf("wim image open fail\n"); return 2; }
 
     uint64_t bytes=gib<<30;
     blockio_t*io=blockio_create(imgp,bytes); if(!io){printf("image create fail\n");return 2;}
@@ -552,9 +623,21 @@ int win_disk_build(const char *wimp, const char *imgp, uint32_t idx, uint64_t gi
         if(nthreads>64) nthreads=64; }
     pool_start(io, nthreads);
     printf("applying image %u to NTFS ... (root sec_id from WIM, %d extract threads)\n",idx,nthreads);
+    /* Apply-progress denominator: the EXACT bytes apply() will write, from a metadata-only
+     * pre-walk (pw_walk) that mirrors apply's hard-link dedup -- so the 4..80 bar reaches 80
+     * exactly when the last byte lands. (The WIM XML <TOTALBYTES> is the logical size counting
+     * every hard-link member, ~2.5x too big on WinSxS, which stalls the bar near 40%.) The
+     * monitor runs across apply()+extract; it is joined BEFORE the 82..100 tail. */
+    g_prog = progress; g_last_pct = -1; g_mon_stop = 0;
+    __atomic_store_n(&g_written, 0ULL, __ATOMIC_RELAXED);
+    g_pw_seen = calloc(HL_BUCKETS, sizeof *g_pw_seen);
+    g_total_bytes = g_pw_seen ? pw_walk(r.subdir_offset, 0) : 0;   /* 0 => monitor off (no regression) */
+    free(g_pw_seen); g_pw_seen = NULL;
+    pthread_t mon = 0; int mon_ok = (g_total_bytes && pthread_create(&mon,NULL,progress_monitor,NULL)==0);
     double T_apply0 = now_s();
     apply(root,r.subdir_offset,0,"");
     unsigned long perr = pool_finish();        /* drain + join workers before any close */
+    if(mon_ok){ __atomic_store_n(&g_mon_stop, 1, __ATOMIC_RELAXED); pthread_join(mon,NULL); }
     double T_apply1 = now_s();
     printf("PHASE apply+extract (parallel) = %.1fs\n", T_apply1 - T_apply0);
     g_err += perr;
@@ -585,10 +668,12 @@ int win_disk_build(const char *wimp, const char *imgp, uint32_t idx, uint64_t gi
         } else printf("WARN: could not create \\Windows\\Panther; unattend NOT injected\n");
     } else printf("WARN: \\Windows dir not found during apply; unattend NOT injected\n");
 
+    PROG(90,"Finalizing filesystem");
     double T_close0 = now_s();
     if(ntfs_writer_close(NW)!=0){ printf("ntfs close FAIL\n"); return 1; }
     printf("PHASE ntfs_writer_close (serial) = %.1fs\n", now_s() - T_close0);
     printf("NTFS done.\n");
+    PROG(95,"Writing boot files");
 
     /* 3) FAT32 ESP */
     fat32_writer_t*F=fat32_open(io,L.esp_start_lba,L.esp_count_lba,"ESP");
@@ -608,22 +693,28 @@ int win_disk_build(const char *wimp, const char *imgp, uint32_t idx, uint64_t gi
     printf("boot files: bootmgfw.efi=%llu  mui(%s)=%llu  BCD-Template=%llu\n",
         (unsigned long long)bm_len,locale,(unsigned long long)(mui?mui_len:0),(unsigned long long)tpl_len);
 
-    /* 5) write ESP files */
-    fat32_addfile(F,"/EFI/Boot/bootaa64.efi",bootmgfw,bm_len);
-    fat32_addfile(F,"/EFI/Microsoft/Boot/bootmgfw.efi",bootmgfw,bm_len);
+    /* 5) write ESP files (a failed boot-file write makes the disk unbootable) */
+    int eerr=0;
+    eerr |= fat32_addfile(F,"/EFI/Boot/bootaa64.efi",bootmgfw,bm_len);
+    eerr |= fat32_addfile(F,"/EFI/Microsoft/Boot/bootmgfw.efi",bootmgfw,bm_len);
     if(mui){ char dst[160]; snprintf(dst,sizeof dst,"/EFI/Microsoft/Boot/%s/bootmgfw.efi.mui",locale);
         char dir[160]; snprintf(dir,sizeof dir,"/EFI/Microsoft/Boot/%s",locale); fat32_mkdir(F,dir);
-        fat32_addfile(F,dst,mui,mui_len); }
+        eerr |= fat32_addfile(F,dst,mui,mui_len); }
 
     /* 6) patched BCD */
     bcd_guids_t g; memcpy(g.disk_guid,L.disk_guid,16); memcpy(g.esp_part_guid,L.esp_part_guid,16); memcpy(g.win_part_guid,L.win_part_guid,16);
     uint8_t*bcd; size_t bcd_len;
     if(bcd_build(tpl,(size_t)tpl_len,&g,&bcd,&bcd_len)!=0){ printf("bcd_build fail\n"); return 1; }
-    fat32_addfile(F,"/EFI/Microsoft/Boot/BCD",bcd,bcd_len);
+    eerr |= fat32_addfile(F,"/EFI/Microsoft/Boot/BCD",bcd,bcd_len);
     printf("BCD built (%zu bytes) + ESP populated.\n",bcd_len);
+    if(eerr){ printf("ESP boot-file write FAILED\n"); return 1; }
 
     if(fat32_close(F)!=0){ printf("fat32 close fail\n"); return 1; }
+    PROG(98,"Configuring boot");
     blockio_close(io);
+    /* Any apply/extract/stage error (g_err includes worker perr + staging se) means a file is
+     * missing or corrupt on the volume -> fail rather than report a bootable disk. */
+    if(g_err){ printf("\nDISK INCOMPLETE: %lu file error(s) during build: %s\n",g_err,imgp); return 1; }
     PROG(100,"Disk complete");
     printf("\nDISK COMPLETE: %s (%llu GiB image)\n",imgp,(unsigned long long)gib);
     return 0;

@@ -50,8 +50,10 @@ static int resolve(const char *path, wim_dentry_t *out){
 
 int main(int argc,char**argv){
     if (argc<4){ printf("usage: wim_extract <wim> <idx> <\\path> [out]\n"); return 2; }
-    W=wim_open(argv[1]); IMG=wim_image_open(W,(uint32_t)atoi(argv[2]));
-    if (!W||!IMG){ printf("open fail\n"); return 2; }
+    W=wim_open(argv[1]);
+    if (!W){ printf("open fail\n"); return 2; }
+    IMG=wim_image_open(W,(uint32_t)atoi(argv[2]));
+    if (!IMG){ printf("open fail\n"); return 2; }
     wim_dentry_t d;
     if (!resolve(argv[3], &d)){ printf("NOT FOUND: %s\n", argv[3]); return 1; }
 
@@ -72,8 +74,10 @@ int main(int argc,char**argv){
         printf("FILE %s  size=%llu  reparse_tag=0x%x\n", argv[3], (unsigned long long)res->orig_size, d.reparse_tag);
         if (argc>4){
             uint8_t *buf=malloc((size_t)res->orig_size);
-            if (wim_read_resource(W,res,buf)!=0){ printf("decode fail\n"); return 1; }
-            FILE*f=fopen(argv[4],"wb"); fwrite(buf,1,(size_t)res->orig_size,f); fclose(f);
+            if (!buf){ printf("oom\n"); return 2; }
+            if (wim_read_resource(W,res,buf)!=0){ printf("decode fail\n"); free(buf); return 1; }
+            FILE*f=fopen(argv[4],"wb"); if(!f){ printf("open out fail\n"); free(buf); return 2; }
+            fwrite(buf,1,(size_t)res->orig_size,f); fclose(f);
             printf("wrote %llu bytes to %s\n",(unsigned long long)res->orig_size,argv[4]);
             free(buf);
         }

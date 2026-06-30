@@ -1,6 +1,7 @@
 /* wim.c -- WIM/ESD header + offset(lookup)-table parser. See wim.h. */
 
 #include "wim.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -24,6 +25,9 @@ struct wim {
     wim_resource_t  offset_table_res;   /* reshdr of the lookup table itself */
     wim_resource_t *res;                /* parsed lookup entries */
     size_t          nres;
+    wim_resource_t  xml_res;            /* reshdr of the XML metadata (@ header 0x48) */
+    char           *xml_ascii;          /* the XML decoded UTF-16LE -> ASCII (NULL if none) */
+    size_t          xml_len;
 };
 
 static uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
@@ -51,6 +55,32 @@ static void parse_reshdr(const uint8_t *p, wim_resource_t *r) {
     r->orig_size   = le64(p + 16);
 }
 
+/* Read the XML metadata resource (rhXmlData) and decode UTF-16LE -> ASCII into
+ * w->xml_ascii. Best-effort: on any problem xml_ascii stays NULL and the language
+ * + total-bytes accessors report absent (the build falls back to en-US / a coarse
+ * progress bar). rhXmlData is stored uncompressed per the WIM spec. */
+static void load_xml(wim_t *w) {
+    wim_resource_t *x = &w->xml_res;
+    if (x->size_in_wim == 0 || (x->flags & WIM_RESHDR_COMPRESSED)) return;
+    if (x->size_in_wim > (16u << 20)) return;                  /* sanity cap */
+    uint8_t *raw = malloc((size_t)x->size_in_wim);
+    if (!raw) return;
+    if (wim_pread(w, raw, (size_t)x->size_in_wim, x->offset) != 0) { free(raw); return; }
+    size_t n = (size_t)x->size_in_wim / 2;                       /* UTF-16 units */
+    char *a = malloc(n + 1);
+    if (!a) { free(raw); return; }
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        uint16_t u = (uint16_t)(raw[2*i] | (raw[2*i+1] << 8));
+        if (u == 0xFEFF || u == 0) continue;                    /* BOM / stray NUL */
+        a[o++] = (u < 0x80) ? (char)u : '?';                    /* non-ASCII (e.g. <NAME>) -> '?' */
+    }
+    a[o] = 0;
+    free(raw);
+    w->xml_ascii = a;
+    w->xml_len   = o;
+}
+
 wim_t *wim_open(const char *path) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) return NULL;
@@ -70,6 +100,7 @@ wim_t *wim_open(const char *path) {
     /* rhOffsetTable @ 0x30, rhXmlData @ 0x48, rhBootMetadata @ 0x60,
        dwBootIndex @ 0x78, rhIntegrity @ 0x7C. */
     parse_reshdr(hdr + 0x30, &w->offset_table_res);
+    parse_reshdr(hdr + 0x48, &w->xml_res);
     w->boot_index = le32(hdr + 0x78);
 
     if (!(flags & WIM_FLAG_COMPRESSION))      w->comp = WIM_COMP_NONE;
@@ -101,6 +132,7 @@ wim_t *wim_open(const char *path) {
     }
     w->nres = n;
     free(tbl);
+    load_xml(w);          /* best-effort; xml_ascii stays NULL on failure */
     return w;
 fail:
     close(fd);
@@ -113,6 +145,7 @@ void wim_close(wim_t *w) {
     if (!w) return;
     if (w->fd >= 0) close(w->fd);
     free(w->res);
+    free(w->xml_ascii);
     free(w);
 }
 
@@ -147,4 +180,57 @@ const wim_resource_t *wim_lookup_by_hash(const wim_t *w, const uint8_t hash[20])
     for (size_t i = 0; i < w->nres; i++)
         if (memcmp(w->res[i].hash, hash, 20) == 0) return &w->res[i];
     return NULL;
+}
+
+/* ---- WIM XML metadata accessors (targeted scan; no full XML parser) ---- */
+
+/* Span of <IMAGE INDEX="idx"> ... </IMAGE> within xml_ascii; *end = the </IMAGE>
+ * (or buffer end). The INDEX needle includes the closing quote so "1" != "11". */
+static const char *xml_image_block(const char *xml, uint32_t idx, const char **end) {
+    char needle[32];
+    snprintf(needle, sizeof needle, "INDEX=\"%u\"", idx);
+    const char *p = strstr(xml, needle);
+    if (!p) { *end = NULL; return NULL; }
+    const char *e = strstr(p, "</IMAGE>");
+    *end = e ? e : (xml + strlen(xml));
+    return p;
+}
+
+/* Copy the text between open..close, if it lies within [blk,end). 0/-1. */
+static int xml_tag_value(const char *blk, const char *end,
+                         const char *open, const char *close,
+                         char *out, size_t cap) {
+    if (cap == 0) return -1;                 /* keep n=cap-1 from underflowing */
+    const char *a = strstr(blk, open);
+    if (!a || a >= end) return -1;
+    a += strlen(open);
+    const char *b = strstr(a, close);
+    if (!b || b > end) return -1;
+    size_t n = (size_t)(b - a);
+    if (n >= cap) n = cap - 1;
+    memcpy(out, a, n);
+    out[n] = 0;
+    return 0;
+}
+
+int wim_image_default_language(const wim_t *w, uint32_t image_index, char *out, size_t cap) {
+    if (!w || !w->xml_ascii || !out || cap == 0) return -1;
+    const char *end;
+    const char *blk = xml_image_block(w->xml_ascii, image_index, &end);
+    if (!blk) return -1;
+    if (xml_tag_value(blk, end, "<DEFAULT>",  "</DEFAULT>",  out, cap) == 0 && out[0]) return 0;
+    if (xml_tag_value(blk, end, "<LANGUAGE>", "</LANGUAGE>", out, cap) == 0 && out[0]) return 0;
+    return -1;
+}
+
+uint64_t wim_image_total_bytes(const wim_t *w, uint32_t image_index) {
+    if (!w || !w->xml_ascii) return 0;
+    const char *end;
+    const char *blk = xml_image_block(w->xml_ascii, image_index, &end);
+    if (!blk) return 0;
+    char buf[32];
+    if (xml_tag_value(blk, end, "<TOTALBYTES>", "</TOTALBYTES>", buf, sizeof buf) != 0) return 0;
+    uint64_t v = 0;
+    for (const char *s = buf; *s >= '0' && *s <= '9'; s++) v = v * 10 + (uint64_t)(*s - '0');
+    return v;
 }

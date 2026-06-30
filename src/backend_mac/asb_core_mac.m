@@ -942,7 +942,12 @@ static void start_windows_build_flow(int idx, NSURL *isoURL) {
                                        testMode:testMode
                                        progress:^(double frac, NSString *step) {
                 int j = vm_index_of(nsName.UTF8String);
-                if (j >= 0) update_install_progress(j, frac, step);
+                if (j < 0) return;
+                if (frac == ISO_PATCH_PROGRESS_LOG) {   /* e.g. "Detected ISO language: en-US" */
+                    post_log("[%s] %s", g_vms[j].name, step.UTF8String);
+                    return;
+                }
+                update_install_progress(j, frac, step);
             }
                                      completion:^(NSError * _Nullable err) {
                 int j = vm_index_of(nsName.UTF8String);
@@ -1463,10 +1468,10 @@ int asb_mac_vm_delete(const char *name) {
     [IsoPatchMac cancelFetchForVm:nsName];
 
     /* Stop the backend before removing files. A Windows guest runs on QEMU+ivshmem (vz_handle is
-       NULL), so the old vz_handle-gated block skipped it entirely — leaving QEMU running on a disk
-       we then deleted and an ivshmem transport mmap'd to a backing file we then removed, whose
-       async exit callback later crashed the daemon. Tear the Windows backend down here, synchronously
-       and before VmDir deleteVm, mirroring handle_qemu_state_change's Stopped path. */
+       NULL), so its backend must be torn down here — otherwise QEMU keeps running on a disk we are
+       about to delete and the ivshmem transport stays mmap'd to a backing file we are about to
+       remove, whose async exit callback would crash the daemon. Tear the Windows backend down here,
+       synchronously and before VmDir deleteVm, mirroring handle_qemu_state_change's Stopped path. */
     if (vm_is_windows_idx(idx)) {
         if (g_qemu_refs[idx] || g_transport_refs[idx]) {
             post_log("[%s] Stopping Windows VM before delete...", name);

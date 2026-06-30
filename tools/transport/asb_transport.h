@@ -94,7 +94,8 @@ typedef struct AsbSlot {
                                  * acceptor stamps it just before publishing ESTABLISHED (and in
                                  * asb_stream_reset); the Mac host pump captures it once and EXITS when
                                  * it changes (a NEW acceptance took the slot). A respawned guest (fresh
-                                 * pid) frees its dead predecessor's residue once at startup. Liveness by
+                                 * pid) stamps a new owner_id, so its dead predecessor's residue is reclaimed
+                                 * host-side when the pump observes the changed identity. Liveness by
                                  * IDENTITY, never a clock -> no idle false-positive. Mac/ivshmem ONLY;
                                  * the PC AF_HYPERV path never maps slot memory. */
     volatile uint64_t host_token; /* @16 HOST-sole (ch1-7): per-arm handshake nonce; 0 = released */

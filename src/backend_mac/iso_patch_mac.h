@@ -13,6 +13,14 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/* fraction: 0.0..1.0 = real progress; -1.0 = indeterminate (a STATUS phase change);
+ * ISO_PATCH_PROGRESS_LOG = the `step` is a log line to surface to the create log (not progress);
+ * ISO_PATCH_PROGRESS_LANG = the `step` is the raw detected BCP-47 language tag (e.g. "en-US"),
+ *   delivered to buildWindowsDiskWithISO so it can re-generate unattend.xml in-process with the
+ *   real language -- mirrors the Windows daemon's LANG: re-gen (asb_core.c vhdx_create_thread).
+ *   Consumed internally by build-windows; never reaches the create-flow caller. */
+#define ISO_PATCH_PROGRESS_LOG  (-2.0)
+#define ISO_PATCH_PROGRESS_LANG (-3.0)
 typedef void (^IsoPatchProgress)(double fraction, NSString *step);
 typedef void (^IsoPatchCompletion)(NSError * _Nullable error);
 
@@ -90,8 +98,8 @@ typedef void (^IsoPatchCompletion)(NSError * _Nullable error);
  * incl. the ivshmem AppSandboxSHM) is cached locally. Mirrors ensureOpenSSHMsiCached: downloads the
  * release zip on first use (single atomic write; the version is pinned in the filename so a newer
  * release auto-invalidates) and returns the cached zip PATH. build-windows extracts the needed
- * members into its own per-build temp dir. Returns nil on failure (caller falls back to the bundled
- * payload). Blocking; call off-main. */
+ * members into its own per-build temp dir. Returns nil on failure (the caller must abort the build;
+ * there is no bundled fallback). Blocking; call off-main. */
 + (nullable NSString *)ensureSignedWinPayloadZipCached;
 
 /* Ensure the vendored NetKVM (virtio-net) zip is cached locally. Mirrors ensureSignedWinPayloadZipCached:

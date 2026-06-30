@@ -69,8 +69,13 @@ static NSDictionary *vmToJsDict(const AsbVmMac *vm) {
         @"netAdapter":      @"",
         @"isTemplate":      @NO,
         @"hypervVideoOff":  @NO,
-        @"buildingVhdx":    @NO,
-        @"vhdxStaging":     @NO,
+        /* Disk-build phase: feed the shared web/app.js "Building Disk (X%)" / "Staging
+         * files..." branch (which keys on buildingVhdx/vhdxStaging/vhdxProgress), matching
+         * the Windows GUI. True only while the local disk build runs (install_progress is a
+         * real 0..100 percent; it becomes -1 when the guest first-boot takes over). */
+        @"buildingVhdx":    @(!vm->disk_built && vm->install_progress >= 0),
+        @"vhdxStaging":     @(!vm->disk_built && vm->install_progress >= 0 &&
+                              strstr(vm->install_status, "Staging") != NULL),
         @"vhdxProgress":    @(vm->install_progress < 0 ? 0 : vm->install_progress),
         @"installComplete": @(vm->install_complete ? YES : NO),
         @"installStatus":   [NSString stringWithUTF8String:vm->install_status],

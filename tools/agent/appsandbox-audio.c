@@ -300,8 +300,8 @@ static BOOL stream_loop(AsbConn *s,
 
         /* ivshmem only: detect a host disconnect while idle. During silence there is no PCM to send,
            so the send_all calls below never fire; asb_poll reports when the host has dropped the slot
-           so we fall back to the accept loop. On a Windows host disconnects surface through send_all,
-           exactly as before, so this check is skipped to leave that path untouched. */
+           so we fall back to the accept loop. On a Windows (AF_HYPERV) host a disconnect is reported
+           by send_all failing, so this idle poll is only needed on the ivshmem backend. */
         if (asb_transport_is_ivshmem() && asb_poll(s, 0) < 0)
             return FALSE;
 

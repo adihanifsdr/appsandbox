@@ -251,7 +251,7 @@ static uint32_t find_object_by_type(hive_t *h, uint32_t objects, uint32_t type,
 
 int bcd_build(const uint8_t *tpl, size_t tpl_len, const bcd_guids_t *g, uint8_t **out, size_t *out_len){
     if (tpl_len < 0x1000 || memcmp(tpl,"regf",4)) return -1;
-    hive_t hv; hv.cap = tpl_len + 0x4000; hv.b = malloc(hv.cap); memcpy(hv.b,tpl,tpl_len);
+    hive_t hv; hv.cap = tpl_len + 0x4000; hv.b = malloc(hv.cap); if(!hv.b) return -1; memcpy(hv.b,tpl,tpl_len);
     hv.len = tpl_len; hv.abump = 0; hv.aend = 0;
     hive_t *h=&hv;
 
@@ -308,7 +308,7 @@ int bcd_build(const uint8_t *tpl, size_t tpl_len, const bcd_guids_t *g, uint8_t 
     memset(qw,0,8); qw[0]=1;   set_element(h, ld_elems, "250000c2", 3, qw, 8);
 
     /* Optional serial kernel debugging, baked in at BUILD time (never edit the
-     * FAT ESP post-hoc — that corrupted it -> FatDiskIo timeouts -> 0xc000000d).
+     * FAT ESP post-hoc — that corrupts it -> FatDiskIo timeouts -> 0xc000000d).
      * This is `bcdedit /debug on` + serial dbgsettings ONLY: NO bootdebug (which
      * halts winload waiting for a debugger) and NO EMS. Windows boots NORMALLY
      * to OOBE/desktop while the kernel emits KD/bugcheck output over the SPCR

@@ -60,6 +60,9 @@
 		20E10000000000000000000C /* lzms.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E10000000000000000000C /* lzms.c */; };
 		20E10000000000000000000D /* resource.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E10000000000000000000D /* resource.c */; };
 		20E1000000000000000000C1 /* win_provision.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E1000000000000000000C1 /* win_provision.c */; };
+		20E1000000000000000000C2 /* win_provision.c in Sources */ = {isa = PBXBuildFile; fileRef = 10E1000000000000000000C1 /* win_provision.c */; };
+		20E2000000000000000000D1 /* mac_account_hash.m in Sources */ = {isa = PBXBuildFile; fileRef = 10E2000000000000000000D1 /* mac_account_hash.m */; };
+		20E2000000000000000000D2 /* mac_account_hash.m in Sources */ = {isa = PBXBuildFile; fileRef = 10E2000000000000000000D1 /* mac_account_hash.m */; };
 		4020000000000000000000CC /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3006000000000000000000AA /* Foundation.framework */; };
 		4021000000000000000000CC /* Virtualization.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3003000000000000000000AA /* Virtualization.framework */; };
 		6020000000000000000000CC /* iso-patch-mac in Embed Resources */ = {isa = PBXBuildFile; fileRef = C020000000000000000000CC /* iso-patch-mac */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
@@ -217,6 +220,7 @@
 		10E10000000000000000000C /* lzms.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = lzms.c; path = "tools/iso-patch-mac/engine/lzms.c"; sourceTree = SOURCE_ROOT; };
 		10E10000000000000000000D /* resource.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = resource.c; path = "tools/iso-patch-mac/engine/resource.c"; sourceTree = SOURCE_ROOT; };
 		10E1000000000000000000C1 /* win_provision.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = win_provision.c; path = "tools/provision/win_provision.c"; sourceTree = SOURCE_ROOT; };
+		10E2000000000000000000D1 /* mac_account_hash.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = mac_account_hash.m; path = "tools/provision/mac_account_hash.m"; sourceTree = SOURCE_ROOT; };
 		1021000000000000000000CC /* iso-patch-mac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "iso-patch-mac.entitlements"; sourceTree = "<group>"; };
 		C020000000000000000000CC /* iso-patch-mac */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "iso-patch-mac"; sourceTree = BUILT_PRODUCTS_DIR; };
 		1030000000000000000000DD /* appsandbox-agent.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "appsandbox-agent.m"; sourceTree = "<group>"; };
@@ -714,6 +718,8 @@
 				2027000000000000000000BB /* vz_vm.m in Sources */,
 				2029000000000000000000BB /* vm_agent_mac.m in Sources */,
 				2030000000000000000000BB /* iso_patch_mac.m in Sources */,
+				20E1000000000000000000C2 /* win_provision.c in Sources */,
+				20E2000000000000000000D2 /* mac_account_hash.m in Sources */,
 				2031000000000000000000BB /* vm_ssh_proxy_mac.m in Sources */,
 				2032000000000000000000BB /* vm_clipboard_mac.m in Sources */,
 				2060000000000000000000BB /* asb_ivshmem_transport.m in Sources */,
@@ -741,6 +747,7 @@
 				20E10000000000000000000C /* lzms.c in Sources */,
 				20E10000000000000000000D /* resource.c in Sources */,
 				20E1000000000000000000C1 /* win_provision.c in Sources */,
+				20E2000000000000000000D1 /* mac_account_hash.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -24,8 +24,8 @@ static unsigned long g_dirs, g_files, g_empty, g_reparse, g_err;
 static unsigned long long g_bytes;
 
 static int32_t map_sid(int32_t wim_sid){
-    /* v1: all files share the default descriptor at security_id 0x100 (boots per
-     * NTFS-WIM-DESIGN §5). Per-file WIM SDs need a $Secure B-tree (v2). */
+    /* All files share the default descriptor at security_id 0x100 (boots per
+     * NTFS-WIM-DESIGN §5). Per-file WIM SDs would need a $Secure B-tree. */
     (void)wim_sid;
     return ntfs_secure_intern(NW, NULL, 0);
 }
@@ -49,7 +49,7 @@ static void walk(uint64_t parent_ref, uint64_t children_off, int depth){
             if (!ref){ g_err++; }
             else { g_dirs++; if (d.subdir_offset) walk(ref, d.subdir_offset, depth+1); }
         } else if (d.attributes & WIM_FILE_ATTRIBUTE_REPARSE_POINT){
-            /* v1: create as an empty file (reparse buffer not yet emitted) */
+            /* create as an empty file; the reparse buffer is not emitted */
             ntfs_add_file(NW, parent_ref, nm, nc, NULL, 0, d.attributes & ~WIM_FILE_ATTRIBUTE_REPARSE_POINT,
                           sid, d.creation_time, d.last_access_time, d.last_write_time, NULL, 0);
             g_reparse++;

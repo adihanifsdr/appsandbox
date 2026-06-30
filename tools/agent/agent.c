@@ -1347,14 +1347,16 @@ static void stop_audio_monitor(void)
 
 /* ---- IDD driver status check ---- */
 
-/* Check if AppSandboxVDD driver is installed and report status.
-   Sends "idd_status:<status>" to host where status is:
-     ok          — device present and working
-     error:<N>   — device present but has problem code N
-     not_found   — no device with Root\AppSandboxVDD hardware ID found
-*/
-static void report_idd_status(AsbConn *client)
+/* Check the AppSandboxVDD driver state and report "idd_status:<status>" to the host
+   (ok / error / disabled / not_found / unknown), derived from devcon's PnP devnode
+   state. Called once at connect (force=1: always send, so a reconnect re-syncs the
+   host's latched idd_ready) AND periodically from the device-check loop (force=0:
+   send only on change) -- so the host's display-readiness tracks the LIVE VDD state,
+   which can self-heal via ensure_vdd_running(). The host re-latches every line, so
+   the change-gate avoids spamming the daemon log/events. */
+static void report_idd_status(AsbConn *client, int force)
 {
+    static char last_status[16];   /* last value sent (process-global; force=1 overrides on (re)connect) */
     char output[4096];
     wchar_t cmd[MAX_PATH];
     wchar_t exe_dir[MAX_PATH];
@@ -1365,6 +1367,7 @@ static void report_idd_status(AsbConn *client)
     SECURITY_ATTRIBUTES sa;
     DWORD bytes_read;
     int pos = 0;
+    const char *st = "not_found";
 
     GetModuleFileNameW(NULL, exe_dir, MAX_PATH);
     slash = wcsrchr(exe_dir, L'\\');
@@ -1375,8 +1378,7 @@ static void report_idd_status(AsbConn *client)
     sa.lpSecurityDescriptor = NULL;
     sa.bInheritHandle = TRUE;
     if (!CreatePipe(&hRead, &hWrite, &sa, 0)) {
-        send_line(client, "idd_status:not_found");
-        return;
+        st = "not_found"; goto emit;
     }
     SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
 
@@ -1392,8 +1394,7 @@ static void report_idd_status(AsbConn *client)
         agent_log("IDD status: devcon failed to launch (%lu).", GetLastError());
         CloseHandle(hRead);
         CloseHandle(hWrite);
-        send_line(client, "idd_status:not_found");
-        return;
+        st = "not_found"; goto emit;
     }
     CloseHandle(hWrite);
 
@@ -1408,19 +1409,28 @@ static void report_idd_status(AsbConn *client)
 
     if (strstr(output, "running")) {
         agent_log("IDD status: AppSandboxVDD running.");
-        send_line(client, "idd_status:ok");
+        st = "ok";
     } else if (strstr(output, "problem")) {
         agent_log("IDD status: AppSandboxVDD has a problem. Output: %s", output);
-        send_line(client, "idd_status:error");
+        st = "error";
     } else if (strstr(output, "disabled")) {
         agent_log("IDD status: AppSandboxVDD disabled.");
-        send_line(client, "idd_status:disabled");
+        st = "disabled";
     } else if (strstr(output, "No matching")) {
         agent_log("IDD status: AppSandboxVDD not found.");
-        send_line(client, "idd_status:not_found");
+        st = "not_found";
     } else {
         agent_log("IDD status: unknown. Output: %s", output);
-        send_line(client, "idd_status:unknown");
+        st = "unknown";
+    }
+
+emit:
+    /* Send only when the value changes (force overrides on connect). */
+    if (force || strcmp(st, last_status) != 0) {
+        char line[32];
+        sprintf_s(line, sizeof(line), "idd_status:%s", st);
+        send_line(client, line);
+        strcpy_s(last_status, sizeof(last_status), st);
     }
 }
 
@@ -1808,8 +1818,8 @@ static void handle_client(AsbConn *client)
         return;
     }
 
-    /* Report IDD driver status to host */
-    report_idd_status(client);
+    /* Report IDD driver status to host (force: always send on connect so a reconnect re-syncs) */
+    report_idd_status(client, 1);
 
     /* Initial device checks */
     ensure_vdd_running();
@@ -1841,6 +1851,7 @@ static void handle_client(AsbConn *client)
             last_device_check = now;
             ensure_vdd_running();
             ensure_hyperv_video_disabled(client);
+            report_idd_status(client, 0);   /* re-report the (possibly self-healed) VDD state; on-change only */
         }
 
 
@@ -2099,7 +2110,7 @@ static DWORD WINAPI ssh_relay_thread(LPVOID param)
     SOCKET hv = (SOCKET)asb_conn_socket_u64(ctx->hv);
 
     if (hv != INVALID_SOCKET) {
-        /* PC (AF_HYPERV): the dual-fd select() relay, identical to the socket implementation. */
+        /* PC (AF_HYPERV): the connection exposes a real SOCKET, so relay both directions with a single dual-fd select(). */
         fd_set rfds;
         struct timeval tv;
         for (;;) {
