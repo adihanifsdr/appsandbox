@@ -22,15 +22,15 @@ Windows features:
 - Headless mode: a scriptable local HTTP/JSON API + dependency-free Python SDK (`asb.py`) for creating and driving GPU-accelerated VMs programmatically
 
 Mac features:
-- macOS VM support
-- Skips most of the install setup process
+- macOS or Windows 11 ARM VM support
+- Zero touch install for Windows 11, macOS has 3 unskippable onboarding steps
 - Copy and Paste
 - 2 Channel Audio
-- GPU Acceleration via Paravirtualization with support for Metal
+- macOS: GPU Acceleration via Paravirtualization with support for Metal, Windows: No GPU Acceleration
 - SSH via virtio-vsock (no network required)
-- Dynamic display sizing
+- Fixed 1080P60 display on Windows 11 guests, Dynamic display sizing on macOS guests
 - Provision and boot with / without internet
-- Headless mode: the same scriptable local HTTP/JSON API + Python SDK (`asb.py`) as on Windows, for driving macOS VMs programmatically
+- Headless mode: the same scriptable local HTTP/JSON API + Python SDK (`asb.py`) as on Windows, for driving macOS and Windows 11 VMs programmatically
 
 Requirements:
 Windows 11 with an x64 Processor or macOS Tahoe (M Series)
@@ -67,7 +67,9 @@ Virtual Machine Platform is the same Windows feature WSL2 uses.
 - Scripting the VM lifecycle from code — create, snapshot, branch, SSH into, and delete
   GPU-accelerated VMs — with the Python SDK.
 
-**Headless API.** `appsandbox.exe --headless` (or `sudo … --headless` on macOS) starts a
+**Headless API.** 
+`appsandbox.exe --headless` 
+(or `sudo /Appsandbox.app/Contents/MacOS/AppSandbox --headless` on macOS) starts a
 single-owner daemon that hosts the same core as the GUI and exposes it as a Docker-style
 local HTTP/JSON API on `127.0.0.1`, identical on both platforms. The stdlib-only Python SDK
 (`asb.py`) wraps it: create GPU-accelerated VMs (GPU-PV is a `gpuMode` create option), SSH
