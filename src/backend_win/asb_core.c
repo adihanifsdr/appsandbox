@@ -871,8 +871,10 @@ static void asb_hcs_state_changed(VmInstance *instance, DWORD event)
                (snapshot/branch revert), so "deployed" is only valid per boot.
                The guest-side write is idempotent. */
             instance->ssh_key_deployed = FALSE;
+            instance->vnc_guest_port = 0;
             hcs_stop_monitor(instance);
             vm_ssh_proxy_stop(instance);
+            vm_vnc_proxy_stop(instance);
             vm_agent_stop(instance);
             idd_probe_stop(instance);
             asb_log(L"VM \"%s\" exited (event=0x%08X).", instance->name, event);
@@ -2926,6 +2928,7 @@ ASB_API void asb_cleanup(void)
     for (i = 0; i < g_vm_count; i++) {
         hcs_stop_monitor(&g_vms[i]);
         vm_ssh_proxy_stop(&g_vms[i]);
+        vm_vnc_proxy_stop(&g_vms[i]);
         vm_agent_stop(&g_vms[i]);
         idd_probe_stop(&g_vms[i]);
         if (g_vms[i].running) hcs_terminate_vm(&g_vms[i]);
@@ -2955,6 +2958,7 @@ ASB_API void asb_detach(void)
     for (i = 0; i < g_vm_count; i++) {
         hcs_stop_monitor(&g_vms[i]);
         vm_ssh_proxy_stop(&g_vms[i]);
+        vm_vnc_proxy_stop(&g_vms[i]);
         vm_agent_stop(&g_vms[i]);
         idd_probe_stop(&g_vms[i]);
         hcs_unregister_vm_callback(&g_vms[i]);
@@ -3566,6 +3570,7 @@ ASB_API HRESULT asb_vm_stop(AsbVm vm)
     inst->ssh_key_deployed = FALSE;   /* disk may change while stopped (revert) -- re-deploy next boot */
     hcs_stop_monitor(inst);
     vm_ssh_proxy_stop(inst);
+    vm_vnc_proxy_stop(inst);
     vm_agent_stop(inst);
     idd_probe_stop(inst);
 
@@ -3601,6 +3606,7 @@ ASB_API HRESULT asb_vm_delete(AsbVm vm)
 
     hcs_stop_monitor(inst);
     vm_ssh_proxy_stop(inst);
+    vm_vnc_proxy_stop(inst);
     vm_agent_stop(inst);
     idd_probe_stop(inst);
 

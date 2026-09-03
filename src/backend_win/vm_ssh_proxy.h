@@ -15,4 +15,11 @@ void vm_ssh_proxy_start(VmInstance *instance);
 /* Stop the SSH proxy for a VM.  Safe to call even if not started. */
 void vm_ssh_proxy_stop(VmInstance *instance);
 
+/* Same relay for a VNC server inside the guest: 127.0.0.1:<ephemeral> <->
+   guest AF_HYPERV :0008 <-> 127.0.0.1:5900 (bridged by the Linux agent).
+   Started on demand from the UI's VNC button; instance->vnc_port holds the
+   bound host port once the listener is up. Exported for the app. */
+ASB_API void vm_vnc_proxy_start(VmInstance *instance);
+ASB_API void vm_vnc_proxy_stop(VmInstance *instance);
+
 #endif /* VM_SSH_PROXY_H */

@@ -31,6 +31,7 @@ static const GUID AGENT_SERVICE_GUID =
 #define WM_VM_AGENT_SHUTDOWN    (WM_APP + 3)
 #define WM_VM_AGENT_GPUCOPY     (WM_APP + 4)
 #define WM_VM_HYPERV_VIDEO_OFF  (WM_APP + 12)
+#define WM_VM_VNC_CHANGED       (WM_APP + 19)
 
 static HWND g_agent_hwnd = NULL;
 
@@ -266,6 +267,19 @@ static int process_async_message(VmInstance *vm, SOCKET s, const char *buf)
            never-pumped agent thread. */
         if (g_agent_hwnd && strcmp(buf + 13, "disabled") == 0)
             PostMessageW(g_agent_hwnd, WM_VM_HYPERV_VIDEO_OFF, 0, (LPARAM)vm->unique_id);
+    } else if (strncmp(buf, "vnc:", 4) == 0) {
+        /* "vnc:5900" / "vnc:none" — the agent watches the guest's listeners
+           and reports on change, so this doubles as the VNC button's gate. */
+        DWORD port = (strcmp(buf + 4, "none") == 0) ? 0 : (DWORD)atoi(buf + 4);
+        if (port != vm->vnc_guest_port) {
+            vm->vnc_guest_port = port;
+            if (port)
+                ui_log(L"[%s] VNC server listening on guest port %lu.", vm->name, port);
+            else
+                ui_log(L"[%s] VNC server gone.", vm->name);
+            if (g_agent_hwnd)
+                PostMessageW(g_agent_hwnd, WM_VM_VNC_CHANGED, 0, (LPARAM)vm->unique_id);
+        }
     } else if (strncmp(buf, "displays:", 9) == 0) {
         ui_log(L"[%s] Displays: %S", vm->name, buf + 9);
     } else if (strncmp(buf, "log:", 4) == 0) {
@@ -534,6 +548,7 @@ static DWORD WINAPI agent_thread_proc(LPVOID param)
                 closesocket(old);
         }
         ui_log(L"Agent offline for \"%s\".", vm->name);
+        vm->vnc_guest_port = 0;
         notify_agent_status(vm);
 
         /* Wake up any blocked command sender */

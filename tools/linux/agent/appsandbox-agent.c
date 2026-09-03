@@ -446,12 +446,17 @@ static void send_reply(int fd, const char *tag, const char *msg)
     }
 }
 
+/* Defined with the vsock<->TCP forwarders further down. */
+#define VNC_TCP_PORT    5900u
+static int tcp_port_listening(unsigned port);
+
 /* ---- Heartbeat thread ---- */
 
 static void *heartbeat_thread(void *arg)
 {
     (void)arg;
     int idd_last = 0;   /* last reported display-driver readiness (so we only send on change) */
+    int vnc_last = -1;  /* last reported VNC listener state; -1 = report on first beat */
     while (!g_stop) {
         /* Sleep first so the very first heartbeat is at +5s, after hello. */
         for (int s = 0; s < HEARTBEAT_INTERVAL_SEC && !g_stop; s++)
@@ -475,6 +480,17 @@ static void *heartbeat_thread(void *arg)
             if (ready != idd_last) {
                 send_line(fd, ready ? "idd_status:ok" : "idd_status:not_found");
                 idd_last = ready;
+            }
+        }
+        /* VNC server inside the guest? Sent on change, and once right after
+         * every (re)connect, so the host can show / hide its VNC button. */
+        {
+            int vnc = tcp_port_listening(VNC_TCP_PORT);
+            if (vnc != vnc_last) {
+                char msg[32];
+                snprintf(msg, sizeof(msg), vnc ? "vnc:%u" : "vnc:none", VNC_TCP_PORT);
+                send_line(fd, msg);
+                vnc_last = vnc;
             }
         }
     }
@@ -615,9 +631,22 @@ static void handle_set_ip(int fd, const char *tag, const char *args)
 #define SSH_RELAY_BUF   8192u
 #define SSH_VSOCK_PORT  7u
 #define SSH_TCP_PORT    22u
+/* The same bridge for a VNC server inside the guest (x11vnc, a docker
+ * container publishing 127.0.0.1:5900, ...): AF_VSOCK :8 <-> localhost:5900.
+ * Always listening; the heartbeat thread tells the host whether anything
+ * is actually bound to 5900 so it can show / hide its VNC button. */
+#define VNC_VSOCK_PORT  8u
 
-static pthread_t        g_ssh_proxy_pthread;
-static volatile int     g_ssh_proxy_running = 0;
+typedef struct {
+    const char     *name;
+    unsigned        vsock_port;
+    unsigned        tcp_port;
+    pthread_t       th;
+    volatile int    running;
+} tcp_forward_t;
+
+static tcp_forward_t g_ssh_fwd = { "ssh proxy", SSH_VSOCK_PORT, SSH_TCP_PORT, 0, 0 };
+static tcp_forward_t g_vnc_fwd = { "vnc proxy", VNC_VSOCK_PORT, VNC_TCP_PORT, 0, 0 };
 
 typedef struct {
     int vsock_fd;
@@ -677,31 +706,31 @@ static void *ssh_relay_proc(void *arg)
 
 static void *ssh_proxy_proc(void *arg)
 {
-    (void)arg;
+    tcp_forward_t *fw = (tcp_forward_t *)arg;
 
     int s = socket(AF_VSOCK, SOCK_STREAM, 0);
     if (s < 0) {
-        agent_log("ssh proxy: socket(AF_VSOCK) failed: %s", strerror(errno));
+        agent_log("%s: socket(AF_VSOCK) failed: %s", fw->name, strerror(errno));
         return NULL;
     }
     struct sockaddr_vm sa = {0};
     sa.svm_family = AF_VSOCK;
     sa.svm_cid    = VMADDR_CID_ANY;
-    sa.svm_port   = SSH_VSOCK_PORT;
+    sa.svm_port   = fw->vsock_port;
     if (bind(s, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        agent_log("ssh proxy: bind vsock :%u failed: %s",
-                  SSH_VSOCK_PORT, strerror(errno));
+        agent_log("%s: bind vsock :%u failed: %s", fw->name,
+                  fw->vsock_port, strerror(errno));
         close(s);
         return NULL;
     }
     if (listen(s, 4) < 0) {
-        agent_log("ssh proxy: listen failed: %s", strerror(errno));
+        agent_log("%s: listen failed: %s", fw->name, strerror(errno));
         close(s);
         return NULL;
     }
-    agent_log("ssh proxy: listening on AF_VSOCK :%u", SSH_VSOCK_PORT);
+    agent_log("%s: listening on AF_VSOCK :%u", fw->name, fw->vsock_port);
 
-    while (g_ssh_proxy_running) {
+    while (fw->running) {
         struct pollfd pfd = { .fd = s, .events = POLLIN };
         int r = poll(&pfd, 1, 1000);
         if (r < 0) {
@@ -713,7 +742,7 @@ static void *ssh_proxy_proc(void *arg)
         int c = accept(s, NULL, NULL);
         if (c < 0) {
             if (errno == EINTR) continue;
-            agent_log("ssh proxy: accept failed: %s", strerror(errno));
+            agent_log("%s: accept failed: %s", fw->name, strerror(errno));
             continue;
         }
 
@@ -725,10 +754,10 @@ static void *ssh_proxy_proc(void *arg)
         struct sockaddr_in ta = {0};
         ta.sin_family      = AF_INET;
         ta.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        ta.sin_port        = htons(SSH_TCP_PORT);
+        ta.sin_port        = htons(fw->tcp_port);
         if (connect(t, (struct sockaddr *)&ta, sizeof(ta)) < 0) {
-            agent_log("ssh proxy: connect 127.0.0.1:%u failed: %s",
-                      SSH_TCP_PORT, strerror(errno));
+            agent_log("%s: connect 127.0.0.1:%u failed: %s", fw->name,
+                      fw->tcp_port, strerror(errno));
             close(t); close(c);
             continue;
         }
@@ -743,7 +772,7 @@ static void *ssh_proxy_proc(void *arg)
         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
         pthread_t rt;
         if (pthread_create(&rt, &attr, ssh_relay_proc, ctx) != 0) {
-            agent_log("ssh proxy: relay pthread_create failed: %s",
+            agent_log("%s: relay pthread_create failed: %s", fw->name,
                       strerror(errno));
             close(t); close(c); free(ctx);
         }
@@ -751,18 +780,46 @@ static void *ssh_proxy_proc(void *arg)
     }
 
     close(s);
-    agent_log("ssh proxy: stopped");
+    agent_log("%s: stopped", fw->name);
     return NULL;
 }
 
-static void start_ssh_proxy(void)
+static void start_tcp_forward(tcp_forward_t *fw)
 {
-    if (g_ssh_proxy_running) return;
-    g_ssh_proxy_running = 1;
-    if (pthread_create(&g_ssh_proxy_pthread, NULL, ssh_proxy_proc, NULL) != 0) {
-        agent_log("ssh proxy: pthread_create failed: %s", strerror(errno));
-        g_ssh_proxy_running = 0;
+    if (fw->running) return;
+    fw->running = 1;
+    if (pthread_create(&fw->th, NULL, ssh_proxy_proc, fw) != 0) {
+        agent_log("%s: pthread_create failed: %s", fw->name, strerror(errno));
+        fw->running = 0;
     }
+}
+
+static void start_ssh_proxy(void) { start_tcp_forward(&g_ssh_fwd); }
+
+/* /proc/net/tcp{,6}: is anything LISTENing (st 0A) on this local port?
+ * Covers a plain x11vnc as well as docker-proxy publishing a container
+ * port on 127.0.0.1. */
+static int tcp_port_listening(unsigned port)
+{
+    static const char *files[] = { "/proc/net/tcp", "/proc/net/tcp6" };
+    char line[512];
+    size_t i;
+    for (i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        FILE *f = fopen(files[i], "r");
+        if (!f) continue;
+        if (!fgets(line, sizeof(line), f)) { fclose(f); continue; }   /* header */
+        while (fgets(line, sizeof(line), f)) {
+            unsigned lport = 0, st = 0;
+            char laddr[64];
+            if (sscanf(line, " %*d: %63[0-9A-Fa-f]:%x %*[0-9A-Fa-f]:%*x %x",
+                       laddr, &lport, &st) == 3 && st == 0x0A && lport == port) {
+                fclose(f);
+                return 1;
+            }
+        }
+        fclose(f);
+    }
+    return 0;
 }
 
 /* Find the primary interactive account (the one firstboot's useradd created):
@@ -1218,6 +1275,10 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
 
     ls = listen_vsock();
+
+    /* vsock:8 -> 127.0.0.1:5900 bridge for a VNC server in the guest. Cheap
+     * when nothing listens there (the per-connection TCP connect just fails). */
+    start_tcp_forward(&g_vnc_fwd);
     if (ls < 0) return 1;
 
     /* Start the clipboard monitor thread BEFORE accepting any control

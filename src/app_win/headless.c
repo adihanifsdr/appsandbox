@@ -32,6 +32,7 @@
 #include "webview2_bridge.h"   /* json_get_string/int/bool for request bodies */
 #include "prereq.h"            /* prereq_check_all -> VirtualMachinePlatform check */
 #include "vm_display_idd.h"    /* IDD display window, opened on demand via the API */
+#include "vm_ssh_proxy.h"      /* vm_vnc_proxy_start for POST /vms/{n}/vnc */
 
 #pragma comment(lib, "httpapi.lib")
 
@@ -248,7 +249,7 @@ static int append_vm_json(char *out, int cap, int pos, VmInstance *v)
     pos  = append_wstr(out, cap, pos, v->os_type);
     pos += sprintf_s(out + pos, cap - pos,
         ",\"state\":\"%s\",\"running\":%s,\"agentOnline\":%s,\"installComplete\":%s,"
-        "\"building\":%s,\"progress\":%d,\"sshState\":%d,\"sshPort\":%lu,"
+        "\"building\":%s,\"progress\":%d,\"sshState\":%d,\"sshPort\":%lu,\"vncPort\":%lu,"
         "\"ramMb\":%lu,\"hddGb\":%lu,\"cpuCores\":%lu,\"gpuMode\":%d,\"networkMode\":%d,"
         "\"displayOpen\":%s,\"buildStep\":",
         derive_state(v),
@@ -256,7 +257,7 @@ static int append_vm_json(char *out, int cap, int pos, VmInstance *v)
         v->install_complete ? "true" : "false", v->building_vhdx ? "true" : "false",
         v->vhdx_progress,
         (v->ssh_key_deployed && v->ssh_state == 2) ? 4 : v->ssh_state,   /* 4 = ready + key deployed */
-        (unsigned long)v->ssh_port,
+        (unsigned long)v->ssh_port, (unsigned long)v->vnc_guest_port,
         (unsigned long)v->ram_mb, (unsigned long)v->hdd_gb, (unsigned long)v->cpu_cores,
         v->gpu_mode, v->network_mode,
         display_is_open(v->unique_id) ? "true" : "false");
@@ -821,6 +822,39 @@ static int handle_request(PHTTP_REQUEST req)
                 "\"keyDeployed\":%s}",
                 (unsigned long)v->ssh_port, user, ssh_rep, v->ssh_enabled ? "true" : "false",
                 v->ssh_key_deployed ? "true" : "false");
+            send_json(req->RequestId, 200, "OK", buf);
+            return 0;
+        }
+
+        /* GET  /vms/{n}/vncInfo : {guestPort, port} — guestPort is the VNC
+           listener the guest agent reported (0 = none), port the host-side
+           tunnel (0 = not started).
+           POST /vms/{n}/vnc     : start the 127.0.0.1 tunnel to the guest's
+           VNC server and return the same fields; point any VNC viewer at
+           127.0.0.1:<port>. 409 while the guest reports no VNC server. */
+        if ((verb == HttpVerbGET && wcscmp(sub, L"vncInfo") == 0) ||
+            (verb == HttpVerbPOST && wcscmp(sub, L"vnc") == 0)) {
+            VmInstance *v = asb_vm_instance(vm);
+            if (!v) { send_err(req->RequestId, 404, "Not Found", "not_found", "no such VM"); return 0; }
+            if (verb == HttpVerbPOST) {
+                UINT64 id = v->unique_id;
+                int wait;
+                if (!v->running || !v->vnc_guest_port) {
+                    send_err(req->RequestId, 409, "Conflict", "no_vnc",
+                             "the guest agent has not reported a VNC server (guest port 5900)");
+                    return 0;
+                }
+                vm_vnc_proxy_start(v);
+                for (wait = 0; wait < 40; wait++) {
+                    v = asb_find_vm_by_id(id);
+                    if (!v || v->vnc_port) break;
+                    Sleep(50);
+                }
+                if (!v) { send_err(req->RequestId, 404, "Not Found", "not_found", "no such VM"); return 0; }
+            }
+            sprintf_s(buf, sizeof(buf),
+                "{\"host\":\"127.0.0.1\",\"port\":%lu,\"guestPort\":%lu}",
+                (unsigned long)v->vnc_port, (unsigned long)v->vnc_guest_port);
             send_json(req->RequestId, 200, "OK", buf);
             return 0;
         }

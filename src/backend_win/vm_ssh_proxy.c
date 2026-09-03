@@ -48,6 +48,8 @@ typedef struct SshProxy {
     UINT64         vm_id;          /* stable id: g_vms[] compacts on delete */
     wchar_t        vm_name[256];
     DWORD          port;           /* bound 127.0.0.1 port */
+    int            kind;           /* PROXY_SSH / PROXY_VNC */
+    unsigned       hv_port;        /* guest-side HV/vsock service port */
     SOCKET         listen_sock;
     HANDLE         thread;
     volatile BOOL  stop;
@@ -58,6 +60,9 @@ typedef struct SshProxy {
 /* We store a pointer in a simple static array keyed by VmInstance pointer.
    At most ASB_MAX_VMS (32) proxies can exist. */
 #define MAX_PROXIES 32
+#define PROXY_SSH 0   /* :0007 -> guest sshd, port persisted in ssh_port */
+#define PROXY_VNC 1   /* :0008 -> guest VNC server, port in vnc_port */
+static const wchar_t *proxy_kind_name(int kind) { return kind == PROXY_VNC ? L"VNC" : L"SSH"; }
 static SshProxy *g_proxies[MAX_PROXIES];
 static CRITICAL_SECTION g_proxy_cs;
 static volatile BOOL g_proxy_cs_init = FALSE;
@@ -70,18 +75,18 @@ static void ensure_cs_init(void)
     }
 }
 
-static SshProxy *find_proxy(VmInstance *vm)
+static SshProxy *find_proxy(VmInstance *vm, int kind)
 {
     int i;
     for (i = 0; i < MAX_PROXIES; i++)
-        if (g_proxies[i] && g_proxies[i]->vm_id == vm->unique_id)
+        if (g_proxies[i] && g_proxies[i]->vm_id == vm->unique_id && g_proxies[i]->kind == kind)
             return g_proxies[i];
     return NULL;
 }
 
 /* ---- HV socket connect (non-blocking with timeout) ---- */
 
-static SOCKET connect_to_hv_ssh(const GUID *vm_runtime_id, const wchar_t *os_type)
+static SOCKET connect_to_hv_ssh(const GUID *vm_runtime_id, const wchar_t *os_type, unsigned hv_port)
 {
     SOCKET s;
     SOCKADDR_HV addr;
@@ -103,7 +108,7 @@ static SOCKET connect_to_hv_ssh(const GUID *vm_runtime_id, const wchar_t *os_typ
     memset(&addr, 0, sizeof(addr));
     addr.Family    = AF_HYPERV;
     addr.VmId      = *vm_runtime_id;
-    hcs_service_guid(os_type, 7, &addr.ServiceId);
+    hcs_service_guid(os_type, hv_port, &addr.ServiceId);
 
     if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         if (WSAGetLastError() != WSAEWOULDBLOCK) {
@@ -195,7 +200,7 @@ static DWORD WINAPI ssh_listener_thread(LPVOID param)
        to end up on a zeroed slot (runtime_id = 0 -> every SSH connection
        was accepted and immediately dropped). */
     vm = asb_find_vm_by_id(proxy->vm_id);
-    prev_port = vm ? vm->ssh_port : 0;
+    prev_port = vm ? (proxy->kind == PROXY_VNC ? vm->vnc_port : vm->ssh_port) : 0;
 
     /* Bind ephemeral port on localhost */
     proxy->listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -232,7 +237,10 @@ bound:
     getsockname(proxy->listen_sock, (struct sockaddr *)&bind_addr, &addr_len);
     proxy->port = ntohs(bind_addr.sin_port);
     vm = asb_find_vm_by_id(proxy->vm_id);
-    if (vm) vm->ssh_port = proxy->port;
+    if (vm) {
+        if (proxy->kind == PROXY_VNC) vm->vnc_port = proxy->port;
+        else                          vm->ssh_port = proxy->port;
+    }
 
     if (listen(proxy->listen_sock, 4) != 0) {
         ui_log(L"SSH proxy: listen() failed for \"%s\".", proxy->vm_name);
@@ -241,11 +249,12 @@ bound:
         return 1;
     }
 
-    ui_log(L"SSH proxy listening on 127.0.0.1:%lu for \"%s\".",
-           proxy->port, proxy->vm_name);
+    ui_log(L"%s proxy listening on 127.0.0.1:%lu for \"%s\".",
+           proxy_kind_name(proxy->kind), proxy->port, proxy->vm_name);
 
-    /* Persist the assigned port */
-    asb_save();
+    /* Persist the assigned port (SSH only: the VNC tunnel is ephemeral) */
+    if (proxy->kind == PROXY_SSH)
+        asb_save();
 
     /* Accept loop */
     while (!proxy->stop) {
@@ -264,7 +273,7 @@ bound:
         /* Connect to guest SSH proxy via HV socket */
         SOCKET hv = INVALID_SOCKET;
         vm = asb_find_vm_by_id(proxy->vm_id);
-        if (vm) hv = connect_to_hv_ssh(&vm->runtime_id, vm->os_type);
+        if (vm) hv = connect_to_hv_ssh(&vm->runtime_id, vm->os_type, proxy->hv_port);
         if (hv == INVALID_SOCKET) {
             ui_log(L"SSH proxy: cannot connect to guest for \"%s\".", proxy->vm_name);
             closesocket(client);
@@ -335,19 +344,21 @@ bound:
 
 /* ---- Public API ---- */
 
-void vm_ssh_proxy_start(VmInstance *instance)
+static void proxy_start(VmInstance *instance, int kind, unsigned hv_port)
 {
     SshProxy *proxy;
     int i, slot;
 
-    if (!instance || !instance->ssh_enabled)
+    if (!instance)
+        return;
+    if (kind == PROXY_SSH && !instance->ssh_enabled)
         return;
 
     ensure_cs_init();
     EnterCriticalSection(&g_proxy_cs);
 
     /* Already running? */
-    if (find_proxy(instance)) {
+    if (find_proxy(instance, kind)) {
         LeaveCriticalSection(&g_proxy_cs);
         return;
     }
@@ -369,9 +380,11 @@ void vm_ssh_proxy_start(VmInstance *instance)
         return;
     }
 
-    proxy->vm_id = instance->unique_id;
+    proxy->vm_id   = instance->unique_id;
     wcscpy_s(proxy->vm_name, 256, instance->name);
-    proxy->port  = instance->ssh_port;
+    proxy->kind    = kind;
+    proxy->hv_port = hv_port;
+    proxy->port    = (kind == PROXY_VNC) ? instance->vnc_port : instance->ssh_port;
     proxy->listen_sock = INVALID_SOCKET;
     proxy->stop = FALSE;
     InitializeCriticalSection(&proxy->cs);
@@ -394,7 +407,7 @@ void vm_ssh_proxy_start(VmInstance *instance)
     LeaveCriticalSection(&g_proxy_cs);
 }
 
-void vm_ssh_proxy_stop(VmInstance *instance)
+static void proxy_stop(VmInstance *instance, int kind)
 {
     SshProxy *proxy;
     int i;
@@ -404,7 +417,7 @@ void vm_ssh_proxy_stop(VmInstance *instance)
     ensure_cs_init();
     EnterCriticalSection(&g_proxy_cs);
 
-    proxy = find_proxy(instance);
+    proxy = find_proxy(instance, kind);
     if (!proxy) {
         LeaveCriticalSection(&g_proxy_cs);
         return;
@@ -434,5 +447,11 @@ void vm_ssh_proxy_stop(VmInstance *instance)
     DeleteCriticalSection(&proxy->cs);
     free(proxy);
 
-    ui_log(L"SSH proxy stopped for \"%s\".", instance->name);
+    if (kind == PROXY_VNC) instance->vnc_port = 0;
+    ui_log(L"%s proxy stopped for \"%s\".", proxy_kind_name(kind), instance->name);
 }
+
+void vm_ssh_proxy_start(VmInstance *instance) { proxy_start(instance, PROXY_SSH, 7); }
+void vm_ssh_proxy_stop(VmInstance *instance)  { proxy_stop(instance, PROXY_SSH); }
+void vm_vnc_proxy_start(VmInstance *instance) { proxy_start(instance, PROXY_VNC, 8); }
+void vm_vnc_proxy_stop(VmInstance *instance)  { proxy_stop(instance, PROXY_VNC); }

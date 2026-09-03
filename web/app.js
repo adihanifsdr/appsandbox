@@ -746,6 +746,14 @@ function buildRowCells(vm, i, statusTd) {
         else sshBtn.title = 'SSH: waiting for the in-VM agent to come online';
     }
 
+    /* VNC: shown only while the guest agent reports a VNC server on guest
+       port 5900 (x11vnc, a docker container publishing 127.0.0.1:5900, ...). */
+    var vncActive = !!vm.vncPort && vm.running && !bld;
+    var vncCell = makeIconCell('vnc', '\uD83D\uDDA5\uFE0F', vncActive,
+        (function(idx) { return function() { sendCmd('vncConnect', {vmIndex: idx}); }; })(i),
+        vm.vncPort ? '' : 'hidden',
+        vm.vncPort ? 'Open a VNC viewer on the guest\'s VNC server (guest port ' + vm.vncPort + ', tunneled over HvSocket)' : '');
+
     var cells = [
         makeCell(vm.name, i, 0),
         makeCell(vm.osType, i, 1),
@@ -781,6 +789,7 @@ function buildRowCells(vm, i, statusTd) {
         }; })(i, snapVal, vm), '', 'Start the VM (boots from the selected snapshot/branch)'),
         makeIconCell('connect-idd', '\uD83D\uDCFA', vm.running && !bld, function() { sendCmd('connectIddVm', {vmIndex: i}); }, '', 'Open the VM display window (IDD virtual monitor)'),
         sshCell,
+        vncCell,
         makeIconCell('shutdown', '\u23FB', vm.running && !bld, function() { sendCmd('shutdownVm', {vmIndex: i}); }, '', 'Request a graceful shutdown from the guest OS'),
         makeIconCell('stop', '\u2715\uFE0F', vm.running && !bld, function() { onStopVm(i); }, '', 'Force power off the VM immediately (may lose unsaved guest data)'),
         makeIconCell('delete', '\uD83D\uDDD1\uFE0F', !bld, function() { onDeleteVm(i); }, vm.running ? 'running' : '', 'Delete this VM and its virtual disks'),

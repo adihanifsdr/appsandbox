@@ -9,6 +9,7 @@
 #include "asb_core.h"
 #include "resource.h"
 #include "hcs_vm.h"
+#include "vm_ssh_proxy.h"
 #include "hcn_network.h"
 #include "snapshot.h"
 #include "vm_display.h"
@@ -61,6 +62,7 @@ static VmDisplayIdd *g_idd_displays[ASB_MAX_VMS];
 #define WM_SHOW_ALERT          (WM_APP + 15)
 #define WM_VM_SHUTDOWN_TIMEOUT (WM_APP + 9)
 #define WM_PREREQ_DONE        (WM_APP + 17)
+#define WM_VM_VNC_CHANGED      (WM_APP + 19)
 
 /* Tray */
 #define TRAY_CMD_SHOW          1
@@ -221,6 +223,8 @@ static void build_vm_json(JsonBuilder *jb, int i)
     jb_int(jb, L"sshState", (v->ssh_key_deployed && v->ssh_state == 2) ? 4 : v->ssh_state);
     jb_bool(jb, L"sshDeployKey", v->ssh_deploy_key);
     jb_bool(jb, L"sshKeyDeployed", v->ssh_key_deployed);
+    jb_int(jb, L"vncPort", (int)v->vnc_guest_port);     /* guest listener, 0 = none */
+    jb_int(jb, L"vncTunnelPort", (int)v->vnc_port);     /* host tunnel, 0 = not started */
 
     /* Snapshot tree */
     {
@@ -869,6 +873,59 @@ static DWORD WINAPI enable_feature_thread(LPVOID param)
     return 0;
 }
 
+/* ---- VNC viewer launcher ----
+   Open the host's VNC viewer on the tunnel. host::port (explicit port) is
+   understood by TigerVNC, RealVNC, TightVNC and UltraVNC alike.
+   APPSANDBOX_VNC_VIEWER=<path to the viewer exe> overrides the search. */
+static void launch_vnc_viewer(DWORD port)
+{
+    static const wchar_t *cands[] = {
+        L"TigerVNC\\vncviewer.exe",
+        L"RealVNC\\VNC Viewer\\vncviewer.exe",
+        L"TightVNC\\tvnviewer.exe",
+        L"uvnc bvba\\UltraVNC\\vncviewer.exe",
+    };
+    static const wchar_t *roots[] = { L"ProgramFiles", L"ProgramFiles(x86)", L"ProgramW6432" };
+    wchar_t exe[MAX_PATH] = L"", root[MAX_PATH], cmd[MAX_PATH + 64];
+    size_t i, r;
+
+    if (!(GetEnvironmentVariableW(L"APPSANDBOX_VNC_VIEWER", exe, MAX_PATH) && exe[0])) {
+        exe[0] = L'\0';
+        for (i = 0; i < ARRAYSIZE(cands) && !exe[0]; i++) {
+            for (r = 0; r < ARRAYSIZE(roots); r++) {
+                if (!GetEnvironmentVariableW(roots[r], root, MAX_PATH)) continue;
+                _snwprintf_s(exe, MAX_PATH, _TRUNCATE, L"%s\\%s", root, cands[i]);
+                if (GetFileAttributesW(exe) != INVALID_FILE_ATTRIBUTES) break;
+                exe[0] = L'\0';
+            }
+        }
+    }
+    if (!exe[0]) {
+        wchar_t msg[512];
+        _snwprintf_s(msg, 512, _TRUNCATE,
+            L"VNC tunnel is up on 127.0.0.1:%lu but no VNC viewer was found. "
+            L"Install one (e.g. winget install TigerVNC.TigerVNC) or set APPSANDBOX_VNC_VIEWER "
+            L"to your viewer exe, then connect it to 127.0.0.1:%lu.", port, port);
+        ui_log(L"%s", msg);
+        ui_show_alert(msg);
+        return;
+    }
+    _snwprintf_s(cmd, ARRAYSIZE(cmd), _TRUNCATE, L"\"%s\" 127.0.0.1::%lu", exe, port);
+    ui_log(L"VNC: %s", cmd);
+    {
+        STARTUPINFOW si_;
+        PROCESS_INFORMATION pi_;
+        ZeroMemory(&si_, sizeof(si_)); si_.cb = sizeof(si_);
+        ZeroMemory(&pi_, sizeof(pi_));
+        if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si_, &pi_)) {
+            CloseHandle(pi_.hProcess);
+            CloseHandle(pi_.hThread);
+        } else {
+            ui_log(L"VNC: failed to launch the viewer (err %lu).", GetLastError());
+        }
+    }
+}
+
 /* ---- WebView2 message dispatch ---- */
 
 static void on_webview2_message(const wchar_t *json)
@@ -1021,6 +1078,28 @@ static void on_webview2_message(const wchar_t *json)
             } else {
                 ui_log(L"SSH: no tunnel for this VM yet (enabled=%d, port=%lu).",
                        inst ? inst->ssh_enabled : 0, inst ? inst->ssh_port : 0);
+            }
+        }
+    } else if (wcscmp(action, L"vncConnect") == 0) {
+        int idx;
+        if (json_get_int(json, L"vmIndex", &idx) && idx >= 0 && idx < asb_vm_count()) {
+            VmInstance *inst = asb_vm_instance(asb_vm_get(idx));
+            if (inst && inst->running && inst->vnc_guest_port) {
+                UINT64 id = inst->unique_id;
+                int wait;
+                vm_vnc_proxy_start(inst);   /* no-op if already up */
+                /* The listener binds on its own thread; give it a moment. */
+                for (wait = 0; wait < 40; wait++) {
+                    inst = asb_find_vm_by_id(id);
+                    if (!inst || inst->vnc_port) break;
+                    Sleep(50);
+                }
+                if (inst && inst->vnc_port)
+                    launch_vnc_viewer(inst->vnc_port);
+                else
+                    ui_log(L"VNC: the tunnel did not come up.");
+            } else {
+                ui_log(L"VNC: the guest agent has not reported a VNC server (port 5900) yet.");
             }
         }
     } else if (wcscmp(action, L"deleteVm") == 0) {
@@ -1440,6 +1519,12 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         asb_save();
         return 0;
     }
+
+    case WM_VM_VNC_CHANGED:
+        /* The guest agent saw a VNC server appear / disappear: refresh the
+           row so its VNC button shows or hides. */
+        send_vm_list();
+        return 0;
 
     case WM_VM_SHUTDOWN_TIMEOUT:
     {

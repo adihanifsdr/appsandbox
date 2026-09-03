@@ -190,7 +190,7 @@ methods return `(http_status, body)` so you can branch on the status code.
 | `snapshots_full(name)` | the above **plus** `current: {snapIndex, branchIndex}` |
 
 A **status object** has: `name, osType, state, running, agentOnline,
-installComplete, building, progress, sshState, sshPort, ramMb, hddGb, cpuCores,
+installComplete, building, progress, sshState, sshPort, vncPort, ramMb, hddGb, cpuCores,
 gpuMode, networkMode, displayOpen, buildStep` (`buildStep` names the current
 build phase while `building`, e.g. `"Downloading packages 42/182"`).
 
@@ -405,3 +405,13 @@ password). `test_windows_template.py` covers the Windows template build →
 create-from-template → delete cycle. Default guest credentials are
 `user` / `test123`. See [`tests/README.md`](tests/README.md) for the file-by-file
 layout.
+
+## VNC
+
+A Linux guest's agent watches for a VNC server on guest port 5900 (x11vnc, a
+docker container publishing `127.0.0.1:5900`, ...) and reports it; `status`
+shows it as `vncPort` (0 = none) and the GUI shows a VNC button on the row.
+`GET /vms/{name}/vncInfo` returns `{host, port, guestPort}`; `POST
+/vms/{name}/vnc` opens a `127.0.0.1` tunnel to it (HvSocket, like SSH) and
+returns the same fields with `port` filled in. Point any VNC viewer at
+`host:port`. `asb.py`: `vnc_info(name)` / `open_vnc(name)`.

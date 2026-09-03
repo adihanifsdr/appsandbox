@@ -134,6 +134,16 @@ class Client:
     def templates(self):         return self._req("GET", "/templates")[1].get("templates", [])
     def delete_template(self, name): return self._req("DELETE", "/templates/" + name)
     def ssh_info(self, name):    return self._req("GET", "/vms/%s/sshInfo" % name)[1]
+    def vnc_info(self, name):
+        """{'host', 'port', 'guestPort'}: guestPort is the VNC server the guest
+        agent sees on guest port 5900 (0 = none); port is the host-side tunnel
+        (0 until open_vnc())."""
+        return self._req("GET", "/vms/%s/vncInfo" % name)[1]
+    def open_vnc(self, name):
+        """Start the 127.0.0.1 tunnel to the guest's VNC server and return
+        (status, {'host','port','guestPort'}); connect any VNC viewer to
+        host:port. 409 no_vnc while the guest reports no VNC server."""
+        return self._req("POST", "/vms/%s/vnc" % name)
     def open_display(self, name):
         """Open the VM's display window on the daemon's local desktop (the GUI's
         Connect view). The VM must be running, and the daemon must be in an
