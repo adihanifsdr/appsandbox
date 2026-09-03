@@ -359,7 +359,8 @@ int do_prefetch_repo(const wchar_t *repo, const wchar_t *branch, const wchar_t *
         const wchar_t *files[] = {
             L"50-appsandbox-gpu",
             L"org.gnome.Shell-no-gpu.conf",
-            L"appsandbox-gpu"
+            L"appsandbox-gpu",
+            L"snap-no-gpu-env"
         };
         wchar_t s[MAX_PATH], d[MAX_PATH];
         for (int i = 0; i < (int)(sizeof(files) / sizeof(files[0])); i++) {

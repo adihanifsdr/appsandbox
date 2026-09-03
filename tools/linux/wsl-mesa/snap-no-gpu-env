@@ -1,0 +1,15 @@
+#!/bin/bash
+# /usr/bin/snap (dpkg-divert wrapper; the real binary is /usr/bin/snap.real)
+#
+# Installed by AppSandbox firstboot on desktop images that export the host-GPU
+# Mesa selection (see 50-appsandbox-gpu). Snaps carry their own Mesa inside
+# their mount namespace and cannot see /usr/lib/wsl/lib or the WSL D3D12
+# runtime, so a forced d3d12 driver leaves them with no GL at all - the App
+# Center (Flutter/GTK4) shows "No GL implementation is available", Chromium
+# snaps lose their GPU process. Strip the selection so snaps fall back to
+# their own llvmpipe; native (.deb) applications keep the GPU.
+#
+# argv[0] is preserved: /snap/bin/<app> symlinks point here and snap uses
+# its own name to find the app.
+unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE __GLX_VENDOR_LIBRARY_NAME VK_DRIVER_FILES
+exec -a "$0" /usr/bin/snap.real "$@"

@@ -2552,6 +2552,7 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
         /* Prefetch 1: repo source from GitHub. Writes agent-src/,
            asb_drm-src/, dxgkrnl-src/, systemd/, modprobe.d-asb_drm.conf,
            50-appsandbox-gpu, org.gnome.Shell-no-gpu.conf, appsandbox-gpu,
+           snap-no-gpu-env,
            wsl-mesa.tar.zst directly into <staging>/extras/. */
         /* Repo + branch must match the revision this binary was built from,
            so the Linux guest builds its agent/driver source (and gets the

@@ -73,3 +73,14 @@ binaries are tied to glibc and libstdc++ ABIs, not kernel versions
 Run `build/build-mesa.sh` on a VM with the target codename installed.
 Takes ~30 min on a 6-core machine. The script handles deps, source
 fetch, meson configure, ninja build, and install.
+
+## Snaps
+
+Snaps run their own Mesa inside a mount namespace that cannot see
+`/usr/lib/wsl/lib` or the WSL D3D12 runtime, so the d3d12 selection exported
+by `50-appsandbox-gpu` would leave them with no GL at all (the App Center
+shows "No GL implementation is available"; `GALLIUM_DRIVER=d3d12` alone even
+aborts them). Firstboot therefore diverts `/usr/bin/snap` to
+`snap-no-gpu-env`, a wrapper that unsets the Mesa variables before running
+the real binary: snaps fall back to their bundled llvmpipe, native (.deb)
+applications keep the host GPU.
