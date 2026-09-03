@@ -733,6 +733,123 @@ static void remove_dir_recursive(const wchar_t *dir)
     RemoveDirectoryW(dir);
 }
 
+/* ---- Utility: recursive directory copy ----
+ * Returns the number of files copied, or -1 on the first failure. */
+static int copy_dir_recursive(const wchar_t *src, const wchar_t *dst)
+{
+    wchar_t pattern[MAX_PATH], s[MAX_PATH], d[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    int n = 0;
+
+    if (!CreateDirectoryW(dst, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        return -1;
+    swprintf_s(pattern, MAX_PATH, L"%s\\*", src);
+    h = FindFirstFileW(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    do {
+        if (fd.cFileName[0] == L'.' && (fd.cFileName[1] == L'\0' ||
+            (fd.cFileName[1] == L'.' && fd.cFileName[2] == L'\0')))
+            continue;
+        swprintf_s(s, MAX_PATH, L"%s\\%s", src, fd.cFileName);
+        swprintf_s(d, MAX_PATH, L"%s\\%s", dst, fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            int r = copy_dir_recursive(s, d);
+            if (r < 0) { FindClose(h); return -1; }
+            n += r;
+        } else {
+            if (!CopyFileW(s, d, FALSE)) { FindClose(h); return -1; }
+            n++;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+/* ---- Prefetch cache ----
+ *
+ * %ProgramData%\AppSandbox\cache\prefetch\<key>\ keeps the output of one
+ * iso-patch --prefetch-* run. Every Linux create used to re-download the
+ * repo tarball (~80 MB), the apt build-deps closure (~180 .debs) and the
+ * wsl-deps NuGet package from scratch, one file at a time - that is the
+ * whole "Building Disk 0%" wait, and the same bytes every time. A hit
+ * copies the cached tree into the staging dir instead.
+ *
+ * Entries carry a .cache-ok marker written after a complete download and
+ * expire by age (repo source daily, the rest weekly/monthly) so a moved
+ * branch or a refreshed -updates pocket is picked up without any manual
+ * step. APPSANDBOX_NO_PREFETCH_CACHE=1 bypasses the cache; deleting the
+ * cache dir does too. */
+static BOOL prefetch_cache_path(const wchar_t *key, wchar_t *out, size_t cap)
+{
+    wchar_t base[MAX_PATH];
+    if (GetEnvironmentVariableW(L"APPSANDBOX_NO_PREFETCH_CACHE", NULL, 0) > 0)
+        return FALSE;
+    if (!GetEnvironmentVariableW(L"ProgramData", base, MAX_PATH))
+        wcscpy_s(base, MAX_PATH, L"C:\\ProgramData");
+    swprintf_s(out, cap, L"%s\\AppSandbox\\cache", base);
+    CreateDirectoryW(out, NULL);
+    swprintf_s(out, cap, L"%s\\AppSandbox\\cache\\prefetch", base);
+    CreateDirectoryW(out, NULL);
+    swprintf_s(out, cap, L"%s\\AppSandbox\\cache\\prefetch\\%s", base, key);
+    return TRUE;
+}
+
+/* Age of the entry's .cache-ok marker in hours, or -1 if there is none. */
+static double prefetch_cache_age_hours(const wchar_t *dir)
+{
+    wchar_t marker[MAX_PATH];
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    FILETIME now;
+    ULARGE_INTEGER a, b;
+
+    swprintf_s(marker, MAX_PATH, L"%s\\.cache-ok", dir);
+    if (!GetFileAttributesExW(marker, GetFileExInfoStandard, &fad)) return -1.0;
+    GetSystemTimeAsFileTime(&now);
+    a.LowPart = fad.ftLastWriteTime.dwLowDateTime; a.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+    b.LowPart = now.dwLowDateTime;                 b.HighPart = now.dwHighDateTime;
+    if (b.QuadPart <= a.QuadPart) return 0.0;
+    return (double)(b.QuadPart - a.QuadPart) / 36000000000.0;   /* 100 ns -> h */
+}
+
+/* Satisfy a prefetch from the cache: copies the entry into dst. */
+static BOOL prefetch_cache_restore(const wchar_t *key, int max_age_hours,
+                                   const wchar_t *dst, const wchar_t *what)
+{
+    wchar_t dir[MAX_PATH], marker[MAX_PATH];
+    double age;
+    int n;
+
+    if (!prefetch_cache_path(key, dir, MAX_PATH)) return FALSE;
+    age = prefetch_cache_age_hours(dir);
+    if (age < 0.0 || age > (double)max_age_hours) return FALSE;
+    n = copy_dir_recursive(dir, dst);
+    if (n < 0) {
+        asb_log(L"%s: cached copy of %s unusable - downloading again", what, key);
+        remove_dir_recursive(dir);
+        return FALSE;
+    }
+    /* The marker is cache bookkeeping, not something to stage into the guest. */
+    swprintf_s(marker, MAX_PATH, L"%s\\.cache-ok", dst);
+    DeleteFileW(marker);
+    asb_log(L"%s: reused cached download (%d file(s), %.1f h old)", what, n, age);
+    return TRUE;
+}
+
+/* After a complete prefetch: snapshot src into the cache entry. */
+static void prefetch_cache_store(const wchar_t *key, const wchar_t *src)
+{
+    wchar_t dir[MAX_PATH], marker[MAX_PATH];
+    HANDLE h;
+
+    if (!prefetch_cache_path(key, dir, MAX_PATH)) return;
+    remove_dir_recursive(dir);
+    if (copy_dir_recursive(src, dir) < 0) { remove_dir_recursive(dir); return; }
+    swprintf_s(marker, MAX_PATH, L"%s\\.cache-ok", dir);
+    h = CreateFileW(marker, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+}
+
 /* ---- HCS state callback (called from HCS worker thread) ---- */
 
 static void asb_hcs_state_changed(VmInstance *instance, DWORD event)
@@ -2044,7 +2161,28 @@ cleanup:
  *
  * args: extra argv tail (no quotes — caller is responsible for safe paths).
  * Returns 0 on success; -1 on any failure. Logs progress to asb_log. */
-static int spawn_iso_patch_prefetch(const wchar_t *args)
+/* Push a build-progress percentage for a VM that is still being created.
+   Same bookkeeping as the PROGRESS: handler in run_iso_patch_ubuntu. */
+static void report_build_progress(UINT64 vm_unique_id, int pct)
+{
+    VmInstance *pvm;
+    EnterCriticalSection(&g_cs);
+    pvm = asb_find_vm_by_id(vm_unique_id);
+    if (pvm) {
+        pvm->vhdx_progress = pct;
+        pvm->vhdx_staging = FALSE;
+    }
+    LeaveCriticalSection(&g_cs);
+    if (g_progress_cb && pvm)
+        g_progress_cb(vm_handle(pvm), pct, FALSE, g_progress_ud);
+}
+
+/* args: iso-patch argv tail. pct_from..pct_to: the slice of the build
+   progress bar this prefetch owns; it advances per downloaded .deb (the
+   apt closure is the only prefetch with many files), so the UI moves
+   during the minutes that used to sit at "Building Disk (0%)". */
+static int spawn_iso_patch_prefetch(const wchar_t *args, UINT64 vm_unique_id,
+                                    int pct_from, int pct_to)
 {
     wchar_t exe_dir[MAX_PATH];
     GetModuleFileNameW(g_dll_module, exe_dir, MAX_PATH);
@@ -2080,11 +2218,13 @@ static int spawn_iso_patch_prefetch(const wchar_t *args)
         if (capture) { CloseHandle(hRead); CloseHandle(hWrite); }
         return -1;
     }
+    if (vm_unique_id) report_build_progress(vm_unique_id, pct_from);
     if (capture) {
         CloseHandle(hWrite);
         char buf[4096];
         int pos = 0;
         DWORD n = 0;
+        int total = 0, got = 0;
         while (ReadFile(hRead, buf + pos, (DWORD)(sizeof(buf) - pos - 1), &n, NULL) && n > 0) {
             int end = pos + (int)n, start = 0;
             buf[end] = '\0';
@@ -2093,12 +2233,23 @@ static int spawn_iso_patch_prefetch(const wchar_t *args)
                 buf[i] = '\0';
                 if (i > start) {
                     const char *line = buf + start;
-                    if (strncmp(line, "ERROR:", 6) == 0)
+                    if (strncmp(line, "ERROR:", 6) == 0) {
                         asb_log(L"iso-patch: ERROR: %S", line + 6);
-                    else if (strncmp(line, "STATUS:", 7) == 0 &&
-                             strncmp(line + 7, "prefetch: GET ", 14) != 0 &&
-                             strncmp(line + 7, "xz_decompress", 13) != 0)
+                    } else if (strncmp(line, "STATUS:prefetch: GET ", 21) == 0) {
+                        /* one line per file; only the .debs are numerous */
+                        size_t len = strlen(line);
+                        if (len > 4 && strcmp(line + len - 4, ".deb") == 0 && total > 0) {
+                            got++;
+                            if (vm_unique_id)
+                                report_build_progress(vm_unique_id,
+                                    pct_from + (int)((pct_to - pct_from) * (long long)got / total));
+                        }
+                    } else if (strncmp(line, "STATUS:", 7) == 0 &&
+                               strncmp(line + 7, "xz_decompress", 13) != 0) {
+                        if (strncmp(line + 7, "prefetch: closure = ", 20) == 0)
+                            total = atoi(line + 27);
                         asb_log(L"iso-patch: %S", line + 7);
+                    }
                 }
                 start = i + 1;
             }
@@ -2207,6 +2358,11 @@ static HRESULT run_iso_patch_ubuntu(const wchar_t *iso_path,
                             EnterCriticalSection(&g_cs);
                             pvm = asb_find_vm_by_id(vm_unique_id);
                             if (pvm) {
+                                /* The prefetch phase already used 1..9%; keep
+                                   the bar monotonic through iso-patch's own
+                                   early 2/4/6% steps. */
+                                if (pct < 10 && pct < pvm->vhdx_progress)
+                                    pct = pvm->vhdx_progress;
                                 pvm->vhdx_progress = pct;
                                 pvm->vhdx_staging = is_staging;
                             }
@@ -2322,11 +2478,15 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
         asb_log(L"Prefetch 1/3: cloning repo source from GitHub...");
         /* Branch must match the branch this binary was built from, so the Linux
            guest builds its agent/driver source from the SAME revision. */
-        swprintf_s(args_buf, 2048,
-            L"--prefetch-repo --branch \"main\" --out-dir \"%s\"",
-            extras);
-        if (spawn_iso_patch_prefetch(args_buf) != 0)
-            asb_log(L"WARN: prefetch-repo failed (agent + DKMS build will fail)");
+        if (!prefetch_cache_restore(L"repo-main", 24, extras, L"Prefetch 1/3")) {
+            swprintf_s(args_buf, 2048,
+                L"--prefetch-repo --branch \"main\" --out-dir \"%s\"",
+                extras);
+            if (spawn_iso_patch_prefetch(args_buf, args->vm_unique_id, 1, 3) != 0)
+                asb_log(L"WARN: prefetch-repo failed (agent + DKMS build will fail)");
+            else
+                prefetch_cache_store(L"repo-main", extras);   /* extras holds only repo output here */
+        }
 
         /* Prefetch 2: apt build-deps closure from archive.ubuntu.com.
            Needs (codename, kernel) detected from the ISO. */
@@ -2335,14 +2495,19 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
         if (detect_iso_kernel(args->config.image_path,
                               codename, ARRAYSIZE(codename),
                               kver,     ARRAYSIZE(kver)) == 0) {
-            wchar_t apt_out[MAX_PATH];
+            wchar_t apt_out[MAX_PATH], cache_key[160];
             swprintf_s(apt_out, MAX_PATH, L"%s\\local-apt-extras", extras);
-            swprintf_s(args_buf, 2048,
-                L"--prefetch-build-deps --codename \"%s\" --kernel \"%s\" "
-                L"--out-dir \"%s\"",
-                codename, kver, apt_out);
-            if (spawn_iso_patch_prefetch(args_buf) != 0)
-                asb_log(L"WARN: prefetch-build-deps failed");
+            swprintf_s(cache_key, ARRAYSIZE(cache_key), L"build-deps-%s-%s", codename, kver);
+            if (!prefetch_cache_restore(cache_key, 7 * 24, apt_out, L"Prefetch 2/3")) {
+                swprintf_s(args_buf, 2048,
+                    L"--prefetch-build-deps --codename \"%s\" --kernel \"%s\" "
+                    L"--out-dir \"%s\"",
+                    codename, kver, apt_out);
+                if (spawn_iso_patch_prefetch(args_buf, args->vm_unique_id, 3, 8) != 0)
+                    asb_log(L"WARN: prefetch-build-deps failed");
+                else
+                    prefetch_cache_store(cache_key, apt_out);
+            }
         } else {
             asb_log(L"WARN: could not detect ISO kernel — skipping build-deps");
         }
@@ -2351,10 +2516,14 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
         asb_log(L"Prefetch 3/3: wsl-deps .so libs...");
         wchar_t wsl_out[MAX_PATH];
         swprintf_s(wsl_out, MAX_PATH, L"%s\\wsl-deps", extras);
-        swprintf_s(args_buf, 2048,
-            L"--prefetch-wsl-deps --out-dir \"%s\"", wsl_out);
-        if (spawn_iso_patch_prefetch(args_buf) != 0)
-            asb_log(L"WARN: prefetch-wsl-deps failed");
+        if (!prefetch_cache_restore(L"wsl-deps", 30 * 24, wsl_out, L"Prefetch 3/3")) {
+            swprintf_s(args_buf, 2048,
+                L"--prefetch-wsl-deps --out-dir \"%s\"", wsl_out);
+            if (spawn_iso_patch_prefetch(args_buf, args->vm_unique_id, 8, 9) != 0)
+                asb_log(L"WARN: prefetch-wsl-deps failed");
+            else
+                prefetch_cache_store(L"wsl-deps", wsl_out);
+        }
     }
 
     GetModuleFileNameW(g_dll_module, exe_dir, MAX_PATH);
