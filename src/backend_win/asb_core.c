@@ -2161,6 +2161,29 @@ cleanup:
  *
  * args: extra argv tail (no quotes — caller is responsible for safe paths).
  * Returns 0 on success; -1 on any failure. Logs progress to asb_log. */
+/* Where the Linux guest's own sources come from (agent, asb_drm, dxgkrnl,
+   systemd units, GPU helper scripts, wsl-mesa prebuilt). They are fetched
+   from GitHub at create time, so they must match the revision this binary
+   was built from - otherwise a fork or feature branch builds a host that
+   quietly runs upstream's guest bits. The build sets ASB_SOURCE_REPO /
+   ASB_SOURCE_BRANCH (msbuild -p:AsbSourceRepo=owner/name
+   -p:AsbSourceBranch=branch, see Directory.Build.props); the environment
+   variables of the same name override at runtime. */
+#ifndef ASB_SOURCE_REPO
+#define ASB_SOURCE_REPO   L"jamesstringer90/appsandbox"
+#endif
+#ifndef ASB_SOURCE_BRANCH
+#define ASB_SOURCE_BRANCH L"main"
+#endif
+static void choose_source_repo(wchar_t *repo, size_t repo_cap,
+                               wchar_t *branch, size_t branch_cap)
+{
+    if (GetEnvironmentVariableW(L"APPSANDBOX_SOURCE_REPO", repo, (DWORD)repo_cap) == 0)
+        wcscpy_s(repo, repo_cap, ASB_SOURCE_REPO);
+    if (GetEnvironmentVariableW(L"APPSANDBOX_SOURCE_BRANCH", branch, (DWORD)branch_cap) == 0)
+        wcscpy_s(branch, branch_cap, ASB_SOURCE_BRANCH);
+}
+
 /* Mirror for the apt build-deps prefetch. APPSANDBOX_APT_MIRROR wins;
    otherwise Ubuntu's per-country alias (<cc>.archive.ubuntu.com, which
    CNAMEs to a mirror in that country) derived from the Windows region -
@@ -2520,18 +2543,24 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
            asb_drm-src/, dxgkrnl-src/, systemd/, modprobe.d-asb_drm.conf,
            50-appsandbox-gpu, org.gnome.Shell-no-gpu.conf, appsandbox-gpu,
            wsl-mesa.tar.zst directly into <staging>/extras/. */
-        asb_log(L"Prefetch 1/3: cloning repo source from GitHub...");
-        /* Branch must match the branch this binary was built from, so the Linux
-           guest builds its agent/driver source from the SAME revision. */
-        if (!prefetch_cache_restore(L"repo-main", 24, extras, L"Prefetch 1/3")) {
+        /* Repo + branch must match the revision this binary was built from,
+           so the Linux guest builds its agent/driver source (and gets the
+           GPU helper scripts) from the SAME code. */
+        wchar_t src_repo[128], src_branch[128], repo_key[300];
+        choose_source_repo(src_repo, ARRAYSIZE(src_repo), src_branch, ARRAYSIZE(src_branch));
+        asb_log(L"Prefetch 1/3: cloning %s@%s from GitHub...", src_repo, src_branch);
+        swprintf_s(repo_key, ARRAYSIZE(repo_key), L"repo-%s-%s", src_repo, src_branch);
+        for (wchar_t *p = repo_key; *p; p++)
+            if (*p == L'/' || *p == L'\\' || *p == L':') *p = L'_';
+        if (!prefetch_cache_restore(repo_key, 24, extras, L"Prefetch 1/3")) {
             swprintf_s(args_buf, 2048,
-                L"--prefetch-repo --branch \"main\" --out-dir \"%s\"",
-                extras);
+                L"--prefetch-repo --repo \"%s\" --branch \"%s\" --out-dir \"%s\"",
+                src_repo, src_branch, extras);
             if (spawn_iso_patch_prefetch(args_buf, args->vm_unique_id, 1, 3,
                                          L"Downloading sources") != 0)
                 asb_log(L"WARN: prefetch-repo failed (agent + DKMS build will fail)");
             else
-                prefetch_cache_store(L"repo-main", extras);   /* extras holds only repo output here */
+                prefetch_cache_store(repo_key, extras);   /* extras holds only repo output here */
         }
 
         /* Prefetch 2: apt build-deps closure from archive.ubuntu.com.

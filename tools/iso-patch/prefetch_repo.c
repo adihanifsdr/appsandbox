@@ -2,10 +2,10 @@
  *
  * Pipeline:
  *   1. WinHTTP-download
- *      https://codeload.github.com/jamesstringer90/appsandbox/tar.gz/refs/heads/<branch>
+ *      https://codeload.github.com/<owner>/<name>/tar.gz/refs/heads/<branch>
  *      → <tmp>/repo.tar.gz
  *   2. Shell out to tar.exe (libarchive handles .tar.gz natively):
- *      `tar -xzf repo.tar.gz -C <tmp>` → <tmp>/appsandbox-<branch>/...
+ *      `tar -xzf repo.tar.gz -C <tmp>` → <tmp>/<name>-<branch>/...
  *   3. Copy each named subdir / file from the extracted tree to <out_dir>
  *      in the final layout. Renames where needed.
  *   4. Clean up <tmp>.
@@ -189,9 +189,13 @@ static int u_cp_tree(const wchar_t *src_dir, const wchar_t *dst_dir)
  * Main flow
  * ==================================================================== */
 
-int do_prefetch_repo(const wchar_t *branch, const wchar_t *out_dir)
+int do_prefetch_repo(const wchar_t *repo, const wchar_t *branch, const wchar_t *out_dir)
 {
-    log_msg(L"prefetch-repo: branch=%s out=%s", branch, out_dir);
+    /* "owner/name": the name half is also GitHub's prefix for the
+       extracted top-level directory. */
+    const wchar_t *repo_name = wcsrchr(repo, L'/');
+    repo_name = repo_name ? repo_name + 1 : repo;
+    log_msg(L"prefetch-repo: repo=%s branch=%s out=%s", repo, branch, out_dir);
 
     /* Temp dir for download + extract. Wiped on completion. */
     wchar_t tmp[MAX_PATH];
@@ -211,8 +215,7 @@ int do_prefetch_repo(const wchar_t *branch, const wchar_t *out_dir)
     swprintf_s(tgz, MAX_PATH, L"%s\\repo.tar.gz", tmp);
     {
         wchar_t path[1024];
-        swprintf_s(path, 1024,
-            L"/jamesstringer90/appsandbox/tar.gz/refs/heads/%s", branch);
+        swprintf_s(path, 1024, L"/%s/tar.gz/refs/heads/%s", repo, branch);
         log_msg(L"prefetch-repo: GET https://codeload.github.com%s", path);
         if (http_download_secure(L"codeload.github.com", 443, path, tgz) != 0) {
             log_err(L"prefetch-repo: download failed");
@@ -233,12 +236,12 @@ int do_prefetch_repo(const wchar_t *branch, const wchar_t *out_dir)
         }
     }
 
-    /* GitHub names the top-level dir "appsandbox-<branch>". Find it
+    /* GitHub names the top-level dir "<name>-<branch>". Find it
      * (just glob, in case '/' in branch name became '-'). */
     wchar_t extracted_root[MAX_PATH] = L"";
     {
         wchar_t spec[MAX_PATH];
-        swprintf_s(spec, MAX_PATH, L"%s\\appsandbox-*", tmp);
+        swprintf_s(spec, MAX_PATH, L"%s\\%s-*", tmp, repo_name);
         WIN32_FIND_DATAW fd;
         HANDLE h = FindFirstFileW(spec, &fd);
         if (h != INVALID_HANDLE_VALUE) {
