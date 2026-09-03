@@ -178,11 +178,19 @@ static int asb_connector_get_modes(struct drm_connector *connector)
 	 * explicitly switches resolution, but they're cheap to publish. */
 	{
 		static const struct { int w, h, hz; } fallbacks[] = {
+			{ 2560, 1600, 60 },
 			{ 2560, 1440, 60 },
 			{ 1920, 1200, 60 },
 			{ 1680, 1050, 60 },
+			{ 1600, 1200, 60 },
+			{ 1600,  900, 60 },
+			{ 1440,  900, 60 },
+			{ 1366,  768, 60 },
+			{ 1280, 1024, 60 },
+			{ 1280,  800, 60 },
 			{ 1280,  720, 60 },
 			{ 1024,  768, 60 },
+			{  800,  600, 60 },
 		};
 		size_t i;
 
