@@ -1,4 +1,5 @@
 #include "hcs_vm.h"
+#include "asb_core.h"   /* asb_find_vm_by_id */
 #include "vm_agent.h"
 #include "ui.h"
 #include "disk_util.h"   /* ASB_IS_ARM64 */
@@ -352,7 +353,10 @@ static void hcs_cb_log(const wchar_t *fmt, ...)
 static void CALLBACK hcs_notify_cb_v1(
     DWORD notificationType, void *context, HRESULT notificationStatus, PCWSTR notificationData)
 {
-    VmInstance *instance = (VmInstance *)context;
+    /* context is the VM's stable unique_id, not a VmInstance*: g_vms[] is
+       compacted when a VM is deleted, so a pointer captured at registration
+       time can end up on a zeroed / foreign slot. */
+    VmInstance *instance = asb_find_vm_by_id((UINT64)(ULONG_PTR)context);
 
     hcs_cb_log(L"HCS notify [V1]: %s (0x%08X) status=0x%08X for \"%s\"",
            hcs_notify_name_v1(notificationType), notificationType,
@@ -369,7 +373,10 @@ static void CALLBACK hcs_notify_cb_v1(
 /* V2 callback — HcsSetComputeSystemCallback (HCS_EVENT based) */
 static void CALLBACK hcs_notify_cb_v2(HCS_EVENT *event, void *context)
 {
-    VmInstance *instance = (VmInstance *)context;
+    /* context is the VM's stable unique_id, not a VmInstance*: g_vms[] is
+       compacted when a VM is deleted, so a pointer captured at registration
+       time can end up on a zeroed / foreign slot. */
+    VmInstance *instance = asb_find_vm_by_id((UINT64)(ULONG_PTR)context);
     DWORD type = event ? event->Type : 0;
 
     hcs_cb_log(L"HCS notify [V2]: %s (0x%08X) for \"%s\"",
@@ -399,7 +406,8 @@ void hcs_register_vm_callback(VmInstance *instance)
     /* Try V1 first */
     if (pfnRegisterCallback) {
         HCS_CALLBACK cb_handle = NULL;
-        hr = pfnRegisterCallback(instance->handle, hcs_notify_cb_v1, instance, &cb_handle);
+        hr = pfnRegisterCallback(instance->handle, hcs_notify_cb_v1,
+                                 (void *)(ULONG_PTR)instance->unique_id, &cb_handle);
         if (SUCCEEDED(hr)) {
             instance->hcs_callback = cb_handle;
             g_using_v1_callback = TRUE;
@@ -411,7 +419,8 @@ void hcs_register_vm_callback(VmInstance *instance)
 
     /* Fall back to V2 */
     if (pfnSetCallback) {
-        hr = pfnSetCallback(instance->handle, HcsEventOptionNone, instance, hcs_notify_cb_v2);
+        hr = pfnSetCallback(instance->handle, HcsEventOptionNone,
+                            (void *)(ULONG_PTR)instance->unique_id, hcs_notify_cb_v2);
         if (SUCCEEDED(hr)) {
             g_using_v1_callback = FALSE;
             ui_log(L"HCS callback registered [V2] for \"%s\".", instance->name);
@@ -449,8 +458,13 @@ void hcs_set_monitor_hwnd(HWND hwnd)
 
 static DWORD WINAPI vm_monitor_thread_proc(LPVOID param)
 {
-    VmInstance *inst = (VmInstance *)param;
+    /* param is the stable unique_id: g_vms[] compacts when a VM is deleted,
+       so the instance can move while we sleep. Resolve it by id after every
+       wait instead of trusting a pointer captured at thread start. */
+    UINT64 vm_id = (UINT64)(ULONG_PTR)param;
+    VmInstance *inst = asb_find_vm_by_id(vm_id);
 
+    if (!inst) return 0;
     hcs_cb_log(L"Monitor: started for \"%s\"", inst->name);
 
     while (!inst->monitor_stop) {
@@ -468,6 +482,8 @@ static DWORD WINAPI vm_monitor_thread_proc(LPVOID param)
         if (WaitForSingleObject(inst->monitor_stop_event, interval) == WAIT_OBJECT_0)
             break;
 
+        inst = asb_find_vm_by_id(vm_id);
+        if (!inst) return 0;   /* deleted while we slept */
         if (inst->monitor_stop) break;
         if (!inst->running) break;
         if (!inst->handle) break;
@@ -496,7 +512,7 @@ static DWORD WINAPI vm_monitor_thread_proc(LPVOID param)
                         hcs_cb_log(L"Monitor: forcing cleanup for \"%s\" "
                                    L"(callbacks dead + query failed)", inst->name);
                         PostMessageW(g_monitor_hwnd, WM_VM_MONITOR_DETECTED,
-                                     0, (LPARAM)inst);
+                                     0, (LPARAM)vm_id);
                         break;
                     }
                 } else if (result_doc) {
@@ -508,7 +524,7 @@ static DWORD WINAPI vm_monitor_thread_proc(LPVOID param)
                         LocalFree(result_doc);
                         if (g_monitor_hwnd)
                             PostMessageW(g_monitor_hwnd, WM_VM_MONITOR_DETECTED,
-                                         0, (LPARAM)inst);
+                                         0, (LPARAM)vm_id);
                         break;
                     }
                     LocalFree(result_doc);
@@ -533,7 +549,7 @@ static DWORD WINAPI vm_monitor_thread_proc(LPVOID param)
                 hcs_cb_log(L"Monitor: shutdown watchdog for \"%s\" "
                            L"(%llu seconds)", inst->name, elapsed);
                 PostMessageW(g_monitor_hwnd, WM_VM_SHUTDOWN_TIMEOUT,
-                             (WPARAM)elapsed, (LPARAM)inst);
+                             (WPARAM)elapsed, (LPARAM)vm_id);
             } else if (elapsed > 30) {
                 hcs_cb_log(L"Monitor: waiting for shutdown of \"%s\" "
                            L"(%llu seconds)...", inst->name, elapsed);
@@ -556,7 +572,8 @@ void hcs_start_monitor(VmInstance *instance)
 
     instance->monitor_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     instance->monitor_thread = CreateThread(NULL, 0, vm_monitor_thread_proc,
-                                            instance, 0, NULL);
+                                            (LPVOID)(ULONG_PTR)instance->unique_id,
+                                            0, NULL);
     if (!instance->monitor_thread) {
         ui_log(L"Warning: Failed to start monitor thread for \"%s\".", instance->name);
         if (instance->monitor_stop_event) {

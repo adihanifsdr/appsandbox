@@ -201,7 +201,7 @@ static SOCKET connect_to_agent(VmInstance *vm, int timeout_ms)
 static void notify_agent_status(VmInstance *vm)
 {
     if (g_agent_hwnd)
-        PostMessageW(g_agent_hwnd, WM_VM_AGENT_STATUS, 0, (LPARAM)vm);
+        PostMessageW(g_agent_hwnd, WM_VM_AGENT_STATUS, 0, (LPARAM)vm->unique_id);
 }
 
 /* Fire-and-forget: ask the guest agent to write the AppSandbox public key into
@@ -265,7 +265,7 @@ static int process_async_message(VmInstance *vm, SOCKET s, const char *buf)
            and PostMessageW(NULL, ...) would queue thread messages on this
            never-pumped agent thread. */
         if (g_agent_hwnd && strcmp(buf + 13, "disabled") == 0)
-            PostMessageW(g_agent_hwnd, WM_VM_HYPERV_VIDEO_OFF, 0, (LPARAM)vm);
+            PostMessageW(g_agent_hwnd, WM_VM_HYPERV_VIDEO_OFF, 0, (LPARAM)vm->unique_id);
     } else if (strncmp(buf, "displays:", 9) == 0) {
         ui_log(L"[%s] Displays: %S", vm->name, buf + 9);
     } else if (strncmp(buf, "log:", 4) == 0) {

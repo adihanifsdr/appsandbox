@@ -1015,7 +1015,12 @@ static void on_webview2_message(const wchar_t *json)
                                     CREATE_NEW_CONSOLE, NULL, NULL, &si_, &pi_)) {
                     CloseHandle(pi_.hProcess);
                     CloseHandle(pi_.hThread);
+                } else {
+                    ui_log(L"SSH: failed to launch the terminal (err %lu).", GetLastError());
                 }
+            } else {
+                ui_log(L"SSH: no tunnel for this VM yet (enabled=%d, port=%lu).",
+                       inst ? inst->ssh_enabled : 0, inst ? inst->ssh_port : 0);
             }
         }
     } else if (wcscmp(action, L"deleteVm") == 0) {
@@ -1323,7 +1328,7 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_VM_AGENT_STATUS:
     {
-        VmInstance *inst = (VmInstance *)lp;
+        VmInstance *inst = asb_find_vm_by_id((UINT64)lp); /* lp = stable id */
         if (inst && inst->agent_online) {
             int i, count = asb_vm_count();
             for (i = 0; i < count; i++) {
@@ -1364,7 +1369,7 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_VM_AGENT_SHUTDOWN:
     {
-        VmInstance *inst = (VmInstance *)lp;
+        VmInstance *inst = asb_find_vm_by_id((UINT64)lp); /* lp = stable id */
         if (inst) {
             inst->shutdown_requested = TRUE;
             inst->shutdown_time = GetTickCount64();
@@ -1375,7 +1380,7 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_VM_HYPERV_VIDEO_OFF:
     {
-        VmInstance *inst = (VmInstance *)lp;
+        VmInstance *inst = asb_find_vm_by_id((UINT64)lp); /* lp = stable id */
         if (inst && inst->running) {
             int i, count = asb_vm_count();
             inst->hyperv_video_off = TRUE;
@@ -1395,7 +1400,7 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_VM_DISPLAY_CLOSED:
     {
-        VmInstance *inst = (VmInstance *)lp;
+        VmInstance *inst = asb_find_vm_by_id((UINT64)lp); /* lp = stable id */
         if (inst) {
             int i, count = asb_vm_count();
             for (i = 0; i < count; i++) {
@@ -1413,7 +1418,7 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         /* Safety net: monitor thread detected VM stopped.
            The library's HCS callback should handle this, but the monitor
            provides a fallback. Mark the VM as stopped and refresh. */
-        VmInstance *inst = (VmInstance *)lp;
+        VmInstance *inst = asb_find_vm_by_id((UINT64)lp); /* lp = stable id */
         if (inst && inst->running) {
             int i, count = asb_vm_count();
             ui_log(L"Monitor detected VM \"%s\" stopped.", inst->name);
@@ -1438,7 +1443,7 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_VM_SHUTDOWN_TIMEOUT:
     {
-        VmInstance *inst = (VmInstance *)lp;
+        VmInstance *inst = asb_find_vm_by_id((UINT64)lp); /* lp = stable id */
         ULONGLONG elapsed = (ULONGLONG)wp;
         if (inst && inst->running && elapsed % 30 < 3)
             ui_log(L"WARNING: VM \"%s\" still shutting down (%llu seconds).", inst->name, elapsed);
@@ -1447,7 +1452,7 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_VM_AGENT_GPUCOPY:
     {
-        VmInstance *inst = (VmInstance *)lp;
+        VmInstance *inst = asb_find_vm_by_id((UINT64)lp); /* lp = stable id */
         if (inst) {
             int i, count = asb_vm_count();
             for (i = 0; i < count; i++) {

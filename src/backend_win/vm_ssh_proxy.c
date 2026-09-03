@@ -45,7 +45,9 @@ typedef struct SshRelay {
 } SshRelay;
 
 typedef struct SshProxy {
-    VmInstance    *vm;
+    UINT64         vm_id;          /* stable id: g_vms[] compacts on delete */
+    wchar_t        vm_name[256];
+    DWORD          port;           /* bound 127.0.0.1 port */
     SOCKET         listen_sock;
     HANDLE         thread;
     volatile BOOL  stop;
@@ -72,7 +74,7 @@ static SshProxy *find_proxy(VmInstance *vm)
 {
     int i;
     for (i = 0; i < MAX_PROXIES; i++)
-        if (g_proxies[i] && g_proxies[i]->vm == vm)
+        if (g_proxies[i] && g_proxies[i]->vm_id == vm->unique_id)
             return g_proxies[i];
     return NULL;
 }
@@ -185,11 +187,20 @@ static DWORD WINAPI ssh_listener_thread(LPVOID param)
     fd_set rfds;
     struct timeval tv;
     int i;
+    VmInstance *vm;
+    DWORD prev_port;
+
+    /* The VmInstance is looked up by id whenever we need it: g_vms[] is
+       compacted when another VM is deleted, and a pointer cached here used
+       to end up on a zeroed slot (runtime_id = 0 -> every SSH connection
+       was accepted and immediately dropped). */
+    vm = asb_find_vm_by_id(proxy->vm_id);
+    prev_port = vm ? vm->ssh_port : 0;
 
     /* Bind ephemeral port on localhost */
     proxy->listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (proxy->listen_sock == INVALID_SOCKET) {
-        ui_log(L"SSH proxy: socket() failed for \"%s\".", proxy->vm->name);
+        ui_log(L"SSH proxy: socket() failed for \"%s\".", proxy->vm_name);
         return 1;
     }
 
@@ -199,8 +210,8 @@ static DWORD WINAPI ssh_listener_thread(LPVOID param)
     bind_addr.sin_port = 0;  /* OS picks ephemeral port */
 
     /* If we have a previously persisted port, try that first */
-    if (proxy->vm->ssh_port != 0) {
-        bind_addr.sin_port = htons((u_short)proxy->vm->ssh_port);
+    if (prev_port != 0) {
+        bind_addr.sin_port = htons((u_short)prev_port);
         if (bind(proxy->listen_sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) == 0)
             goto bound;
         /* Port in use — fall back to ephemeral */
@@ -209,7 +220,7 @@ static DWORD WINAPI ssh_listener_thread(LPVOID param)
 
     if (bind(proxy->listen_sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
         ui_log(L"SSH proxy: bind() failed for \"%s\" (%d).",
-               proxy->vm->name, WSAGetLastError());
+               proxy->vm_name, WSAGetLastError());
         closesocket(proxy->listen_sock);
         proxy->listen_sock = INVALID_SOCKET;
         return 1;
@@ -219,17 +230,19 @@ bound:
     /* Read back the actual port */
     addr_len = sizeof(bind_addr);
     getsockname(proxy->listen_sock, (struct sockaddr *)&bind_addr, &addr_len);
-    proxy->vm->ssh_port = ntohs(bind_addr.sin_port);
+    proxy->port = ntohs(bind_addr.sin_port);
+    vm = asb_find_vm_by_id(proxy->vm_id);
+    if (vm) vm->ssh_port = proxy->port;
 
     if (listen(proxy->listen_sock, 4) != 0) {
-        ui_log(L"SSH proxy: listen() failed for \"%s\".", proxy->vm->name);
+        ui_log(L"SSH proxy: listen() failed for \"%s\".", proxy->vm_name);
         closesocket(proxy->listen_sock);
         proxy->listen_sock = INVALID_SOCKET;
         return 1;
     }
 
     ui_log(L"SSH proxy listening on 127.0.0.1:%lu for \"%s\".",
-           proxy->vm->ssh_port, proxy->vm->name);
+           proxy->port, proxy->vm_name);
 
     /* Persist the assigned port */
     asb_save();
@@ -249,9 +262,11 @@ bound:
             continue;
 
         /* Connect to guest SSH proxy via HV socket */
-        SOCKET hv = connect_to_hv_ssh(&proxy->vm->runtime_id, proxy->vm->os_type);
+        SOCKET hv = INVALID_SOCKET;
+        vm = asb_find_vm_by_id(proxy->vm_id);
+        if (vm) hv = connect_to_hv_ssh(&vm->runtime_id, vm->os_type);
         if (hv == INVALID_SOCKET) {
-            ui_log(L"SSH proxy: cannot connect to guest for \"%s\".", proxy->vm->name);
+            ui_log(L"SSH proxy: cannot connect to guest for \"%s\".", proxy->vm_name);
             closesocket(client);
             continue;
         }
@@ -283,7 +298,7 @@ bound:
             proxy->relays[i].thread   = CreateThread(NULL, 0, relay_thread,
                                                       &proxy->relays[i], 0, NULL);
         } else {
-            ui_log(L"SSH proxy: max connections reached for \"%s\".", proxy->vm->name);
+            ui_log(L"SSH proxy: max connections reached for \"%s\".", proxy->vm_name);
             closesocket(client);
             closesocket(hv);
         }
@@ -354,7 +369,9 @@ void vm_ssh_proxy_start(VmInstance *instance)
         return;
     }
 
-    proxy->vm = instance;
+    proxy->vm_id = instance->unique_id;
+    wcscpy_s(proxy->vm_name, 256, instance->name);
+    proxy->port  = instance->ssh_port;
     proxy->listen_sock = INVALID_SOCKET;
     proxy->stop = FALSE;
     InitializeCriticalSection(&proxy->cs);
