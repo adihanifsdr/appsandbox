@@ -7,8 +7,9 @@
 
 #include <windows.h>
 
-/* Download github.com/jamesstringer90/appsandbox @ <branch> and place
- * the tools/linux/ subtree directly into <out_dir> in the final layout
+/* Download github.com/<repo> @ <branch> (repo = "owner/name", e.g.
+ * "jamesstringer90/appsandbox"; a fork works the same) and place the
+ * tools/linux/ subtree directly into <out_dir> in the final layout
  * the manifest writer expects:
  *
  *   <out_dir>/
@@ -27,6 +28,6 @@
  *     wsl-mesa.tar.zst     (from tools/linux/wsl-mesa/prebuilt/...)
  *
  * Returns 0 on success; non-zero on any failure. */
-int do_prefetch_repo(const wchar_t *branch, const wchar_t *out_dir);
+int do_prefetch_repo(const wchar_t *repo, const wchar_t *branch, const wchar_t *out_dir);
 
 #endif

@@ -24,6 +24,28 @@
   </PropertyGroup>
 
   <!--
+    Where a Linux guest fetches its own sources from at create time (agent, DKMS modules,
+    systemd units, GPU helper scripts): github.com/$(AsbSourceRepo) @ $(AsbSourceBranch).
+    Leave both empty to use the defaults compiled into asb_core.c (jamesstringer90/appsandbox
+    @ main). A fork or feature-branch build must point at ITSELF, or the host it produces
+    quietly runs upstream's guest bits:
+
+      msbuild AppSandbox.sln -p:AsbSourceRepo=you/appsandbox -p:AsbSourceBranch=my-branch
+
+    APPSANDBOX_SOURCE_REPO / APPSANDBOX_SOURCE_BRANCH in the environment override at runtime.
+  -->
+  <ItemDefinitionGroup Condition="'$(AsbSourceRepo)' != ''">
+    <ClCompile>
+      <PreprocessorDefinitions>ASB_SOURCE_REPO=L"$(AsbSourceRepo)";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(AsbSourceBranch)' != ''">
+    <ClCompile>
+      <PreprocessorDefinitions>ASB_SOURCE_BRANCH=L"$(AsbSourceBranch)";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <!--
     The WDK's build-time INF verifier (DPVerifierTask) can't load x86\InfVerif.dll outside the
     Visual Studio build environment, so command-line / CI builds error on it (HRESULT 0x8007007E).
     Skip it there ONLY - VS GUI builds still run it, and the INF is re-verified by Microsoft on
