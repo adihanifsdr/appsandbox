@@ -720,11 +720,75 @@ static DWORD WINAPI decompress_worker(LPVOID arg)
     return 0;
 }
 
+/* ---- Extended attributes ----
+ * The ext4 writer has no xattr support, and Ubuntu privileges several
+ * binaries through file capabilities rather than setuid: snap-confine
+ * (so every snap - Firefox included - refuses to start), ping,
+ * gst-ptp-helper, ... Collect every attribute the squashfs carries as
+ * "path \t name \t hex" lines; the list is shipped as
+ * /opt/appsandbox/xattrs.list and the first-boot script puts them back
+ * with setxattr before anything else runs. Single-threaded: filled from
+ * the walker thread only. */
+typedef struct {
+    char   *buf;
+    size_t  len, cap;
+    size_t  n_attrs, n_files;
+} xattr_list_t;
+
+static xattr_list_t g_xattrs;
+
+static int xattr_list_append(xattr_list_t *x, const char *s, size_t n)
+{
+    if (x->len + n + 1 > x->cap) {
+        size_t nc = x->cap ? x->cap * 2 : 65536;
+        while (nc < x->len + n + 1) nc *= 2;
+        char *nb = (char *)realloc(x->buf, nc);
+        if (!nb) return -1;
+        x->buf = nb; x->cap = nc;
+    }
+    memcpy(x->buf + x->len, s, n);
+    x->len += n;
+    x->buf[x->len] = 0;
+    return 0;
+}
+
+typedef struct { const char *path; int n; } xattr_collect_ctx_t;
+
+static int xattr_collect_cb(const char *name, const void *value, size_t vlen, void *user)
+{
+    xattr_collect_ctx_t *c = (xattr_collect_ctx_t *)user;
+    static const char hexd[] = "0123456789abcdef";
+    char *line = (char *)malloc(strlen(c->path) + strlen(name) + vlen * 2 + 4);
+    if (!line) return -1;
+    size_t k = 0;
+    size_t pl = strlen(c->path), nl = strlen(name);
+    memcpy(line + k, c->path, pl); k += pl; line[k++] = '\t';
+    memcpy(line + k, name, nl);    k += nl; line[k++] = '\t';
+    for (size_t i = 0; i < vlen; i++) {
+        unsigned b = ((const unsigned char *)value)[i];
+        line[k++] = hexd[b >> 4];
+        line[k++] = hexd[b & 15];
+    }
+    line[k++] = '\n';
+    int rc = xattr_list_append(&g_xattrs, line, k);
+    free(line);
+    if (rc == 0) { g_xattrs.n_attrs++; c->n++; }
+    return rc;
+}
+
 static int producer_cb(const sqfs_entry_t *e, void *user)
 {
     pipeline_t *p = (pipeline_t *)user;
 
     if (e->path[0] == 0) return 0;
+
+    if (e->xattr_idx != SQFS_XATTR_NONE &&
+        (e->type == SQFS_EREG_TYPE || e->type == SQFS_EDIR_TYPE)) {
+        xattr_collect_ctx_t c = { e->path, 0 };
+        if (sqfs_read_xattrs(p->sq, e->xattr_idx, xattr_collect_cb, &c) != 0)
+            log_msg(L"WARN: xattrs of %hs unreadable", e->path);
+        else if (c.n) g_xattrs.n_files++;
+    }
 
     if (p->include_prefixes) {
         int keep = 0;
@@ -1131,6 +1195,32 @@ static void plant_firstboot_service(ext4_writer_t *ew)
         "    fi\n"
         "else\n"
         "    echo \"SKIP STEP 1: grub-install binary not found in rootfs\"\n"
+        "fi\n"
+        "\n"
+        "# --- STEP 1.5: restore extended attributes (file capabilities) ---\n"
+        "# iso-patch's ext4 writer carries no xattrs, and Ubuntu privileges\n"
+        "# several binaries through file capabilities rather than setuid:\n"
+        "# snap-confine (every snap, i.e. Firefox), ping, gst-ptp-helper, ...\n"
+        "# The host wrote the squashfs's attributes to /opt/appsandbox/xattrs.list\n"
+        "# (path, name, hex value); put them back before anything else runs.\n"
+        "echo \"==== STEP 1.5: restore extended attributes ====\"\n"
+        "if [ -f /opt/appsandbox/xattrs.list ]; then\n"
+        "    python3 - <<'PYEOF'\n"
+        "import os\n"
+        "ok = bad = 0\n"
+        "with open('/opt/appsandbox/xattrs.list', 'rb') as f:\n"
+        "    for line in f:\n"
+        "        try:\n"
+        "            path, name, hexv = line.rstrip(b'\\n').split(b'\\t')\n"
+        "            os.setxattr(path, name, bytes.fromhex(hexv.decode()), follow_symlinks=False)\n"
+        "            ok += 1\n"
+        "        except Exception as e:\n"
+        "            bad += 1\n"
+        "            if bad <= 5: print('WARN: %r: %s' % (path, e))\n"
+        "print('OK: xattrs restored: %d (failed: %d)' % (ok, bad))\n"
+        "PYEOF\n"
+        "else\n"
+        "    echo \"no /opt/appsandbox/xattrs.list (image had no xattrs?)\"\n"
         "fi\n"
         "\n"
         "# --- STEP 2: Hostname (from host marker = AppSandbox VM name) ---\n"
@@ -1697,6 +1787,9 @@ static void plant_firstboot_service(ext4_writer_t *ew)
         "_check_file /etc/ld.so.conf.d/appsandbox-wsl-deps.conf\n"
         "_check_file /etc/ld.so.conf.d/wsl-mesa.conf\n"
         "_check_file /etc/vulkan/icd.d/" IP_DZN_ICD_A "\n"
+        "echo \"-- file capabilities (xattrs restored in STEP 1.5) --\"\n"
+        "echo \"  snap-confine: $(getcap /usr/lib/snapd/snap-confine 2>/dev/null || echo '[MISSING] no caps')\"\n"
+        "echo \"  ping:         $(getcap /usr/bin/ping 2>/dev/null || echo '[MISSING] no caps')\"\n"
         "echo \"-- grub cmdline drop-in --\"\n"
         "_check_file /etc/default/grub.d/99-appsandbox-no-efifb.cfg\n"
         "_check_glob '/opt/appsandbox/local-apt/pool/main/*'\n"
@@ -2113,6 +2206,51 @@ static int stage_kernel_from_live_layer(wchar_t iso_drive, ext4_writer_t *ew,
 }
 
 /* ======================================================================
+ *  iso-patch --squashfs-xattrs <file>: list every extended attribute.
+ * ====================================================================== */
+typedef struct { const char *path; int shown; } xattr_dump_ctx_t;
+
+static int xattr_dump_cb(const char *name, const void *value, size_t vlen, void *user)
+{
+    xattr_dump_ctx_t *d = (xattr_dump_ctx_t *)user;
+    char hex[130];
+    size_t n = vlen < 64 ? vlen : 64;
+    for (size_t i = 0; i < n; i++)
+        snprintf(hex + i * 2, 3, "%02x", ((const unsigned char *)value)[i]);
+    hex[n * 2] = 0;
+    wprintf(L"%hs\t%hs\t%hs%s\n", d->path, name, hex, vlen > 64 ? L"..." : L"");
+    d->shown++;
+    return 0;
+}
+
+static int xattr_dump_walk_cb(const sqfs_entry_t *e, void *user)
+{
+    size_t *count = (size_t *)user;
+    if (e->xattr_idx == SQFS_XATTR_NONE) return 0;
+    xattr_dump_ctx_t d = { e->path, 0 };
+    /* the walker's ctx is not handed to callbacks; stash it in a global */
+    extern sqfs_ctx_t *g_xattr_dump_sq;
+    sqfs_read_xattrs(g_xattr_dump_sq, e->xattr_idx, xattr_dump_cb, &d);
+    if (d.shown) (*count)++;
+    return 0;
+}
+
+sqfs_ctx_t *g_xattr_dump_sq = NULL;
+
+int squashfs_xattrs_dump(const wchar_t *path)
+{
+    sqfs_ctx_t *sq = sqfs_open(path);
+    if (!sq) { log_err(L"sqfs_open failed"); return 1; }
+    g_xattr_dump_sq = sq;
+    size_t files = 0;
+    int rc = sqfs_walk(sq, xattr_dump_walk_cb, &files);
+    wprintf(L"# xattr ids in image: %zu, files with attributes: %zu, walk rc=%d\n",
+            sqfs_xattr_id_count(sq), files, rc);
+    sqfs_close(sq);
+    return rc ? 1 : 0;
+}
+
+/* ======================================================================
  *  Top-level orchestrator.
  * ====================================================================== */
 
@@ -2373,6 +2511,21 @@ int do_ubuntu_to_vhdx(const wchar_t *iso_path_arg,
     }
     log_msg(L"kernel: %hs%s", kernel_ver,
             kernel_from_iso ? L" (staged from the ISO live layer)" : L"");
+
+    /* ---- Step 5c: ship the collected extended attributes for first boot. ---- */
+    if (g_xattrs.len) {
+        ext4_mkdir_p(ew, "/opt/appsandbox");
+        if (ext4_writer_add_file(ew, "/opt/appsandbox/xattrs.list", 0600, 0, 0,
+                                 (uint32_t)time(NULL), g_xattrs.buf, g_xattrs.len) == 0)
+            log_msg(L"xattrs: %zu attribute(s) on %zu file(s) staged for first boot",
+                    g_xattrs.n_attrs, g_xattrs.n_files);
+        else
+            log_msg(L"WARN: could not stage /opt/appsandbox/xattrs.list");
+    } else {
+        log_msg(L"xattrs: none found in the image");
+    }
+    free(g_xattrs.buf);
+    memset(&g_xattrs, 0, sizeof(g_xattrs));
 
     /* ---- Step 6: Write /etc/fstab + mount points. ---- */
     {
