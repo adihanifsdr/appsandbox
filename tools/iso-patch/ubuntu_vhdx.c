@@ -2714,6 +2714,19 @@ int do_ubuntu_to_vhdx(const wchar_t *iso_path_arg,
             ext4_writer_add_file(ew, "/etc/cloud/cloud-init.disabled", 0644, 0, 0,
                                  (uint32_t)time(NULL), ci, sizeof(ci) - 1);
             log_msg(L"server flavor: cloud-init left installed but disabled (/etc/cloud/cloud-init.disabled)");
+            /* No display manager will ever take the VT on a server, and
+               Ubuntu's default "quiet splash" makes update-grub add
+               vt.handoff=7, which parks the console so fbcon never takes
+               over asb_drm's framebuffer: the IDD window would stay black.
+               Plain console, fbcon binding at registration. */
+            static const char con[] =
+                "# Written by AppSandbox iso-patch (server image): keep the kernel console\n"
+                "# on the virtual display - no splash / vt.handoff, fbcon binds at once.\n"
+                "GRUB_CMDLINE_LINUX_DEFAULT=\"\"\n"
+                "GRUB_CMDLINE_LINUX=\"$GRUB_CMDLINE_LINUX fbcon=nodefer\"\n";
+            ext4_mkdir_p(ew, "/etc/default/grub.d");
+            ext4_writer_add_file(ew, "/etc/default/grub.d/93-appsandbox-server-console.cfg",
+                                 0644, 0, 0, (uint32_t)time(NULL), con, sizeof(con) - 1);
         }
     }
 
