@@ -115,6 +115,7 @@ typedef struct {
     uint32_t       rdev;          /* major/minor encoded for device nodes */
     const char    *symlink_target;/* non-NULL for symlinks; not null-terminated */
     uint32_t       symlink_target_size;
+    uint32_t       xattr_idx;     /* index into the xattr id table, or SQFS_XATTR_NONE */
     /* For regular files, set by the walker, used by the callback to fetch
      * the bytes (deferred so the callback can stream / skip as needed). */
     uint64_t       _file_inode_off; /* internal: offset of file's inode in table */
@@ -122,6 +123,27 @@ typedef struct {
 
 /* Callback signature. Return 0 to continue, non-zero to abort traversal. */
 typedef int (*sqfs_walk_cb_t)(const sqfs_entry_t *entry, void *user);
+
+/* Extended attributes. Ubuntu privileges several binaries through file
+ * capabilities (security.capability) rather than setuid - snap-confine
+ * (every snap), ping, gst-ptp-helper, ... - so an ingest that drops xattrs
+ * yields a rootfs where snaps refuse to start. */
+#define SQFS_XATTR_NONE 0xFFFFFFFFu
+
+/* One callback per attribute: name is the full, NUL-terminated name
+ * ("security.capability"); value is not NUL-terminated. Return non-zero
+ * to stop. */
+typedef int (*sqfs_xattr_cb_t)(const char *name, const void *value,
+                               size_t value_len, void *user);
+
+/* Enumerate the attributes of the inode whose entry carried xattr_idx.
+ * Returns 0 on success (including "no attributes"), -1 on a malformed
+ * table. */
+int sqfs_read_xattrs(sqfs_ctx_t *ctx, uint32_t xattr_idx,
+                     sqfs_xattr_cb_t cb, void *user);
+
+/* Number of xattr id entries in the image (0 = image has none). */
+size_t sqfs_xattr_id_count(const sqfs_ctx_t *ctx);
 
 /* Walk the entire tree starting at root_inode_ref. Callback fires per
  * entry in pre-order (parent before children). Returns 0 on success. */

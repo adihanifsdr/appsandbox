@@ -24,6 +24,7 @@
 #include "prefetch_build_deps.h"
 #include "prefetch_wsl_deps.h"
 #include "prefetch_repo.h"
+int squashfs_xattrs_dump(const wchar_t *path);   /* ubuntu_vhdx.c */
 #include "target_arch.h"
 
 #pragma comment(lib, "virtdisk.lib")
@@ -2892,6 +2893,11 @@ int wmain(int argc, wchar_t *argv[])
             return 1;
         }
         return do_qcow2_to_vhdx(qcow2, output);
+    }
+
+    if (_wcsicmp(argv[1], L"--squashfs-xattrs") == 0 && argc >= 3) {
+        /* Debug aid: list every extended attribute in a squashfs. */
+        return squashfs_xattrs_dump(argv[2]);
     }
 
     if (_wcsicmp(argv[1], L"--prefetch-repo") == 0) {

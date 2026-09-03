@@ -45,7 +45,16 @@ struct sqfs_ctx {
     size_t              id_count;
     uint64_t           *fragment_index; /* fragment_entry[] flattened */
     size_t              fragment_count;
+    /* xattrs: the id table (16-byte entries) + the entry stream it points into */
+    uint8_t            *xattr_ids;
+    size_t              xattr_id_count;
+    sqfs_stream_t       xattr_stream;
 };
+
+static void stream_free(sqfs_stream_t *s);
+static int  stream_load_range(sqfs_ctx_t *ctx, sqfs_stream_t *s,
+                              uint64_t start, uint64_t end);
+static int  load_xattr_table(sqfs_ctx_t *ctx);
 
 const char *sqfs_compressor_name(uint16_t id)
 {
@@ -181,6 +190,13 @@ sqfs_ctx_t *sqfs_open(const wchar_t *path)
                           ctx->sb.fragment_table_start) != 0) {
         LOG_E("  dir table load failed"); sqfs_close(ctx); return NULL;
     }
+    if (load_xattr_table(ctx) != 0) {
+        /* Not fatal for the ingest itself, but the result would silently
+           lack file capabilities; say so loudly. */
+        LOG_E("  xattr table load failed - extended attributes will be missing");
+        free(ctx->xattr_ids); ctx->xattr_ids = NULL; ctx->xattr_id_count = 0;
+        stream_free(&ctx->xattr_stream);
+    }
 
     return ctx;
 }
@@ -198,8 +214,10 @@ void sqfs_close(sqfs_ctx_t *ctx)
     if (ctx->file != INVALID_HANDLE_VALUE) CloseHandle(ctx->file);
     stream_free(&ctx->inode_stream);
     stream_free(&ctx->dir_stream);
+    stream_free(&ctx->xattr_stream);
     free(ctx->id_table);
     free(ctx->fragment_index);
+    free(ctx->xattr_ids);
     free(ctx);
 }
 
@@ -336,6 +354,132 @@ static uint32_t id_lookup(const sqfs_ctx_t *ctx, uint16_t idx)
 {
     if (idx >= ctx->id_count) return 0;
     return ctx->id_table[idx];
+}
+
+/* ---- Extended attributes ----
+ *
+ * On-disk layout (squashfs 4):
+ *   sb.xattr_id_table_start -> { u64 xattr_table_start; u32 xattr_ids; u32 unused; }
+ *                              followed by u64 pointers to the metadata blocks
+ *                              holding the id entries (512 x 16 bytes each)
+ *   id entry: { u64 xattr; u32 count; u32 size; }   xattr = block<<16 | offset
+ *             into the xattr entry stream, which starts at xattr_table_start
+ *   entry:    { u16 type; u16 size; u8 name[size]; } then { u32 vsize; u8 value[vsize]; }
+ *             type & 0xff = name prefix (0 user. / 1 trusted. / 2 security.),
+ *             type & 0x100 = value is out of line: the "value" is a u64 ref
+ *             to another { u32 vsize; u8 value[]; } in the same stream. */
+#pragma pack(push, 1)
+typedef struct { uint64_t xattr_table_start; uint32_t xattr_ids; uint32_t unused; } sqfs_xattr_id_table_t;
+typedef struct { uint64_t xattr; uint32_t count; uint32_t size; } sqfs_xattr_id_t;
+#pragma pack(pop)
+
+static int load_xattr_table(sqfs_ctx_t *ctx)
+{
+    ctx->xattr_ids = NULL;
+    ctx->xattr_id_count = 0;
+    if (ctx->sb.xattr_id_table_start == 0xFFFFFFFFFFFFFFFFull) {
+        LOG_I("  xattrs: none in image");
+        return 0;
+    }
+    sqfs_xattr_id_table_t hdr;
+    if (sqfs_read_raw(ctx, ctx->sb.xattr_id_table_start, &hdr, sizeof(hdr)) != 0) return -1;
+    size_t n = hdr.xattr_ids;
+    if (n == 0) { LOG_I("  xattrs: 0 ids"); return 0; }
+    size_t bytes = n * sizeof(sqfs_xattr_id_t);
+    size_t n_blocks = (bytes + SQFS_METADATA_SIZE - 1) / SQFS_METADATA_SIZE;
+
+    uint64_t *block_offs = (uint64_t *)malloc(n_blocks * sizeof(uint64_t));
+    if (!block_offs) return -1;
+    if (sqfs_read_raw(ctx, ctx->sb.xattr_id_table_start + sizeof(hdr),
+                      block_offs, n_blocks * sizeof(uint64_t)) != 0) {
+        free(block_offs); return -1;
+    }
+    ctx->xattr_ids = (uint8_t *)malloc(n_blocks * SQFS_METADATA_SIZE);
+    if (!ctx->xattr_ids) { free(block_offs); return -1; }
+    size_t pos = 0;
+    uint64_t first_id_block = (uint64_t)-1;
+    for (size_t i = 0; i < n_blocks; i++) {
+        uint64_t off = block_offs[i];
+        if (off < first_id_block) first_id_block = off;
+        uint8_t tmp[SQFS_METADATA_SIZE];
+        size_t len = 0;
+        if (sqfs_read_metadata_block(ctx, &off, tmp, &len) != 0) { free(block_offs); return -1; }
+        memcpy(ctx->xattr_ids + pos, tmp, len);
+        pos += len;
+    }
+    free(block_offs);
+    if (pos < bytes) { LOG_E("  xattr id table short (%zu < %zu)", pos, bytes); return -1; }
+    ctx->xattr_id_count = n;
+
+    /* The entry stream occupies [xattr_table_start, first id-table block). */
+    uint64_t end = first_id_block;
+    if (end <= hdr.xattr_table_start) end = ctx->sb.xattr_id_table_start;
+    LOG_I("  xattr table: %zu id(s), entry stream 0x%llx..0x%llx",
+          n, (unsigned long long)hdr.xattr_table_start, (unsigned long long)end);
+    if (stream_load_range(ctx, &ctx->xattr_stream, hdr.xattr_table_start, end) != 0)
+        return -1;
+    return 0;
+}
+
+size_t sqfs_xattr_id_count(const sqfs_ctx_t *ctx)
+{
+    return ctx ? ctx->xattr_id_count : 0;
+}
+
+static const char *const xattr_prefix[] = { "user.", "trusted.", "security." };
+
+int sqfs_read_xattrs(sqfs_ctx_t *ctx, uint32_t xattr_idx,
+                     sqfs_xattr_cb_t cb, void *user)
+{
+    if (!ctx || xattr_idx == SQFS_XATTR_NONE) return 0;
+    if (xattr_idx >= ctx->xattr_id_count) return -1;
+    sqfs_xattr_id_t id;
+    memcpy(&id, ctx->xattr_ids + (size_t)xattr_idx * sizeof(id), sizeof(id));
+    const sqfs_stream_t *st = &ctx->xattr_stream;
+    int64_t p = stream_resolve(st, id.xattr >> 16, (uint16_t)(id.xattr & 0xffff));
+    if (p < 0) return -1;
+    size_t pos = (size_t)p;
+
+    for (uint32_t i = 0; i < id.count; i++) {
+        uint16_t type, nsize;
+        if (pos + 4 > st->len) return -1;
+        memcpy(&type,  st->buf + pos,     2);
+        memcpy(&nsize, st->buf + pos + 2, 2);
+        pos += 4;
+        if (pos + nsize > st->len) return -1;
+        const uint8_t *name = st->buf + pos;
+        pos += nsize;
+
+        uint32_t vsize;
+        if (pos + 4 > st->len) return -1;
+        memcpy(&vsize, st->buf + pos, 4);
+        pos += 4;
+        const uint8_t *value;
+        if (type & 0x0100) {                     /* out-of-line value */
+            uint64_t ref;
+            if (vsize != 8 || pos + 8 > st->len) return -1;
+            memcpy(&ref, st->buf + pos, 8);
+            pos += 8;
+            int64_t p2 = stream_resolve(st, ref >> 16, (uint16_t)(ref & 0xffff));
+            if (p2 < 0 || (size_t)p2 + 4 > st->len) return -1;
+            memcpy(&vsize, st->buf + p2, 4);
+            if ((size_t)p2 + 4 + vsize > st->len) return -1;
+            value = st->buf + p2 + 4;
+        } else {
+            if (pos + vsize > st->len) return -1;
+            value = st->buf + pos;
+            pos += vsize;
+        }
+
+        unsigned pfx = type & 0xff;
+        char full[300];
+        if (pfx > 2 || nsize > 255) continue;   /* unknown prefix: skip */
+        int n = snprintf(full, sizeof(full), "%s%.*s", xattr_prefix[pfx], (int)nsize, (const char *)name);
+        if (n <= 0) continue;
+        int rc = cb(full, value, vsize, user);
+        if (rc) return rc;
+    }
+    return 0;
 }
 
 /* Fragment table: parallel structure to id_table. Each fragment entry
@@ -687,6 +831,7 @@ static int walk_inode(walk_state_t *w, uint64_t inode_ref)
     e.uid   = id_lookup(ctx, hdr.uid_idx);
     e.gid   = id_lookup(ctx, hdr.gid_idx);
     e.mtime = hdr.mtime;
+    e.xattr_idx = SQFS_XATTR_NONE;
     e._file_inode_off = (size_t)(p - ctx->inode_stream.buf);
 
     switch (hdr.type) {
@@ -708,6 +853,7 @@ static int walk_inode(walk_state_t *w, uint64_t inode_ref)
         sqfs_ext_dir_t d;
         memcpy(&d, body, sizeof(d));
         e.size = 0;
+        e.xattr_idx = d.xattr_idx;
         if (w->cb_rc == 0) w->cb_rc = w->cb(&e, w->user);
         if (w->cb_rc) return w->cb_rc;
         w->n_dirs++;
@@ -730,6 +876,7 @@ static int walk_inode(walk_state_t *w, uint64_t inode_ref)
         sqfs_ext_file_t f;
         memcpy(&f, body, sizeof(f));
         e.size = f.file_size;
+        e.xattr_idx = f.xattr_idx;
         if (w->cb_rc == 0) w->cb_rc = w->cb(&e, w->user);
         w->n_files++;
         return w->cb_rc;
