@@ -17,6 +17,12 @@ ConditionPathExists=/sys/bus/platform/drivers/simple-framebuffer
 # second monitor next to asb_drm.
 Type=oneshot
 ExecStart=/bin/sh -c 'for d in /sys/bus/platform/drivers/simple-framebuffer/simple-framebuffer.*; do [ -e "$d" ] && basename "$d" > /sys/bus/platform/drivers/simple-framebuffer/unbind; done; true'
+# Unbinding simpledrm drops fbcon back to the dummy console, and fbcon does
+# not move to the remaining framebuffer (asb_drm's) on its own - a server
+# image, which has no compositor to take the VT, would then show nothing in
+# the IDD window. Re-bind the framebuffer console driver; on a desktop GNOME
+# simply takes over from it as on real hardware.
+ExecStartPost=/bin/sh -c 'for v in /sys/class/vtconsole/vtcon*; do case "$(cat $v/name)" in *"frame buffer"*) echo 1 > $v/bind;; esac; done; true'
 RemainAfterExit=yes
 
 [Install]
