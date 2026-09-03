@@ -155,6 +155,22 @@ void asb_build_edid(struct asb_device *asb)
  * Connector helper callbacks
  * -------------------------------------------------------------------------- */
 
+/* Refuse anything larger than the configured size, including custom
+ * modelines userspace may try: the scanout buffer and the host-side
+ * capture are sized for asb->width x asb->height. */
+static enum drm_mode_status
+asb_connector_mode_valid(struct drm_connector *connector,
+			 const struct drm_display_mode *mode)
+{
+	struct asb_device *asb = to_asb(connector->dev);
+
+	if (mode->hdisplay > (int)asb->width)
+		return MODE_BAD_HVALUE;
+	if (mode->vdisplay > (int)asb->height)
+		return MODE_BAD_VVALUE;
+	return MODE_OK;
+}
+
 static int asb_connector_get_modes(struct drm_connector *connector)
 {
 	struct asb_device *asb = to_asb(connector->dev);
@@ -175,12 +191,18 @@ static int asb_connector_get_modes(struct drm_connector *connector)
 	}
 
 	/* Common fallbacks. Mutter typically ignores these unless the user
-	 * explicitly switches resolution, but they're cheap to publish. */
+	 * explicitly switches resolution, but they're cheap to publish.
+	 *
+	 * Only modes that fit inside the configured (preferred) size: the
+	 * capture path on both ends is sized for it - the host's IDD window
+	 * accepts frames up to that size, and a larger framebuffer crashed
+	 * the guest kernel the moment the display daemon mapped it. */
 	{
 		static const struct { int w, h, hz; } fallbacks[] = {
 			{ 2560, 1600, 60 },
 			{ 2560, 1440, 60 },
 			{ 1920, 1200, 60 },
+			{ 1920, 1080, 60 },
 			{ 1680, 1050, 60 },
 			{ 1600, 1200, 60 },
 			{ 1600,  900, 60 },
@@ -195,6 +217,9 @@ static int asb_connector_get_modes(struct drm_connector *connector)
 		size_t i;
 
 		for (i = 0; i < ARRAY_SIZE(fallbacks); i++) {
+			if (fallbacks[i].w > (int)asb->width ||
+			    fallbacks[i].h > (int)asb->height)
+				continue;
 			if (fallbacks[i].w == (int)asb->width &&
 			    fallbacks[i].h == (int)asb->height)
 				continue;
@@ -215,6 +240,7 @@ static int asb_connector_get_modes(struct drm_connector *connector)
 
 static const struct drm_connector_helper_funcs asb_connector_helper_funcs = {
 	.get_modes = asb_connector_get_modes,
+	.mode_valid = asb_connector_mode_valid,
 };
 
 static const struct drm_connector_funcs asb_connector_funcs = {
