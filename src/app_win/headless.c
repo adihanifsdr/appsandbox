@@ -250,7 +250,7 @@ static int append_vm_json(char *out, int cap, int pos, VmInstance *v)
         ",\"state\":\"%s\",\"running\":%s,\"agentOnline\":%s,\"installComplete\":%s,"
         "\"building\":%s,\"progress\":%d,\"sshState\":%d,\"sshPort\":%lu,"
         "\"ramMb\":%lu,\"hddGb\":%lu,\"cpuCores\":%lu,\"gpuMode\":%d,\"networkMode\":%d,"
-        "\"displayOpen\":%s}",
+        "\"displayOpen\":%s,\"buildStep\":",
         derive_state(v),
         v->running ? "true" : "false", v->agent_online ? "true" : "false",
         v->install_complete ? "true" : "false", v->building_vhdx ? "true" : "false",
@@ -260,6 +260,11 @@ static int append_vm_json(char *out, int cap, int pos, VmInstance *v)
         (unsigned long)v->ram_mb, (unsigned long)v->hdd_gb, (unsigned long)v->cpu_cores,
         v->gpu_mode, v->network_mode,
         display_is_open(v->unique_id) ? "true" : "false");
+    /* Current build phase while `building` ("Downloading packages 42/182",
+       "Building rootfs", ...); empty otherwise. Same source as the GUI's
+       status cell (vhdxStep). */
+    pos  = append_wstr(out, cap, pos, v->vhdx_step);
+    pos += sprintf_s(out + pos, cap - pos, "}");
     return pos;
 }
 

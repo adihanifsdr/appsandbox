@@ -191,7 +191,8 @@ methods return `(http_status, body)` so you can branch on the status code.
 
 A **status object** has: `name, osType, state, running, agentOnline,
 installComplete, building, progress, sshState, sshPort, ramMb, hddGb, cpuCores,
-gpuMode, networkMode, displayOpen`.
+gpuMode, networkMode, displayOpen, buildStep` (`buildStep` names the current
+build phase while `building`, e.g. `"Downloading packages 42/182"`).
 
 ### Lifecycle  *(return `(status, body)`)*
 | Method | Effect |
