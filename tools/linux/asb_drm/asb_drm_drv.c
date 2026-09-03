@@ -244,7 +244,13 @@ static struct platform_driver asb_platform_driver = {
 		.name = "asb_drm",
 	},
 	.probe  = asb_probe,
+	/* .remove returns void since 6.11; older kernels expose the void
+	 * variant as .remove_new (6.1+). */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 	.remove = asb_remove,
+#else
+	.remove_new = asb_remove,
+#endif
 };
 
 /* --------------------------------------------------------------------------

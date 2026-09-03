@@ -12,6 +12,8 @@
  * and disarms when the last reference drops.
  */
 
+#include <linux/version.h>
+
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc.h>
@@ -99,7 +101,27 @@ static void asb_crtc_atomic_flush(struct drm_crtc *crtc,
 	spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
 }
 
+/* Refuse any mode larger than the configured size - including custom
+ * modelines userspace may try: the scanout buffer and the host-side
+ * capture are sized for asb->width x asb->height, and a larger one used to
+ * leave the IDD window black. Done here rather than in the connector's
+ * mode_valid because that callback's prototype (const mode or not)
+ * differs between the kernels we build for. */
+static int asb_crtc_atomic_check(struct drm_crtc *crtc,
+                                 struct drm_atomic_state *state)
+{
+	struct drm_crtc_state *cs = drm_atomic_get_new_crtc_state(state, crtc);
+	struct asb_device *asb = crtc_to_asb(crtc);
+
+	if (cs && cs->enable &&
+	    (cs->mode.hdisplay > (int)asb->width ||
+	     cs->mode.vdisplay > (int)asb->height))
+		return -EINVAL;
+	return 0;
+}
+
 static const struct drm_crtc_helper_funcs asb_crtc_helper_funcs = {
+	.atomic_check   = asb_crtc_atomic_check,
 	.atomic_enable  = asb_crtc_atomic_enable,
 	.atomic_disable = asb_crtc_atomic_disable,
 	.atomic_flush   = asb_crtc_atomic_flush,
@@ -132,8 +154,13 @@ int asb_mode_init(struct asb_device *asb)
 	 * Kernel 6.15+ replaced hrtimer_init+function-assignment with the
 	 * single hrtimer_setup() entry point that takes the callback as
 	 * an argument. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 	hrtimer_setup(&asb->vblank_timer, asb_vblank_timer_fn,
 	              CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+#else
+	hrtimer_init(&asb->vblank_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	asb->vblank_timer.function = asb_vblank_timer_fn;
+#endif
 	asb->vblank_period = ns_to_ktime(NSEC_PER_SEC / asb->refresh);
 
 	ret = drm_crtc_init_with_planes(drm, &asb->crtc,

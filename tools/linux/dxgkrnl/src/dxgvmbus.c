@@ -690,7 +690,10 @@ int dxgvmb_send_create_process(struct dxgprocess *process)
 	command->process_id = process->pid;
 	command->linux_process = 1;
 	s[0] = 0;
-	get_task_comm(s, current);
+	/* Not get_task_comm(): before 6.13 it BUILD_BUG_ONs unless the buffer
+	 * is exactly TASK_COMM_LEN, and s is WIN_MAX_PATH wide. Reading our
+	 * own comm unlocked is fine. */
+	strscpy(s, current->comm, sizeof(s));
 	for (i = 0; i < WIN_MAX_PATH; i++) {
 		command->process_name[i] = s[i];
 		if (s[i] == 0)

@@ -155,22 +155,6 @@ void asb_build_edid(struct asb_device *asb)
  * Connector helper callbacks
  * -------------------------------------------------------------------------- */
 
-/* Refuse anything larger than the configured size, including custom
- * modelines userspace may try: the scanout buffer and the host-side
- * capture are sized for asb->width x asb->height. */
-static enum drm_mode_status
-asb_connector_mode_valid(struct drm_connector *connector,
-			 const struct drm_display_mode *mode)
-{
-	struct asb_device *asb = to_asb(connector->dev);
-
-	if (mode->hdisplay > (int)asb->width)
-		return MODE_BAD_HVALUE;
-	if (mode->vdisplay > (int)asb->height)
-		return MODE_BAD_VVALUE;
-	return MODE_OK;
-}
-
 static int asb_connector_get_modes(struct drm_connector *connector)
 {
 	struct asb_device *asb = to_asb(connector->dev);
@@ -240,7 +224,9 @@ static int asb_connector_get_modes(struct drm_connector *connector)
 
 static const struct drm_connector_helper_funcs asb_connector_helper_funcs = {
 	.get_modes = asb_connector_get_modes,
-	.mode_valid = asb_connector_mode_valid,
+	/* The "no mode larger than the configured size" rule lives in the
+	 * CRTC's atomic_check (asb_drm_mode.c): mode_valid's prototype changed
+	 * (const mode) between the kernels we build for. */
 };
 
 static const struct drm_connector_funcs asb_connector_funcs = {
