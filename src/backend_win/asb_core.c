@@ -2161,9 +2161,35 @@ cleanup:
  *
  * args: extra argv tail (no quotes — caller is responsible for safe paths).
  * Returns 0 on success; -1 on any failure. Logs progress to asb_log. */
+/* Mirror for the apt build-deps prefetch. APPSANDBOX_APT_MIRROR wins;
+   otherwise Ubuntu's per-country alias (<cc>.archive.ubuntu.com, which
+   CNAMEs to a mirror in that country) derived from the Windows region -
+   the same choice the Ubuntu installer makes. iso-patch falls back to the
+   main archive if the alias does not resolve or lacks the release, so a
+   bad guess costs one failed request, not the build. Returns FALSE when
+   there is nothing better than the default. */
+static BOOL choose_apt_mirror(wchar_t *out, size_t cap, wchar_t *why, size_t why_cap)
+{
+    wchar_t cc[8];
+    if (GetEnvironmentVariableW(L"APPSANDBOX_APT_MIRROR", out, (DWORD)cap) > 0) {
+        wcscpy_s(why, why_cap, L"APPSANDBOX_APT_MIRROR");
+        return TRUE;
+    }
+    GEOID geo = GetUserGeoID(GEOCLASS_NATION);
+    if (geo == GEOID_NOT_AVAILABLE ||
+        GetGeoInfoW(geo, GEO_ISO2, cc, ARRAYSIZE(cc), 0) < 2)
+        return FALSE;
+    for (wchar_t *p = cc; *p; p++) *p = (wchar_t)towlower(*p);
+    /* The main archive already lives in the UK. */
+    if (wcscmp(cc, L"gb") == 0) return FALSE;
+    swprintf_s(out, cap, L"http://%s.archive.ubuntu.com/ubuntu", cc);
+    swprintf_s(why, why_cap, L"Windows region %s", cc);
+    return TRUE;
+}
+
 /* Push a build-progress percentage for a VM that is still being created.
    Same bookkeeping as the PROGRESS: handler in run_iso_patch_ubuntu. */
-static void report_build_progress(UINT64 vm_unique_id, int pct)
+static void report_build_progress(UINT64 vm_unique_id, int pct, const wchar_t *step)
 {
     VmInstance *pvm;
     EnterCriticalSection(&g_cs);
@@ -2171,6 +2197,9 @@ static void report_build_progress(UINT64 vm_unique_id, int pct)
     if (pvm) {
         pvm->vhdx_progress = pct;
         pvm->vhdx_staging = FALSE;
+        /* vhdx_step is what the status cell shows instead of the generic
+           "Building Disk" while a phase has a better name. */
+        if (step) wcsncpy_s(pvm->vhdx_step, ARRAYSIZE(pvm->vhdx_step), step, _TRUNCATE);
     }
     LeaveCriticalSection(&g_cs);
     if (g_progress_cb && pvm)
@@ -2182,7 +2211,7 @@ static void report_build_progress(UINT64 vm_unique_id, int pct)
    apt closure is the only prefetch with many files), so the UI moves
    during the minutes that used to sit at "Building Disk (0%)". */
 static int spawn_iso_patch_prefetch(const wchar_t *args, UINT64 vm_unique_id,
-                                    int pct_from, int pct_to)
+                                    int pct_from, int pct_to, const wchar_t *step_label)
 {
     wchar_t exe_dir[MAX_PATH];
     GetModuleFileNameW(g_dll_module, exe_dir, MAX_PATH);
@@ -2218,7 +2247,7 @@ static int spawn_iso_patch_prefetch(const wchar_t *args, UINT64 vm_unique_id,
         if (capture) { CloseHandle(hRead); CloseHandle(hWrite); }
         return -1;
     }
-    if (vm_unique_id) report_build_progress(vm_unique_id, pct_from);
+    if (vm_unique_id) report_build_progress(vm_unique_id, pct_from, step_label);
     if (capture) {
         CloseHandle(hWrite);
         char buf[4096];
@@ -2240,9 +2269,14 @@ static int spawn_iso_patch_prefetch(const wchar_t *args, UINT64 vm_unique_id,
                         size_t len = strlen(line);
                         if (len > 4 && strcmp(line + len - 4, ".deb") == 0 && total > 0) {
                             got++;
-                            if (vm_unique_id)
+                            if (vm_unique_id) {
+                                wchar_t step[128];
+                                swprintf_s(step, ARRAYSIZE(step), L"%s %d/%d",
+                                           step_label ? step_label : L"Downloading", got, total);
                                 report_build_progress(vm_unique_id,
-                                    pct_from + (int)((pct_to - pct_from) * (long long)got / total));
+                                    pct_from + (int)((pct_to - pct_from) * (long long)got / total),
+                                    step);
+                            }
                         }
                     } else if (strncmp(line, "STATUS:", 7) == 0 &&
                                strncmp(line + 7, "xz_decompress", 13) != 0) {
@@ -2365,6 +2399,17 @@ static HRESULT run_iso_patch_ubuntu(const wchar_t *iso_path,
                                     pct = pvm->vhdx_progress;
                                 pvm->vhdx_progress = pct;
                                 pvm->vhdx_staging = is_staging;
+                                /* PROGRESS:<pct>:<step> - surface the step name
+                                   ("Building rootfs", "Installing grub modules",
+                                   ...) instead of the generic "Building Disk". */
+                                {
+                                    const char *step = strchr(line + 9, ':');
+                                    if (step && step[1])
+                                        MultiByteToWideChar(CP_UTF8, 0, step + 1, -1,
+                                                            pvm->vhdx_step, (int)ARRAYSIZE(pvm->vhdx_step));
+                                    else
+                                        pvm->vhdx_step[0] = L'\0';
+                                }
                             }
                             LeaveCriticalSection(&g_cs);
                             if (g_progress_cb && pvm)
@@ -2482,7 +2527,8 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
             swprintf_s(args_buf, 2048,
                 L"--prefetch-repo --branch \"main\" --out-dir \"%s\"",
                 extras);
-            if (spawn_iso_patch_prefetch(args_buf, args->vm_unique_id, 1, 3) != 0)
+            if (spawn_iso_patch_prefetch(args_buf, args->vm_unique_id, 1, 3,
+                                         L"Downloading sources") != 0)
                 asb_log(L"WARN: prefetch-repo failed (agent + DKMS build will fail)");
             else
                 prefetch_cache_store(L"repo-main", extras);   /* extras holds only repo output here */
@@ -2499,11 +2545,17 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
             swprintf_s(apt_out, MAX_PATH, L"%s\\local-apt-extras", extras);
             swprintf_s(cache_key, ARRAYSIZE(cache_key), L"build-deps-%s-%s", codename, kver);
             if (!prefetch_cache_restore(cache_key, 7 * 24, apt_out, L"Prefetch 2/3")) {
+                wchar_t mirror[512], why[64], mirror_arg[600] = L"";
+                if (choose_apt_mirror(mirror, ARRAYSIZE(mirror), why, ARRAYSIZE(why))) {
+                    asb_log(L"Prefetch 2/3: mirror %s (%s)", mirror, why);
+                    swprintf_s(mirror_arg, ARRAYSIZE(mirror_arg), L" --mirror \"%s\"", mirror);
+                }
                 swprintf_s(args_buf, 2048,
                     L"--prefetch-build-deps --codename \"%s\" --kernel \"%s\" "
-                    L"--out-dir \"%s\"",
-                    codename, kver, apt_out);
-                if (spawn_iso_patch_prefetch(args_buf, args->vm_unique_id, 3, 8) != 0)
+                    L"--out-dir \"%s\"%s",
+                    codename, kver, apt_out, mirror_arg);
+                if (spawn_iso_patch_prefetch(args_buf, args->vm_unique_id, 3, 8,
+                                             L"Downloading packages") != 0)
                     asb_log(L"WARN: prefetch-build-deps failed");
                 else
                     prefetch_cache_store(cache_key, apt_out);
@@ -2519,7 +2571,8 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
         if (!prefetch_cache_restore(L"wsl-deps", 30 * 24, wsl_out, L"Prefetch 3/3")) {
             swprintf_s(args_buf, 2048,
                 L"--prefetch-wsl-deps --out-dir \"%s\"", wsl_out);
-            if (spawn_iso_patch_prefetch(args_buf, args->vm_unique_id, 8, 9) != 0)
+            if (spawn_iso_patch_prefetch(args_buf, args->vm_unique_id, 8, 9,
+                                         L"Downloading GPU libraries") != 0)
                 asb_log(L"WARN: prefetch-wsl-deps failed");
             else
                 prefetch_cache_store(L"wsl-deps", wsl_out);

@@ -214,6 +214,7 @@ static void build_vm_json(JsonBuilder *jb, int i)
     jb_bool(jb, L"buildingVhdx", v->building_vhdx);
     jb_bool(jb, L"vhdxStaging", v->vhdx_staging);
     jb_int(jb, L"vhdxProgress", v->vhdx_progress);
+    jb_string(jb, L"vhdxStep", v->vhdx_step);
     jb_bool(jb, L"installComplete", v->install_complete);
     jb_bool(jb, L"sshEnabled", v->ssh_enabled);
     jb_int(jb, L"sshPort", (int)v->ssh_port);
