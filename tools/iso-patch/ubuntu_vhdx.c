@@ -758,6 +758,9 @@ static int xattr_collect_cb(const char *name, const void *value, size_t vlen, vo
 {
     xattr_collect_ctx_t *c = (xattr_collect_ctx_t *)user;
     static const char hexd[] = "0123456789abcdef";
+    /* overlayfs bookkeeping from the layered image build (opaque dirs,
+       redirects); meaningless on a plain ext4 root. */
+    if (strncmp(name, "trusted.overlay.", 16) == 0) return 0;
     char *line = (char *)malloc(strlen(c->path) + strlen(name) + vlen * 2 + 4);
     if (!line) return -1;
     size_t k = 0;
@@ -782,13 +785,6 @@ static int producer_cb(const sqfs_entry_t *e, void *user)
 
     if (e->path[0] == 0) return 0;
 
-    if (e->xattr_idx != SQFS_XATTR_NONE &&
-        (e->type == SQFS_EREG_TYPE || e->type == SQFS_EDIR_TYPE)) {
-        xattr_collect_ctx_t c = { e->path, 0 };
-        if (sqfs_read_xattrs(p->sq, e->xattr_idx, xattr_collect_cb, &c) != 0)
-            log_msg(L"WARN: xattrs of %hs unreadable", e->path);
-        else if (c.n) g_xattrs.n_files++;
-    }
 
     if (p->include_prefixes) {
         int keep = 0;
@@ -796,6 +792,17 @@ static int producer_cb(const sqfs_entry_t *e, void *user)
             if (strncmp(e->path, *pp, strlen(*pp)) == 0) { keep = 1; break; }
         }
         if (!keep) return 0;
+    }
+
+    /* Only for entries that are actually ingested (after the filter), so
+       a filtered overlay walk does not produce attributes for paths that
+       never exist in the rootfs. */
+    if (e->xattr_idx != SQFS_XATTR_NONE &&
+        (e->type == SQFS_EREG_TYPE || e->type == SQFS_EDIR_TYPE)) {
+        xattr_collect_ctx_t c = { e->path, 0 };
+        if (sqfs_read_xattrs(p->sq, e->xattr_idx, xattr_collect_cb, &c) != 0)
+            log_msg(L"WARN: xattrs of %hs unreadable", e->path);
+        else if (c.n) g_xattrs.n_files++;
     }
 
     if (p->kernel_version[0] == 0) {
