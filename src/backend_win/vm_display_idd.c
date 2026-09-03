@@ -1699,7 +1699,16 @@ static DWORD WINAPI idd_recv_thread_proc(LPVOID param)
                 break;
 
             if (data_size > MAX_FRAME_DATA_SIZE) {
-                idd_log(d, L"Frame data too large (%u bytes), reconnecting.", data_size);
+                /* The guest switched to a mode larger than this receiver's
+                   buffer (e.g. 2560x1440 picked in GNOME's display settings).
+                   Say what to do about it; a bare "reconnecting" here left the
+                   window black with no hint. */
+                idd_log(d, L"Guest display is %ux%u, larger than the %ux%u this window supports - "
+                           L"pick a resolution up to %ux%u in the guest (Settings > Displays). Reconnecting.",
+                        hdr.width, hdr.height,
+                        DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_WIDTH, DEFAULT_HEIGHT);
+                ui_log(L"IDD: %s display %ux%u exceeds %ux%u - lower the guest resolution",
+                       d->vm_name, hdr.width, hdr.height, DEFAULT_WIDTH, DEFAULT_HEIGHT);
                 break;
             }
 
