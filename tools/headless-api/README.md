@@ -317,6 +317,7 @@ rather than forwarding bad input to the core.
 | `testMode` | skip interactive setup where supported |
 | `sshEnabled` | provision SSH + forward a loopback port |
 | `sshDeployKey` | deploy the AppSandbox public key for password-less login (**requires `sshEnabled`**; rejected `400` otherwise) |
+| `gaKernel` | Linux only: install the GA kernel (`linux-generic`, e.g. 6.8 on 24.04) from the archive at first boot and make GRUB boot it, instead of the ISO's HWE kernel. Matches what a stock server / VPS runs. |
 | `isTemplate` | build a template (Windows only; can't be built from another template) |
 
 `edit()` accepts `ramMb`, `cpuCores`, `gpuMode`, `networkMode` with the same

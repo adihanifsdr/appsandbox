@@ -62,6 +62,7 @@ typedef struct {
     BOOL   ssh_enabled;            /* TRUE = install OpenSSH Server in guest */
     BOOL   ssh_deploy_key;         /* TRUE = deploy the AppSandbox public key (needs ssh_enabled) */
     BOOL   is_template;            /* TRUE = create as template VM */
+    BOOL   linux_ga_kernel;        /* Linux: install + boot the GA kernel (linux-generic) instead of the ISO's HWE one */
 } AsbVmConfig;
 
 /* ---- Snapshot/branch info (returned by query functions) ---- */

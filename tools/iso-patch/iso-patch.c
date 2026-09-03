@@ -2931,6 +2931,7 @@ int wmain(int argc, wchar_t *argv[])
     if (_wcsicmp(argv[1], L"--prefetch-build-deps") == 0) {
         const wchar_t *codename = NULL, *kver = NULL;
         const wchar_t *out_dir = NULL, *mirror = NULL;
+        int ga_kernel = 0;
         for (int i = 2; i < argc; i++) {
             if (_wcsicmp(argv[i], L"--codename") == 0 && i + 1 < argc) {
                 codename = argv[++i];
@@ -2940,13 +2941,15 @@ int wmain(int argc, wchar_t *argv[])
                 out_dir = argv[++i];
             } else if (_wcsicmp(argv[i], L"--mirror") == 0 && i + 1 < argc) {
                 mirror = argv[++i];
+            } else if (_wcsicmp(argv[i], L"--kernel-ga") == 0) {
+                ga_kernel = 1;
             }
         }
         if (!codename || !kver || !out_dir) {
-            log_err(L"--prefetch-build-deps requires --codename, --kernel, --out-dir");
+            log_err(L"--prefetch-build-deps requires --codename, --kernel, --out-dir (optional --mirror URL, --kernel-ga)");
             return 1;
         }
-        return do_prefetch_build_deps(codename, kver, out_dir, mirror);
+        return do_prefetch_build_deps(codename, kver, out_dir, mirror, ga_kernel);
     }
 
     if (_wcsicmp(argv[1], L"--ubuntu-to-vhdx") == 0) {

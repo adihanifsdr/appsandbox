@@ -1834,6 +1834,7 @@ static int generate_vhdx_manifest_ubuntu(const wchar_t *manifest_path,
                                          const wchar_t *staging,
                                          const wchar_t *res_dir,
                                          BOOL ssh_enabled,
+                                         BOOL ga_kernel,
                                          const wchar_t *admin_user,
                                          const char *admin_pw_hash,
                                          const char *host_locale,
@@ -1884,6 +1885,13 @@ static int generate_vhdx_manifest_ubuntu(const wchar_t *manifest_path,
         n += stage_marker_file(f, staging, L"ssh-enabled.marker",
                                NULL, 0, L"/etc/appsandbox-ssh-enabled");
         asb_log(L"ssh_enabled: staged /etc/appsandbox-ssh-enabled marker");
+    }
+    if (ga_kernel) {
+        /* firstboot STEP 7.7 installs linux-generic from the prefetched
+         * extras and STEP 98.5 makes GRUB boot it. */
+        n += stage_marker_file(f, staging, L"kernel-ga.marker",
+                               NULL, 0, L"/etc/appsandbox-kernel-ga");
+        asb_log(L"ga_kernel: staged /etc/appsandbox-kernel-ga marker");
     }
 
     /* Host-derived locale / keyboard / timezone. firstboot STEP 3 + 4
@@ -2572,7 +2580,8 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
                               kver,     ARRAYSIZE(kver)) == 0) {
             wchar_t apt_out[MAX_PATH], cache_key[160];
             swprintf_s(apt_out, MAX_PATH, L"%s\\local-apt-extras", extras);
-            swprintf_s(cache_key, ARRAYSIZE(cache_key), L"build-deps-%s-%s", codename, kver);
+            swprintf_s(cache_key, ARRAYSIZE(cache_key), L"build-deps-%s-%s%s", codename, kver,
+                       args->config.linux_ga_kernel ? L"-ga" : L"");
             if (!prefetch_cache_restore(cache_key, 7 * 24, apt_out, L"Prefetch 2/3")) {
                 wchar_t mirror[512], why[64], mirror_arg[600] = L"";
                 if (choose_apt_mirror(mirror, ARRAYSIZE(mirror), why, ARRAYSIZE(why))) {
@@ -2581,8 +2590,9 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
                 }
                 swprintf_s(args_buf, 2048,
                     L"--prefetch-build-deps --codename \"%s\" --kernel \"%s\" "
-                    L"--out-dir \"%s\"%s",
-                    codename, kver, apt_out, mirror_arg);
+                    L"--out-dir \"%s\"%s%s",
+                    codename, kver, apt_out, mirror_arg,
+                    args->config.linux_ga_kernel ? L" --kernel-ga" : L"");
                 if (spawn_iso_patch_prefetch(args_buf, args->vm_unique_id, 3, 8,
                                              L"Downloading packages") != 0)
                     asb_log(L"WARN: prefetch-build-deps failed");
@@ -2640,6 +2650,7 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
 
     int n_staged = generate_vhdx_manifest_ubuntu(manifest, staging, res_dir,
                                                   args->config.ssh_enabled,
+                                                  args->config.linux_ga_kernel,
                                                   args->config.admin_user,
                                                   admin_pw_hash,
                                                   host_locale, host_xkb, host_tz,
@@ -2988,6 +2999,7 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
     cfg.network_mode = config->network_mode;
     cfg.test_mode = config->test_mode;
     cfg.ssh_enabled = config->ssh_enabled;
+    cfg.linux_ga_kernel = config->linux_ga_kernel;
     /* Key deploy needs SSH; prepare the AppSandbox keypair now so the build path
        stores the public key on the instance (the agent deploys it at runtime). */
     cfg.ssh_deploy_key = config->ssh_deploy_key && config->ssh_enabled;

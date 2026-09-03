@@ -930,6 +930,7 @@ static void on_webview2_message(const wchar_t *json)
         json_get_bool(json, L"testMode", &cfg.test_mode);
         json_get_bool(json, L"sshEnabled", &cfg.ssh_enabled);
         json_get_bool(json, L"sshDeployKey", &cfg.ssh_deploy_key);
+        json_get_bool(json, L"gaKernel", &cfg.linux_ga_kernel);
 
         asb_vm_create(&cfg);
         SecureZeroMemory(pass_buf, sizeof(pass_buf));

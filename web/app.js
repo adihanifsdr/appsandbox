@@ -102,6 +102,7 @@ function applyOsTypeUI() {
     var winOnly = document.querySelectorAll('.win-only');
     var needsIso = document.querySelectorAll('.needs-iso');
     var needsWindows = document.querySelectorAll('.needs-windows');
+    var needsLinux = document.querySelectorAll('.needs-linux');
     var needsLinuxVersion = document.querySelectorAll('.needs-linux-version');
     /* .win-only = template/snapshot features that exist only on a Windows *host*;
        never shown on a Mac host, even for a Windows guest. */
@@ -110,6 +111,8 @@ function applyOsTypeUI() {
     /* .needs-windows = Windows-*guest* options (Test Mode); shown for a Windows
        guest on EITHER host (a Windows-on-Mac VM uses it too), hidden otherwise. */
     for (var w = 0; w < needsWindows.length; w++) needsWindows[w].style.display = isWindows ? '' : 'none';
+    /* .needs-linux = Linux-guest options (GA kernel). */
+    for (var l = 0; l < needsLinux.length; l++) needsLinux[l].style.display = isLinux ? '' : 'none';
     /* ISO picker shows for both Windows and Linux now. */
     for (var j = 0; j < needsIso.length; j++) needsIso[j].style.display = (isWindows || isLinux) ? '' : 'none';
     /* Linux distribution dropdown is dormant — kept in the DOM but always
@@ -452,7 +455,8 @@ function gatherConfig() {
         adminConfirm: document.getElementById('admin-confirm').value,
         testMode:    document.getElementById('test-mode').checked,
         sshEnabled:  document.getElementById('ssh-enabled').checked,
-        sshDeployKey: document.getElementById('ssh-deploy-key').checked
+        sshDeployKey: document.getElementById('ssh-deploy-key').checked,
+        gaKernel:    document.getElementById('ga-kernel').checked
     };
 }
 

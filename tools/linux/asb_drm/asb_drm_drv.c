@@ -31,6 +31,27 @@
 #include <drm/drm_modeset_helper_vtables.h>
 #include <drm/drm_probe_helper.h>
 
+/* fbdev emulation: gives the kernel console (fbcon) a framebuffer on this
+ * device, so a guest without a compositor - a server image, or a desktop
+ * that failed to start GNOME - still shows its text console in the host's
+ * IDD window. The API moved around across the kernels we build for
+ * (6.8 GA, 6.17 HWE, 7.0), hence the header probing. */
+#if __has_include(<drm/clients/drm_client_setup.h>)
+#  include <drm/clients/drm_client_setup.h>
+#  include <drm/drm_fbdev_shmem.h>
+#  define ASB_FBDEV_CLIENT_SETUP 1
+#elif __has_include(<drm/drm_client_setup.h>)
+#  include <drm/drm_client_setup.h>
+#  include <drm/drm_fbdev_shmem.h>
+#  define ASB_FBDEV_CLIENT_SETUP 1
+#elif __has_include(<drm/drm_fbdev_shmem.h>)
+#  include <drm/drm_fbdev_shmem.h>
+#  define ASB_FBDEV_SHMEM_SETUP 1
+#elif __has_include(<drm/drm_fbdev_generic.h>)
+#  include <drm/drm_fbdev_generic.h>
+#  define ASB_FBDEV_GENERIC_SETUP 1
+#endif
+
 #include "asb_drm.h"
 
 /* --------------------------------------------------------------------------
@@ -88,6 +109,9 @@ static const struct drm_driver asb_drm_driver = {
 	 * shmem via dumb_create, or imported dma-buf from Mesa-d3d12). All
 	 * mapping / mmap / fault paths come from these macros. */
 	DRM_GEM_SHMEM_DRIVER_OPS,
+#ifdef ASB_FBDEV_CLIENT_SETUP
+	DRM_FBDEV_SHMEM_DRIVER_OPS,
+#endif
 };
 
 /* --------------------------------------------------------------------------
@@ -191,6 +215,14 @@ static int asb_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "drm_dev_register failed: %d\n", ret);
 		return ret;
 	}
+
+#if defined(ASB_FBDEV_CLIENT_SETUP)
+	drm_client_setup(drm, NULL);
+#elif defined(ASB_FBDEV_SHMEM_SETUP)
+	drm_fbdev_shmem_setup(drm, 32);
+#elif defined(ASB_FBDEV_GENERIC_SETUP)
+	drm_fbdev_generic_setup(drm, 32);
+#endif
 
 	dev_info(&pdev->dev, "AppSandbox virtual display ready: %ux%u@%uHz\n",
 	         asb->width, asb->height, asb->refresh);

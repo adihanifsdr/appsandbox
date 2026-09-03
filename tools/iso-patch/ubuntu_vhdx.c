@@ -1230,6 +1230,11 @@ static void plant_firstboot_service(ext4_writer_t *ew)
         "    echo \"no /opt/appsandbox/xattrs.list (image had no xattrs?)\"\n"
         "fi\n"
         "\n"
+        "# Desktop or server image? iso-patch writes the marker; the GNOME /\n"
+        "# GPU-desktop steps below are skipped for a server.\n"
+        "FLAVOR=$(cat /etc/appsandbox-flavor 2>/dev/null || echo desktop)\n"
+        "echo \"flavor: $FLAVOR\"\n"
+        "\n"
         "# --- STEP 2: Hostname (from host marker = AppSandbox VM name) ---\n"
         "# Host staged /etc/appsandbox-hostname with the VM name (already\n"
         "# validated to a legal lowercase hostname by the create UI). Falls\n"
@@ -1329,6 +1334,7 @@ static void plant_firstboot_service(ext4_writer_t *ew)
         "# Wipe the hash file — it's been consumed by usermod.\n"
         "rm -f /etc/appsandbox-admin-hash 2>/dev/null || true\n"
         "\n"
+        "if [ \"$FLAVOR\" = desktop ]; then\n"
         "# --- STEP 6: Skip GNOME welcome wizard ---\n"
         "echo \"==== STEP 6: skip GNOME OOBE ====\"\n"
         "if id \"$ASB_USER\" >/dev/null 2>&1; then\n"
@@ -1355,6 +1361,9 @@ static void plant_firstboot_service(ext4_writer_t *ew)
         "\n"
         "[debug]\n"
         "EOF\n"
+        "else\n"
+        "    echo \"SKIP STEP 6 + 7: server flavor (no GNOME / gdm)\"\n"
+        "fi\n"
         "\n"
         "# ============================================================\n"
         "# AppSandbox guest extras install\n"
@@ -1452,6 +1461,28 @@ static void plant_firstboot_service(ext4_writer_t *ew)
         "    if [ ! -s \"/boot/initrd.img-$TGT_KVER\" ] && [ -s \"/boot/initrd.img-$TGT_KVER.iso\" ]; then\n"
         "        cp -f \"/boot/initrd.img-$TGT_KVER.iso\" \"/boot/initrd.img-$TGT_KVER\"\n"
         "        echo \"WARN: restored ISO initrd\"\n"
+        "    fi\n"
+        "fi\n"
+        "\n"
+        "# --- STEP 7.7: GA kernel (host option) ---\n"
+        "# The desktop ISO boots the HWE kernel (6.17 on 24.04.4); a stock\n"
+        "# server / VPS runs the GA one (6.8). When the user asked for the GA\n"
+        "# kernel, the host prefetched linux-generic + linux-headers-generic\n"
+        "# from the archive into local-apt-extras. Install them now; STEP 12\n"
+        "# builds the DKMS modules for both kernels and STEP 98.5 makes GRUB\n"
+        "# boot the GA one. The HWE kernel stays installed as a fallback.\n"
+        "GA_KVER=\"\"\n"
+        "if [ -f /etc/appsandbox-kernel-ga ]; then\n"
+        "    echo \"==== STEP 7.7: install the GA kernel (linux-generic) ====\"\n"
+        "    if DEBIAN_FRONTEND=noninteractive apt-get install -y $APT_OPTS linux-generic linux-headers-generic 2>&1 | tail -8; then\n"
+        "        GA_KVER=$(ls -1 /lib/modules 2>/dev/null | grep -E '^[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+-generic$' | grep -v \"^$TGT_KVER$\" | sort -V | head -1)\n"
+        "        if [ -n \"$GA_KVER\" ]; then\n"
+        "            echo \"OK: GA kernel $GA_KVER installed (running $TGT_KVER)\"\n"
+        "        else\n"
+        "            echo \"OK: GA kernel is already the running kernel ($TGT_KVER)\"\n"
+        "        fi\n"
+        "    else\n"
+        "        echo \"FAIL: linux-generic not installable from the local sources (host prefetch without --kernel-ga?)\"\n"
         "    fi\n"
         "fi\n"
         "\n"
@@ -1553,6 +1584,8 @@ static void plant_firstboot_service(ext4_writer_t *ew)
         "else\n"
         "# DKMS source trees come from the host prefetch (--prefetch-repo\n"
         "# laid them down at /opt/appsandbox/{asb_drm,dxgkrnl}-src/).\n"
+        "# Register the sources once, then build for the running kernel and,\n"
+        "# when STEP 7.7 installed one, the GA kernel too.\n"
         "for mod in asb_drm dxgkrnl; do\n"
         "    SRC=\"$EXTRAS/$mod-src\"\n"
         "    [ -d \"$SRC\" ] || { echo \"SKIP $mod: no $SRC (host prefetch failed?)\"; continue; }\n"
@@ -1562,23 +1595,32 @@ static void plant_firstboot_service(ext4_writer_t *ew)
         "    rm -rf \"$DEST\"\n"
         "    cp -r \"$SRC\" \"$DEST\"\n"
         "    dkms add -m $mod -v $ver 2>&1 | tail -2 || true\n"
+        "done\n"
+        "for k in $TGT_KVER $GA_KVER; do\n"
+        "  [ -d \"/lib/modules/$k/build\" ] || { echo \"SKIP DKMS for $k: linux-headers-$k not installed\"; continue; }\n"
+        "  for mod in asb_drm dxgkrnl; do\n"
+        "    SRC=\"$EXTRAS/$mod-src\"\n"
+        "    [ -d \"$SRC\" ] || continue\n"
+        "    ver=$(awk -F= '/^PACKAGE_VERSION=/{gsub(/\"/,\"\",$2); print $2}' \"$SRC/dkms.conf\" 2>/dev/null)\n"
+        "    [ -z \"$ver\" ] && ver=1.0.0\n"
         "    # pipefail is on, so the if/then sees dkms's exit, not tail's.\n"
-        "    if dkms build -m $mod -v $ver -k \"$TGT_KVER\" 2>&1 | tail -5; then\n"
-        "        echo \"OK: dkms build $mod\"\n"
+        "    if dkms build -m $mod -v $ver -k \"$k\" 2>&1 | tail -5; then\n"
+        "        echo \"OK: dkms build $mod ($k)\"\n"
         "    else\n"
-        "        echo \"FAIL: dkms build $mod (rc=$?) — dumping make.log:\"\n"
-        "        for log in $(find /var/lib/dkms -name make.log 2>/dev/null); do\n"
+        "        echo \"FAIL: dkms build $mod for $k (rc=$?) — dumping make.log:\"\n"
+        "        for log in $(find /var/lib/dkms/$mod -path \"*$k*\" -name make.log 2>/dev/null); do\n"
         "            echo \"---- $log (last 40 lines) ----\"\n"
         "            tail -40 \"$log\"\n"
         "        done\n"
         "    fi\n"
-        "    if dkms install -m $mod -v $ver -k \"$TGT_KVER\" 2>&1 | tail -3; then\n"
-        "        echo \"OK: dkms install $mod\"\n"
+        "    if dkms install -m $mod -v $ver -k \"$k\" 2>&1 | tail -3; then\n"
+        "        echo \"OK: dkms install $mod ($k)\"\n"
         "    else\n"
-        "        echo \"FAIL: dkms install $mod (rc=$?)\"\n"
+        "        echo \"FAIL: dkms install $mod for $k (rc=$?)\"\n"
         "    fi\n"
+        "  done\n"
+        "  if depmod -a \"$k\"; then echo \"OK: depmod $k\"; else echo \"FAIL: depmod $k\"; fi\n"
         "done\n"
-        "if depmod -a \"$TGT_KVER\"; then echo \"OK: depmod\"; else echo \"FAIL: depmod\"; fi\n"
         "fi  # end if dkms available + headers present\n"
         "echo \"==== STEP 12 finished in $((SECONDS - DKMS_T0)) s ====\"\n"
         "# Quick visibility: what .ko files actually exist for the running kernel?\n"
@@ -1586,7 +1628,7 @@ static void plant_firstboot_service(ext4_writer_t *ew)
         "\n"
         "# --- STEP 13: wsl-mesa (optional GPU acceleration tarball) ---\n"
         "echo \"==== STEP 13: wsl-mesa ====\"\n"
-        "if [ -f \"$EXTRAS/wsl-mesa.tar.zst\" ]; then\n"
+        "if [ \"$FLAVOR\" = desktop ] && [ -f \"$EXTRAS/wsl-mesa.tar.zst\" ]; then\n"
         "    if ! command -v zstd >/dev/null 2>&1; then\n"
         "        DEBIAN_FRONTEND=noninteractive apt-get install -y zstd 2>&1 | tail -3\n"
         "    fi\n"
@@ -1664,7 +1706,11 @@ static void plant_firstboot_service(ext4_writer_t *ew)
         "        systemctl enable $u 2>&1 | tail -1\n"
         "    fi\n"
         "done\n"
-        "systemctl set-default graphical.target 2>&1 | tail -1 || true\n"
+        "if [ \"$FLAVOR\" = desktop ]; then\n"
+        "    systemctl set-default graphical.target 2>&1 | tail -1 || true\n"
+        "else\n"
+        "    systemctl set-default multi-user.target 2>&1 | tail -1 || true\n"
+        "fi\n"
         "# Mask all sleep paths (VM has no human at a seat to wake it).\n"
         "systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>&1 | tail -1 || true\n"
         "install -d /etc/systemd/logind.conf.d\n"
@@ -1747,6 +1793,7 @@ static void plant_firstboot_service(ext4_writer_t *ew)
         "_check_file /etc/modules-load.d/dxgkrnl.conf\n"
         "_check_file /etc/modules-load.d/snd-aloop.conf\n"
         "_check_file /etc/modprobe.d/asb_drm.conf\n"
+        "echo \"-- flavor: $FLAVOR; running kernel: $TGT_KVER; GA kernel: ${GA_KVER:-(not requested)} --\"\n"
         "echo \"-- kernel modules for $TGT_KVER (DKMS-built) --\"\n"
         "_check_glob \"/lib/modules/$TGT_KVER/updates/dkms/asb_drm.ko*\"\n"
         "_check_glob \"/lib/modules/$TGT_KVER/updates/asb_drm.ko*\"\n"
@@ -1825,6 +1872,21 @@ static void plant_firstboot_service(ext4_writer_t *ew)
         "    fi\n"
         "else\n"
         "    echo \"SKIP STEP 98: $ROOTDEV already has a journal (or not a block device)\"\n"
+        "fi\n"
+        "\n"
+        "# --- STEP 98.5: make GRUB boot the GA kernel (host option) ---\n"
+        "# Only once its DKMS modules exist, otherwise the display would be\n"
+        "# dead after the reboot; the HWE kernel then stays the default.\n"
+        "if [ -n \"$GA_KVER\" ]; then\n"
+        "    echo \"==== STEP 98.5: GRUB default -> $GA_KVER ====\"\n"
+        "    if compgen -G \"/lib/modules/$GA_KVER/updates/dkms/asb_drm.ko*\" >/dev/null 2>&1; then\n"
+        "        install -d /etc/default/grub.d\n"
+        "        printf 'GRUB_DEFAULT=\"Advanced options for Ubuntu>Ubuntu, with Linux %s\"\\n' \"$GA_KVER\" \\\n"
+        "            > /etc/default/grub.d/92-appsandbox-ga-kernel.cfg\n"
+        "        update-grub 2>&1 | tail -3 && echo \"OK: GRUB defaults to $GA_KVER\" || echo \"FAIL: update-grub\"\n"
+        "    else\n"
+        "        echo \"WARN: no asb_drm module for $GA_KVER - keeping $TGT_KVER as the default kernel\"\n"
+        "    fi\n"
         "fi\n"
         "\n"
         "# --- STEP 99: Mark done + reboot ---\n"
@@ -2107,14 +2169,28 @@ static void *u_read_whole_file(const wchar_t *path, uint64_t *size_out)
  *  Returns 0 and fills kernel_ver on success, -1 if the ISO has no usable
  *  live layer / initrd.
  * ====================================================================== */
+typedef struct { const wchar_t *layer, *initrd, *vmlinuz; } live_layer_t;
+
 static int stage_kernel_from_live_layer(wchar_t iso_drive, ext4_writer_t *ew,
+                                        int flavor_server,
                                         char *kernel_ver, size_t kernel_ver_cap)
 {
-    static const wchar_t *const layers[] = {
-        L"minimal.standard.live.squashfs",   /* 24.04 desktop */
-        L"minimal.live.squashfs",
-        L"filesystem.squashfs",              /* legacy single-layer ISOs */
+    /* Where each ISO keeps the kernel + modules that boot the live medium,
+       with the matching initrd + kernel file under casper/. Server: the
+       installer.generic layer is the GA kernel (what a stock server / VPS
+       runs), generic-hwe the HWE one. */
+    static const live_layer_t desktop_layers[] = {
+        { L"minimal.standard.live.squashfs", L"initrd", L"vmlinuz" },   /* 24.04 desktop */
+        { L"minimal.live.squashfs",          L"initrd", L"vmlinuz" },
+        { L"filesystem.squashfs",            L"initrd", L"vmlinuz" },   /* legacy single-layer ISOs */
     };
+    static const live_layer_t server_layers[] = {
+        { L"ubuntu-server-minimal.ubuntu-server.installer.generic.squashfs",     L"initrd",     L"vmlinuz" },
+        { L"ubuntu-server-minimal.ubuntu-server.installer.generic-hwe.squashfs", L"hwe-initrd", L"hwe-vmlinuz" },
+    };
+    const live_layer_t *layers = flavor_server ? server_layers : desktop_layers;
+    size_t n_layers = flavor_server ? sizeof(server_layers) / sizeof(server_layers[0])
+                                    : sizeof(desktop_layers) / sizeof(desktop_layers[0]);
     static const char *const prefixes[] = {
         "/boot/vmlinuz-",
         "/boot/System.map-",
@@ -2123,20 +2199,23 @@ static int stage_kernel_from_live_layer(wchar_t iso_drive, ext4_writer_t *ew,
         NULL
     };
     wchar_t sqfs_path[MAX_PATH] = { 0 };
+    const live_layer_t *ll = NULL;
     const wchar_t *layer = NULL;
 
-    for (size_t i = 0; i < sizeof(layers) / sizeof(layers[0]); i++) {
-        swprintf(sqfs_path, MAX_PATH, L"%c:\\casper\\%s", iso_drive, layers[i]);
+    for (size_t i = 0; i < n_layers; i++) {
+        swprintf(sqfs_path, MAX_PATH, L"%c:\\casper\\%s", iso_drive, layers[i].layer);
         if (GetFileAttributesW(sqfs_path) != INVALID_FILE_ATTRIBUTES) {
-            layer = layers[i];
+            ll = &layers[i];
+            layer = ll->layer;
             break;
         }
     }
-    if (!layer) {
+    if (!ll) {
         log_msg(L"layered ISO: no live overlay layer found under casper/");
         return -1;
     }
-    log_msg(L"layered ISO: staging kernel + modules from casper/%s", layer);
+    log_msg(L"layered ISO: staging kernel + modules from casper/%s (initrd: casper/%s)",
+            layer, ll->initrd);
 
     /* The base layer of a layered ISO usually has no /usr/lib/modules at
        all; the overlay's entries need their parent to exist. Idempotent. */
@@ -2161,20 +2240,21 @@ static int stage_kernel_from_live_layer(wchar_t iso_drive, ext4_writer_t *ew,
        official Ubuntu ISOs they are identical files. */
     {
         wchar_t p[MAX_PATH];
-        swprintf(p, MAX_PATH, L"%c:\\casper\\vmlinuz", iso_drive);
+        swprintf(p, MAX_PATH, L"%c:\\casper\\%s", iso_drive, ll->vmlinuz);
         WIN32_FILE_ATTRIBUTE_DATA fad;
         if (GetFileAttributesExW(p, GetFileExInfoStandard, &fad)) {
             uint64_t sz = ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
             if (sz != kernel_size)
-                log_msg(L"WARN: casper/vmlinuz (%llu bytes) differs from /boot/vmlinuz-%hs (%llu bytes); "
-                        L"casper/initrd may not match the staged kernel",
-                        (unsigned long long)sz, kernel_ver, (unsigned long long)kernel_size);
+                log_msg(L"WARN: casper/%s (%llu bytes) differs from /boot/vmlinuz-%hs (%llu bytes); "
+                        L"casper/%s may not match the staged kernel",
+                        ll->vmlinuz, (unsigned long long)sz, kernel_ver,
+                        (unsigned long long)kernel_size, ll->initrd);
         }
     }
     {
         wchar_t p[MAX_PATH];
         uint64_t initrd_size = 0;
-        swprintf(p, MAX_PATH, L"%c:\\casper\\initrd", iso_drive);
+        swprintf(p, MAX_PATH, L"%c:\\casper\\%s", iso_drive, ll->initrd);
         void *initrd = u_read_whole_file(p, &initrd_size);
         if (!initrd) {
             log_msg(L"layered ISO: cannot read %s", p);
@@ -2189,8 +2269,8 @@ static int stage_kernel_from_live_layer(wchar_t iso_drive, ext4_writer_t *ew,
             log_msg(L"layered ISO: staging %hs failed", dst);
             return -1;
         }
-        log_msg(L"layered ISO: casper/initrd (%.1f MiB) staged as %hs",
-                (double)initrd_size / (1024.0 * 1024.0), dst);
+        log_msg(L"layered ISO: casper/%s (%.1f MiB) staged as %hs",
+                ll->initrd, (double)initrd_size / (1024.0 * 1024.0), dst);
     }
 
     /* Keep boot=local on the cmdline after the guest regenerates grub.cfg,
@@ -2365,12 +2445,24 @@ int do_ubuntu_to_vhdx(const wchar_t *iso_path_arg,
      * minimal.standard.squashfs is an overlay only (no /boot, no kernel)
      * and is not usable as a standalone rootfs source. */
     wchar_t sqfs_path[MAX_PATH];
+    int flavor_server = 0;
     swprintf(sqfs_path, MAX_PATH, L"%c:\\casper\\minimal.squashfs", iso_drive);
     if (GetFileAttributesW(sqfs_path) == INVALID_FILE_ATTRIBUTES) {
-        log_err(L"casper/minimal.squashfs not found on ISO");
-        goto cleanup;
+        /* Ubuntu Server ISO: casper/ubuntu-server-minimal.squashfs is the
+           standalone "Ubuntu Server (minimized)" image (install-sources.yaml
+           type: fsimage). The ubuntu-server overlay layer on top of it is
+           not applied; cloud-init, netplan, initramfs-tools are all in the
+           base. The kernel lives in the installer.generic layer, handled
+           by the layered-ISO fallback. */
+        swprintf(sqfs_path, MAX_PATH, L"%c:\\casper\\ubuntu-server-minimal.squashfs", iso_drive);
+        if (GetFileAttributesW(sqfs_path) == INVALID_FILE_ATTRIBUTES) {
+            log_err(L"neither casper/minimal.squashfs (Ubuntu Desktop) nor "
+                    L"casper/ubuntu-server-minimal.squashfs (Ubuntu Server) found on the ISO");
+            goto cleanup;
+        }
+        flavor_server = 1;
     }
-    log_msg(L"Source squashfs: %s", sqfs_path);
+    log_msg(L"Source squashfs: %s (%s flavor)", sqfs_path, flavor_server ? L"server" : L"desktop");
 
     /* ---- Step 3: Create + attach the VHDX (fixed allocation). ---- */
     log_msg(L"Creating %d GiB VHDX...", size_gb);
@@ -2507,7 +2599,8 @@ int do_ubuntu_to_vhdx(const wchar_t *iso_path_arg,
        cannot boot. ---- */
     if (kernel_ver[0] == 0) {
         log_msg(L"no /boot/vmlinuz-* in %s (layered ISO) - staging the kernel from the live layer", sqfs_path);
-        if (stage_kernel_from_live_layer(iso_drive, ew, kernel_ver, sizeof(kernel_ver)) != 0) {
+        if (stage_kernel_from_live_layer(iso_drive, ew, flavor_server,
+                                         kernel_ver, sizeof(kernel_ver)) != 0) {
             log_err(L"no kernel (/boot/vmlinuz-*) found in %s and none could be staged "
                     L"from the ISO's live layer - the disk would not boot. "
                     L"Use an Ubuntu Desktop 26.04 LTS or 24.04 LTS ISO.", sqfs_path);
@@ -2518,6 +2611,29 @@ int do_ubuntu_to_vhdx(const wchar_t *iso_path_arg,
     }
     log_msg(L"kernel: %hs%s", kernel_ver,
             kernel_from_iso ? L" (staged from the ISO live layer)" : L"");
+
+    /* ---- Step 5b': tell first boot which flavor this is. ---- */
+    {
+        static const char desktop_marker[] = "desktop\n", server_marker[] = "server\n";
+        ext4_mkdir_p(ew, "/etc");
+        ext4_writer_add_file(ew, "/etc/appsandbox-flavor", 0644, 0, 0, (uint32_t)time(NULL),
+                             flavor_server ? server_marker : desktop_marker,
+                             flavor_server ? sizeof(server_marker) - 1 : sizeof(desktop_marker) - 1);
+        if (flavor_server) {
+            /* cloud-init is installed (as on any server image) but there is
+               no datasource here: without this it probes EC2/GCE/... for a
+               couple of minutes, tries DHCP on a NAT that has none, and then
+               creates its default "ubuntu" user. Keep it inert; delete the
+               file inside the guest to let it run. */
+            static const char ci[] =
+                "# Written by AppSandbox iso-patch: no cloud datasource in this VM.\n"
+                "# Remove this file to let cloud-init run (e.g. with a NoCloud seed).\n";
+            ext4_mkdir_p(ew, "/etc/cloud");
+            ext4_writer_add_file(ew, "/etc/cloud/cloud-init.disabled", 0644, 0, 0,
+                                 (uint32_t)time(NULL), ci, sizeof(ci) - 1);
+            log_msg(L"server flavor: cloud-init left installed but disabled (/etc/cloud/cloud-init.disabled)");
+        }
+    }
 
     /* ---- Step 5c: ship the collected extended attributes for first boot. ---- */
     if (g_xattrs.len) {

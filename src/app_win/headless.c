@@ -670,6 +670,7 @@ static int handle_request(PHTTP_REQUEST req)
             if (json_get_bool(body, L"testMode", &bv)) cfg.test_mode = bv;
             if (json_get_bool(body, L"sshEnabled", &bv)) cfg.ssh_enabled = bv;
             if (json_get_bool(body, L"sshDeployKey", &bv)) cfg.ssh_deploy_key = bv;
+            if (json_get_bool(body, L"gaKernel", &bv)) cfg.linux_ga_kernel = bv;
             if (json_get_bool(body, L"isTemplate", &bv)) cfg.is_template = bv;
             if (cfg.ssh_deploy_key && !cfg.ssh_enabled) {
                 send_err(req->RequestId, 400, "Bad Request", "invalid_arg",

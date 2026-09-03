@@ -47,6 +47,7 @@ typedef struct {
     BOOL    test_mode;               /* TRUE = disable Secure Boot (for test-signed drivers) */
     BOOL    ssh_enabled;             /* TRUE = install OpenSSH Server in guest */
     BOOL    ssh_deploy_key;          /* TRUE = deploy the AppSandbox public key (needs ssh_enabled) */
+    BOOL    linux_ga_kernel;         /* Linux: install + boot the GA kernel (linux-generic) */
 } VmConfig;
 
 /* Runtime state of a VM */

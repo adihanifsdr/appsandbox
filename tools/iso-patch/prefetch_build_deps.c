@@ -828,7 +828,8 @@ static DWORD WINAPI dl_worker(LPVOID arg)
 static int prefetch_build_deps_inner(const wchar_t *codename,
                                      const wchar_t *kernel_ver,
                                      const wchar_t *out_dir,
-                                     const wchar_t *mirror_arg)
+                                     const wchar_t *mirror_arg,
+                                     int ga_kernel)
 {
     static const wchar_t *const default_mirror = L"http://archive.ubuntu.com/ubuntu";
     const wchar_t *mirror = mirror_arg ? mirror_arg : default_mirror;
@@ -950,6 +951,21 @@ static int prefetch_build_deps_inner(const wchar_t *codename,
         if (!r) { log_msg(L"prefetch: WARN seed '%hs' not in archive", seeds[i]); continue; }
         if (!r->in_closure) { r->in_closure = 1; closure_count++; }
     }
+    /* "GA kernel" option: the whole GA kernel (image + modules + extra +
+       headers via the linux-generic / linux-headers-generic metapackages).
+       The desktop ISO pool only has an inconsistent subset (24.04.4:
+       image 6.8.0-31 but headers 6.8.0-100), so it has to come from the
+       archive; -updates gives the current GA build, i.e. what an
+       up-to-date server / VPS runs. */
+    if (ga_kernel) {
+        static const char *ga_seeds[] = { "linux-generic", "linux-headers-generic" };
+        for (size_t i = 0; i < sizeof(ga_seeds) / sizeof(ga_seeds[0]); i++) {
+            pkg_record_t *r = lookup_pkg(&T, ga_seeds[i], strlen(ga_seeds[i]));
+            if (!r) { log_msg(L"prefetch: WARN GA seed '%hs' not in archive", ga_seeds[i]); continue; }
+            if (!r->in_closure) { r->in_closure = 1; closure_count++; }
+        }
+        log_msg(L"prefetch: GA kernel requested (linux-generic + linux-headers-generic)");
+    }
     /* Also linux-headers-<kver>. */
     {
         char hdr[128];
@@ -1044,9 +1060,10 @@ static int prefetch_build_deps_inner(const wchar_t *codename,
 int do_prefetch_build_deps(const wchar_t *codename,
                            const wchar_t *kernel_ver,
                            const wchar_t *out_dir,
-                           const wchar_t *mirror_arg)
+                           const wchar_t *mirror_arg,
+                           int ga_kernel)
 {
-    int rc = prefetch_build_deps_inner(codename, kernel_ver, out_dir, mirror_arg);
+    int rc = prefetch_build_deps_inner(codename, kernel_ver, out_dir, mirror_arg, ga_kernel);
     if (rc != 0) {
         /* A partial staging dir is worse than none: the raw Packages index
            downloaded in step 1 lists the release-pocket versions with

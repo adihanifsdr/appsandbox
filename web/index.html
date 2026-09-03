@@ -161,6 +161,7 @@
                 <label class="needs-windows" title="Disable Secure Boot and enable test-signing (required to load the test-signed guest drivers)"><input type="checkbox" id="test-mode"> Test Mode</label>
                 <label title="Exposes the VM's sshd on a host-loopback port, tunnelled over vsock"><input type="checkbox" id="ssh-enabled" onchange="onSshToggle()"> SSH Server</label>
                 <label title="Deploy the AppSandbox SSH public key so you can connect with key auth (requires SSH Server)"><input type="checkbox" id="ssh-deploy-key" disabled> Deploy SSH key</label>
+                <label class="needs-linux" title="Install the GA kernel (linux-generic, e.g. 6.8 on 24.04) from the Ubuntu archive at first boot and boot it instead of the ISO's HWE kernel - what a stock server / VPS runs. Needs internet during create."><input type="checkbox" id="ga-kernel"> GA kernel</label>
             </div>
         </div>
         <div class="modal-buttons">

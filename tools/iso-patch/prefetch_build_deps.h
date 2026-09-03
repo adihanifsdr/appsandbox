@@ -32,9 +32,13 @@
  *
  * Returns 0 on success; non-zero on any failure. Logs to stdout
  * (caller is iso-patch wmain, prints to console). */
+/* ga_kernel: also pull linux-generic + linux-headers-generic (the GA
+ * kernel image/modules/headers) into the closure, for the "GA kernel"
+ * create option. */
 int do_prefetch_build_deps(const wchar_t *codename,
                            const wchar_t *kernel_ver,
                            const wchar_t *out_dir,
-                           const wchar_t *mirror);
+                           const wchar_t *mirror,
+                           int ga_kernel);
 
 #endif /* PREFETCH_BUILD_DEPS_H */
