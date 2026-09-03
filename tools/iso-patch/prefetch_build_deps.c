@@ -745,6 +745,83 @@ static int write_closure_json(pkg_table_t *t,
 }
 
 /* ====================================================================
+ * Parallel .deb download
+ * ==================================================================== */
+
+#define DL_WORKERS 6
+
+typedef struct {
+    const wchar_t  *mirror;
+    const wchar_t  *staging;
+    pkg_record_t  **list;       /* closure records with a Filename: */
+    size_t          count;
+    volatile LONG   next;       /* next index to claim */
+    volatile LONG   downloaded;
+    volatile LONG   failed;     /* first failure stops the others */
+} dl_job_t;
+
+/* Download + verify one record. Returns 0 on success. */
+static int dl_one(const dl_job_t *job, pkg_record_t *r)
+{
+    char fn_utf8[1024], sha_utf8[128];
+    if (r->filename_len >= sizeof(fn_utf8)) {
+        log_err(L"prefetch: Filename too long (%zu) for %.*hs",
+                r->filename_len, (int)r->name_len, r->name);
+        return -1;
+    }
+    memcpy(fn_utf8, r->filename, r->filename_len);  fn_utf8[r->filename_len] = 0;
+    if (r->sha256_hex && r->sha256_len < sizeof(sha_utf8)) {
+        memcpy(sha_utf8, r->sha256_hex, r->sha256_len); sha_utf8[r->sha256_len] = 0;
+    } else { sha_utf8[0] = 0; }
+
+    wchar_t fn_wide[1024];
+    MultiByteToWideChar(CP_UTF8, 0, fn_utf8, -1, fn_wide, ARRAYSIZE(fn_wide));
+    const wchar_t *basename = wcsrchr(fn_wide, L'/');
+    basename = basename ? basename + 1 : fn_wide;
+
+    wchar_t url2[2048], dst[MAX_PATH];
+    swprintf_s(url2, 2048, L"%s/%s", job->mirror, fn_wide);
+    swprintf_s(dst, MAX_PATH, L"%s\\%s", job->staging, basename);
+
+    if (http_download(url2, dst) != 0) {
+        log_err(L"prefetch: download %ls failed", basename);
+        return -1;
+    }
+    if (sha_utf8[0]) {
+        char actual[65];
+        if (sha256_file(dst, actual) != 0) {
+            log_err(L"prefetch: SHA256 hash compute failed for %ls", basename);
+            return -1;
+        }
+        if (_stricmp(actual, sha_utf8) != 0) {
+            log_err(L"prefetch: SHA256 mismatch for %ls (got %hs, want %hs)",
+                    basename, actual, sha_utf8);
+            return -1;
+        }
+    }
+    /* Logged after the fact so the "GET <name>" line count equals files
+       done - the app derives its progress bar from it. */
+    log_msg(L"prefetch: GET %s", basename);
+    return 0;
+}
+
+static DWORD WINAPI dl_worker(LPVOID arg)
+{
+    dl_job_t *job = (dl_job_t *)arg;
+    for (;;) {
+        if (job->failed) break;
+        LONG idx = InterlockedIncrement(&job->next) - 1;
+        if ((size_t)idx >= job->count) break;
+        if (dl_one(job, job->list[idx]) != 0) {
+            InterlockedExchange(&job->failed, 1);
+            break;
+        }
+        InterlockedIncrement(&job->downloaded);
+    }
+    return 0;
+}
+
+/* ====================================================================
  * Main entry point
  * ==================================================================== */
 
@@ -753,8 +830,8 @@ static int prefetch_build_deps_inner(const wchar_t *codename,
                                      const wchar_t *out_dir,
                                      const wchar_t *mirror_arg)
 {
-    const wchar_t *mirror = mirror_arg ? mirror_arg
-                                       : L"http://archive.ubuntu.com/ubuntu";
+    static const wchar_t *const default_mirror = L"http://archive.ubuntu.com/ubuntu";
+    const wchar_t *mirror = mirror_arg ? mirror_arg : default_mirror;
 
     log_msg(L"prefetch: codename=%s kver=%s mirror=%s out=%s",
             codename, kernel_ver, mirror, out_dir);
@@ -773,9 +850,22 @@ static int prefetch_build_deps_inner(const wchar_t *codename,
     swprintf_s(url, 1024, L"%s/dists/%s/main/binary-" IP_DEB_ARCH L"/Packages.xz",
                mirror, codename);
     log_msg(L"prefetch: GET %s", url);
-    if (http_download(url, pkgs_xz) != 0) {
-        log_err(L"prefetch: download Packages.xz failed");
-        return -1;
+    if (http_download_retry(url, pkgs_xz, mirror != default_mirror) != 0) {
+        /* A country mirror (id.archive.ubuntu.com, ...) that is down or
+           lacks the release is not fatal: fall back to the main archive
+           for everything. */
+        if (mirror != default_mirror) {
+            log_msg(L"prefetch: WARN mirror %s unusable - falling back to %s",
+                    mirror, default_mirror);
+            mirror = default_mirror;
+            swprintf_s(url, 1024, L"%s/dists/%s/main/binary-" IP_DEB_ARCH L"/Packages.xz",
+                       mirror, codename);
+            log_msg(L"prefetch: GET %s", url);
+        }
+        if (mirror != default_mirror || http_download(url, pkgs_xz) != 0) {
+            log_err(L"prefetch: download Packages.xz failed");
+            return -1;
+        }
     }
 
     /* ---- 2. In-process xz decompression via vendored xz-embedded ---- */
@@ -884,54 +974,42 @@ static int prefetch_build_deps_inner(const wchar_t *codename,
     }
     log_msg(L"prefetch: closure = %d packages", total_added);
 
-    /* ---- 6. Download each .deb in closure, SHA256 verify ---- */
-    int downloaded = 0;
-    for (size_t i = 0; i < T.n_records; i++) {
-        pkg_record_t *r = &T.records[i];
-        if (!r->in_closure) continue;
-        if (!r->filename) { log_msg(L"prefetch: WARN %.*hs has no Filename", (int)r->name_len, r->name); continue; }
-
-        /* Compose URL + local path. */
-        char fn_utf8[1024], sha_utf8[128];
-        if (r->filename_len >= sizeof(fn_utf8)) {
-            log_err(L"prefetch: Filename too long (%zu) for %.*hs",
-                    r->filename_len, (int)r->name_len, r->name);
-            return -1;
+    /* ---- 6. Download each .deb in closure, SHA256 verify.
+       ~180 files; done on DL_WORKERS connections at once. The archive
+       (and most mirrors) cap per-connection throughput well below what
+       the link can do, so this is where the wall-clock goes. ---- */
+    {
+        dl_job_t job = { 0 };
+        job.mirror = mirror;
+        job.staging = staging;
+        job.list = (pkg_record_t **)calloc(T.n_records, sizeof(pkg_record_t *));
+        if (!job.list) return -1;
+        for (size_t i = 0; i < T.n_records; i++) {
+            pkg_record_t *r = &T.records[i];
+            if (!r->in_closure) continue;
+            if (!r->filename) { log_msg(L"prefetch: WARN %.*hs has no Filename", (int)r->name_len, r->name); continue; }
+            job.list[job.count++] = r;
         }
-        memcpy(fn_utf8, r->filename, r->filename_len);  fn_utf8[r->filename_len] = 0;
-        if (r->sha256_hex && r->sha256_len < sizeof(sha_utf8)) {
-            memcpy(sha_utf8, r->sha256_hex, r->sha256_len); sha_utf8[r->sha256_len] = 0;
-        } else { sha_utf8[0] = 0; }
-
-        wchar_t fn_wide[1024];
-        MultiByteToWideChar(CP_UTF8, 0, fn_utf8, -1, fn_wide, ARRAYSIZE(fn_wide));
-        const wchar_t *basename = wcsrchr(fn_wide, L'/');
-        basename = basename ? basename + 1 : fn_wide;
-
-        wchar_t url2[2048], dst[MAX_PATH];
-        swprintf_s(url2, 2048, L"%s/%s", mirror, fn_wide);
-        swprintf_s(dst, MAX_PATH, L"%s\\%s", staging, basename);
-
-        log_msg(L"prefetch: GET %s", basename);
-        if (http_download(url2, dst) != 0) {
-            log_err(L"prefetch: download %ls failed", basename);
-            return -1;
+        int nthreads = (int)job.count < DL_WORKERS ? (int)job.count : DL_WORKERS;
+        HANDLE th[DL_WORKERS];
+        int started = 0;
+        for (int t = 0; t < nthreads; t++) {
+            th[t] = CreateThread(NULL, 0, dl_worker, &job, 0, NULL);
+            if (th[t]) started++;
         }
-        if (sha_utf8[0]) {
-            char actual[65];
-            if (sha256_file(dst, actual) != 0) {
-                log_err(L"prefetch: SHA256 hash compute failed for %ls", basename);
-                return -1;
-            }
-            if (_stricmp(actual, sha_utf8) != 0) {
-                log_err(L"prefetch: SHA256 mismatch for %ls (got %hs, want %hs)",
-                        basename, actual, sha_utf8);
-                return -1;
-            }
+        if (started == 0) {
+            /* Thread creation failed outright: do it inline instead. */
+            dl_worker(&job);
         }
-        downloaded++;
+        for (int t = 0; t < started; t++) {
+            WaitForSingleObject(th[t], INFINITE);
+            CloseHandle(th[t]);
+        }
+        free(job.list);
+        if (job.failed) return -1;
+        log_msg(L"prefetch: downloaded %ld .debs (%d connection(s))",
+                (long)job.downloaded, started ? started : 1);
     }
-    log_msg(L"prefetch: downloaded %d .debs", downloaded);
 
     /* ---- 7. Write synthetic Packages + .closure.json ---- */
     {

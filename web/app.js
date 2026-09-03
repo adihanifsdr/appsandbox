@@ -649,7 +649,12 @@ function updateStatusCell(td, vm) {
 
     if (vm.buildingVhdx) {
         needsSpinner = true;
-        label = vm.vhdxStaging ? 'Staging files... ' : 'Building Disk (' + (vm.vhdxProgress || 0) + '%) ';
+        /* vhdxStep names the current phase ("Downloading packages 42/182",
+           "Building rootfs", ...); the prefetch downloads used to sit at
+           "Building Disk (0%)" for minutes and look hung. */
+        if (vm.vhdxStaging)      label = 'Staging files... ';
+        else if (vm.vhdxStep)    label = vm.vhdxStep + ' (' + (vm.vhdxProgress || 0) + '%) ';
+        else                     label = 'Building Disk (' + (vm.vhdxProgress || 0) + '%) ';
         className = 'status-building';
     } else if (vm.running && vm.shuttingDown) {
         className = 'status-shutting-down';
