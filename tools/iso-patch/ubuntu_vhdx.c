@@ -582,6 +582,7 @@ typedef struct {
 
     char               kernel_version[64];
     uint64_t           kernel_size;     /* size of the /boot/vmlinuz-* seen */
+    char               modules_version[64];  /* first /usr/lib/modules/<ver>/ seen */
 
     /* Optional include filter: NULL-terminated list of path prefixes. When
        set, the producer only ingests entries whose path starts with one of
@@ -803,6 +804,18 @@ static int producer_cb(const sqfs_entry_t *e, void *user)
         if (sqfs_read_xattrs(p->sq, e->xattr_idx, xattr_collect_cb, &c) != 0)
             log_msg(L"WARN: xattrs of %hs unreadable", e->path);
         else if (c.n) g_xattrs.n_files++;
+    }
+
+    if (p->modules_version[0] == 0 &&
+        strncmp(e->path, "/usr/lib/modules/", 17) == 0 && e->path[17]) {
+        const char *v = e->path + 17;
+        size_t n = 0;
+        while (v[n] && v[n] != '/' && n < sizeof(p->modules_version) - 1) n++;
+        /* "6.8.0-100-generic": digits, dots and a dash; skip stray files */
+        if (n > 4 && strchr(v, '.') && memchr(v, '-', n)) {
+            memcpy(p->modules_version, v, n);
+            p->modules_version[n] = 0;
+        }
     }
 
     if (p->kernel_version[0] == 0) {
@@ -2024,6 +2037,8 @@ static int stage_manifest_into_rootfs(const wchar_t *manifest_path,
  *  caller still owns sq and ew. kernel_ver is only written when a
  *  /boot/vmlinuz-<ver> was seen.
  * ====================================================================== */
+static char g_ingest_modules_version[64];   /* set by the last ingest_squashfs() */
+
 static int ingest_squashfs(sqfs_ctx_t *sq, ext4_writer_t *ew,
                            const char *const *include_prefixes,
                            char *kernel_ver, size_t kernel_ver_cap,
@@ -2118,7 +2133,32 @@ static int ingest_squashfs(sqfs_ctx_t *sq, ext4_writer_t *ew,
         kernel_ver[kernel_ver_cap - 1] = 0;
     }
     if (kernel_size_out) *kernel_size_out = pl.kernel_size;
+    strncpy(g_ingest_modules_version, pl.modules_version, sizeof(g_ingest_modules_version) - 1);
     return 0;
+}
+
+/* Kernel release ("6.8.0-100-generic") from an x86 bzImage's setup header:
+   "HdrS" at 0x202, u16 at 0x20E = offset (less 0x200) of the NUL-terminated
+   "<release> (<builder>) #<n> ..." string. Empty on anything else. */
+static void bzimage_release(const wchar_t *path, char *out, size_t cap)
+{
+    out[0] = 0;
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    unsigned char *hdr = (unsigned char *)malloc(0x10000);
+    DWORD got = 0;
+    if (hdr && ReadFile(h, hdr, 0x10000, &got, NULL) && got > 0x210 &&
+        memcmp(hdr + 0x202, "HdrS", 4) == 0) {
+        unsigned off = ((unsigned)hdr[0x20E] | ((unsigned)hdr[0x20F] << 8));
+        if (off) {
+            off += 0x200;
+            size_t n = 0;
+            while (off + n < got && hdr[off + n] > ' ' && n + 1 < cap) { out[n] = (char)hdr[off + n]; n++; }
+            out[n] = 0;
+        }
+    }
+    free(hdr);
+    CloseHandle(h);
 }
 
 /* Read a whole host file into a malloc'd buffer. Returns NULL on failure. */
@@ -2230,8 +2270,42 @@ static int stage_kernel_from_live_layer(wchar_t iso_drive, ext4_writer_t *ew,
     int rc = ingest_squashfs(sq, ew, prefixes, kernel_ver, kernel_ver_cap, &kernel_size);
     sqfs_close(sq);
     if (rc != 0) return -1;
+    if (kernel_ver[0] == 0 && g_ingest_modules_version[0]) {
+        /* Server ISO: the installer layer carries /usr/lib/modules/<ver> but
+           the kernel image only exists as casper/vmlinuz (the live-boot
+           kernel). Check the bzImage's own release string against the
+           modules directory, then stage it as /boot/vmlinuz-<ver>. */
+        wchar_t p[MAX_PATH];
+        char rel[64];
+        swprintf(p, MAX_PATH, L"%c:\\casper\\%s", iso_drive, ll->vmlinuz);
+        bzimage_release(p, rel, sizeof(rel));
+        if (rel[0] == 0) {
+            log_msg(L"layered ISO: casper/%s is not a bzImage - cannot pair it with modules %hs",
+                    ll->vmlinuz, g_ingest_modules_version);
+            return -1;
+        }
+        if (strcmp(rel, g_ingest_modules_version) != 0) {
+            log_msg(L"layered ISO: casper/%s is %hs but the layer's modules are %hs - refusing to mix",
+                    ll->vmlinuz, rel, g_ingest_modules_version);
+            return -1;
+        }
+        uint64_t vsz = 0;
+        void *vml = u_read_whole_file(p, &vsz);
+        if (!vml) { log_msg(L"layered ISO: cannot read %s", p); return -1; }
+        char dst[128];
+        snprintf(dst, sizeof(dst), "/boot/vmlinuz-%s", rel);
+        ext4_mkdir_p(ew, "/boot");
+        int arc = ext4_writer_add_file(ew, dst, 0600, 0, 0, (uint32_t)time(NULL), vml, vsz);
+        free(vml);
+        if (arc != 0) { log_msg(L"layered ISO: staging %hs failed", dst); return -1; }
+        strncpy(kernel_ver, rel, kernel_ver_cap - 1);
+        kernel_ver[kernel_ver_cap - 1] = 0;
+        kernel_size = vsz;
+        log_msg(L"layered ISO: casper/%s (%hs) staged as %hs; modules from casper/%s",
+                ll->vmlinuz, rel, dst, layer);
+    }
     if (kernel_ver[0] == 0) {
-        log_msg(L"layered ISO: casper/%s has no /boot/vmlinuz-* either", layer);
+        log_msg(L"layered ISO: casper/%s has no /boot/vmlinuz-* or /usr/lib/modules either", layer);
         return -1;
     }
 
