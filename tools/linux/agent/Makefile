@@ -52,8 +52,14 @@ install: $(BINS)
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 0755 $(BINS) $(DESTDIR)$(BINDIR)/
 	install -d $(DESTDIR)$(SYSTEMDDIR)
+	# The unit files live next to this Makefile in the repo, but the
+	# AppSandbox first-boot flow stages agent-src/ (sources + Makefile) and
+	# systemd/ as two separate trees and installs the units itself in a
+	# later step, so here they may simply not exist. Skip, don't fail:
+	# the binaries above are what this target is for in that flow.
 	for u in $(SYSTEM_UNITS); do \
-	    install -m 0644 $$u $(DESTDIR)$(SYSTEMDDIR)/; \
+	    if [ -f $$u ]; then install -m 0644 $$u $(DESTDIR)$(SYSTEMDDIR)/; \
+	    else echo "install: $$u not present here, skipped"; fi; \
 	done
 	@if [ -n "$(USER_UNITS)" ]; then \
 	    install -d $(DESTDIR)$(USERUNITDIR); \
