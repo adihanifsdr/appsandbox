@@ -21,6 +21,58 @@ Profile format (either shape):
 ]
 ```
 
+## Example: a bare-metal desktop profile
+
+What a self-built ASUS/AMI desktop really reports (ASUS boards ship the
+literal "System Product Name" / "Default string" values). The guest overlay
+takes the DMI keys and `systemd-detect-virt`; the replica takes those plus
+the ACPI / SMBIOS / drive / USB / CPUID keys once it runs the
+identity-patched QEMU. `chipset` is left out on purpose: the only overlay
+available is the 440FX/QEMU list, and the replica's PCI devices (virtio,
+Cirrus) stay visible either way.
+
+```json
+[
+  {"check": "sys_vendor",          "name": "ASUS"},
+  {"check": "product_name",        "name": "System Product Name"},
+  {"check": "product_version",     "name": "System Version"},
+  {"check": "product_serial",      "name": "System Serial Number"},
+  {"check": "product_family",      "name": "To be filled by O.E.M."},
+  {"check": "bios_vendor",         "name": "American Megatrends Inc."},
+  {"check": "bios_version",        "name": "2604"},
+  {"check": "bios_date",           "name": "01/15/2024"},
+  {"check": "board_vendor",        "name": "ASUSTeK COMPUTER INC."},
+  {"check": "board_name",          "name": "ROG STRIX Z690-F GAMING WIFI"},
+  {"check": "board_version",       "name": "Rev 1.xx"},
+  {"check": "board_serial",        "name": "230712345678901"},
+  {"check": "chassis_vendor",      "name": "Default string"},
+  {"check": "chassis_type",        "name": "3"},
+  {"check": "chassis_version",     "name": "Default string"},
+  {"check": "chassis_serial",      "name": "Default string"},
+  {"check": "systemd-detect-virt", "name": "none"},
+  {"check": "acpi_oem_id",         "name": "ALASKA"},
+  {"check": "acpi_oem_table_id",   "name": "A M I"},
+  {"check": "acpi_creator_id",     "name": "AMI"},
+  {"check": "smbios_manufacturer", "name": "Intel(R) Corporation"},
+  {"check": "drive_vendor",        "name": "HL-DT-ST"},
+  {"check": "cdrom_model",         "name": "DVDRAM GH24NSD1"},
+  {"check": "disk_model",          "name": "Samsung SSD 870 EVO 1TB"},
+  {"check": "usb_vendor",          "name": "Logitech"},
+  {"check": "CPUID 0x40000000",    "name": "GenuineIntel"},
+  {"check": "hypervisor CPU flag", "name": "not set"},
+  {"check": "smbios_vm_bit",       "name": "not set"}
+]
+```
+
+`systemd-detect-virt` set to `none` also makes the wrapper exit 1 (and
+`-q` exit 1), the way the real tool answers on bare metal, and `chassis_type`
+3 makes `hostnamectl` say "Chassis: desktop" instead of "vm". In the replica
+the `GenuineIntel` signature matches no hypervisor and `smbios_vm_bit`
+clears the SMBIOS "Virtual Machine" flag, so together with the hidden
+hypervisor bit the real `systemd-detect-virt` answers `none` even as root
+and a guest kernel treats the machine as bare metal (and stops using
+kvm-clock).
+
 ## What the overlay changes inside the guest
 
 | check | how |
@@ -51,6 +103,7 @@ the identity-patched QEMU (`sudo appsandbox-replica qemu build`, see
 |---|---|---|
 | `acpi_oem_id`, `acpi_oem_table_id`, `acpi_creator_id` | `BOCHS`, `BXPC`, `BXPC` | ACPI table header IDs |
 | `smbios_manufacturer` | `QEMU` | manufacturer of the SMBIOS entries `<sysinfo>` leaves alone (processor, DIMMs) |
+| `smbios_vm_bit` | `set` | `not set` clears the SMBIOS type 0 "Virtual Machine" flag (implied by `hypervisor CPU flag: not set`) |
 | `drive_vendor`, `disk_model`, `cdrom_model` | `QEMU`, `QEMU HARDDISK`, `QEMU DVD-ROM` | IDE / ATAPI / SCSI INQUIRY strings |
 | `usb_vendor` | `QEMU` | USB HID / tablet string descriptors |
 | `CPUID 0x40000000` | `KVMKVMKVM` | hypervisor CPUID signature (a non-KVM value also drops kvm-clock) |

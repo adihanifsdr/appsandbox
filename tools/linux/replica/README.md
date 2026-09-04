@@ -15,6 +15,7 @@ faked here: it is a KVM guest, so every hypervisor-level check matches too.
 | clocksource | `kvm-clock` |
 | acpi_oem_id / acpi_oem_table_id / acpi_creator_id | `BOCHS` / `BXPC` / `BXPC`; the profile values with the identity-patched QEMU |
 | smbios_manufacturer (processor / DIMM manufacturer) | `QEMU`; the profile value with the identity-patched QEMU |
+| smbios_vm_bit (SMBIOS "Virtual Machine" flag) | set; `not set` (or a hidden hypervisor flag) clears it with the identity-patched QEMU |
 | drive_vendor / disk_model / cdrom_model | `QEMU` / `QEMU HARDDISK` / `QEMU DVD-ROM`; the profile values with the identity-patched QEMU |
 | usb_vendor | `QEMU` (usb-tablet & co.); the profile value with the identity-patched QEMU |
 

@@ -428,8 +428,8 @@ button / `POST /vms/{name}/vnc` tunnel to.
 
 The same profile also carries the strings only the emulator decides:
 `acpi_oem_id`, `acpi_oem_table_id`, `acpi_creator_id`, `smbios_manufacturer`,
-`drive_vendor`, `disk_model`, `cdrom_model`, `usb_vendor`, `CPUID 0x40000000`
-and `hypervisor CPU flag` (`"not set"`). The replica passes them to QEMU as
+`drive_vendor`, `disk_model`, `cdrom_model`, `usb_vendor`, `smbios_vm_bit`,
+`CPUID 0x40000000` and `hypervisor CPU flag` (`"not set"`). The replica passes them to QEMU as
 `QEMU_IDENTITY_*` environment variables; they take effect once the guest has
 built the identity-patched QEMU (`sudo appsandbox-replica qemu build`, see
 `tools/linux/replica/qemu-identity/README.md`). Every `vmIdentity` change is

@@ -10,7 +10,8 @@ strings and the CPUID `0x40000000` signature (`KVMKVMKVM`).
 
 [kila58/qemu-patched](https://github.com/kila58/qemu-patched) is QEMU 8.1.3
 with exactly those strings replaced by `TOSH…` constants. `patches/` is the
-same set of changes in a parameterised form: each string consults a
+same set of changes (plus the SMBIOS "Virtual Machine" bit, which it
+missed) in a parameterised form: each string consults a
 `QEMU_IDENTITY_<KEY>` environment variable and falls back to the upstream
 value, so one build serves every VM identity profile and behaves like stock
 QEMU when nothing is set.
@@ -26,6 +27,7 @@ QEMU when nothing is set.
 | `cdrom_model` | `QEMU_IDENTITY_CD_MODEL` | `QEMU DVD-ROM` / `QEMU CD-ROM` | IDE / SCSI CD-ROMs, `/sys/block/sr0/device/model` |
 | `usb_vendor` | `QEMU_IDENTITY_USB_VENDOR` | `QEMU` | usb-tablet / mouse / kbd / wacom string descriptors (`lsusb`) |
 | `CPUID 0x40000000` | `QEMU_IDENTITY_KVM_SIGNATURE` | `KVMKVMKVM` | the hypervisor CPUID leaf (`cpuid`, `/dev/cpu/*/cpuid`) |
+| `smbios_vm_bit` | `QEMU_IDENTITY_SMBIOS_VM_BIT` (`0`) | set | SMBIOS type 0 "Virtual Machine" characteristic: what `systemd-detect-virt` reports as `vm-other` (root) when every string says otherwise |
 
 `hypervisor CPU flag: "not set"` needs no patch: the replica hides the CPUID
 hypervisor bit with libvirt's `<feature policy='disable' name='hypervisor'/>`.
@@ -52,6 +54,7 @@ Written against QEMU 8.2.2 (what Ubuntu 24.04 ships); they also apply to
 | 0004 ide/scsi | `hw/ide/core.c`, `hw/ide/atapi.c`, `hw/scsi/scsi-disk.c` | drive vendor / disk model / CD-ROM model |
 | 0005 usb | `hw/usb/dev-hid.c`, `hw/usb/dev-wacom.c` | HID and Wacom manufacturer / product strings |
 | 0006 i386/kvm | `target/i386/kvm/kvm.c` | CPUID 0x40000000 signature |
+| 0007 smbios | `hw/smbios/smbios.c` | the type 0 "Virtual Machine" characteristic bit |
 
 Explicit device properties (`model=`, `vendor=`, `product=`, `-smbios`,
 `-machine x-oem-id=`) still win over the environment. Not carried over from

@@ -22,8 +22,8 @@
 #
 # Hypervisor-level identity: the profile keys acpi_oem_id, acpi_oem_table_id,
 # acpi_creator_id, smbios_manufacturer, drive_vendor, disk_model, cdrom_model,
-# usb_vendor and "CPUID 0x40000000" are handed to the emulator as
-# QEMU_IDENTITY_* environment variables (libvirt <qemu:env>). The stock QEMU
+# usb_vendor, smbios_vm_bit and "CPUID 0x40000000" are handed to the emulator
+# as QEMU_IDENTITY_* environment variables (libvirt <qemu:env>). The stock QEMU
 # ignores them; `appsandbox-replica qemu build` builds QEMU 8.2.2 with the
 # patches in /opt/appsandbox/qemu-identity (the parameterised form of
 # github.com/kila58/qemu-patched) and installs it over the distro binary with
@@ -47,7 +47,7 @@ QEMU_SRC=${REPLICA_QEMU_SRC:-/opt/appsandbox/qemu-identity}   # patches + build.
 QEMU_BIN=/usr/bin/qemu-system-x86_64
 QEMU_DISTRIB=/usr/bin/qemu-system-x86_64.distrib
 QEMU_STAMP=/opt/appsandbox/qemu-identity.installed
-HV_KEYS='acpi_oem_id|acpi_oem_table_id|acpi_creator_id|smbios_manufacturer|drive_vendor|disk_model|cdrom_model|usb_vendor|CPUID 0x40000000'
+HV_KEYS='acpi_oem_id|acpi_oem_table_id|acpi_creator_id|smbios_manufacturer|smbios_vm_bit|drive_vendor|disk_model|cdrom_model|usb_vendor|CPUID 0x40000000'
 
 die() { echo "appsandbox-replica: $*" >&2; exit 1; }
 need_root() { [ "$(id -u)" = 0 ] || die "run as root (sudo)"; }
@@ -91,44 +91,65 @@ if os.path.exists(prof_path):
     except Exception:
         pass
 def g(k, default): return html.escape(prof.get(k) or default)
+def opt(name, key):
+    # optional <entry> from a profile key (omitted when the profile has no value)
+    return ("      <entry name='%s'>%s</entry>\n" % (name, html.escape(prof[key]))) if prof.get(key) else ""
 # hypervisor-level keys -> QEMU_IDENTITY_* in the emulator's environment
 # (honoured by the identity-patched QEMU, ignored by the stock one)
 ENV_KEYS = [("acpi_oem_id", "ACPI_OEM_ID"), ("acpi_oem_table_id", "ACPI_OEM_TABLE_ID"),
             ("acpi_creator_id", "ACPI_CREATOR_ID"), ("smbios_manufacturer", "SMBIOS_MANUFACTURER"),
             ("drive_vendor", "DRIVE_VENDOR"), ("disk_model", "HD_MODEL"), ("cdrom_model", "CD_MODEL"),
             ("usb_vendor", "USB_VENDOR"), ("CPUID 0x40000000", "KVM_SIGNATURE")]
+OFF = ("not set", "unset", "off", "hidden", "no", "false", "0")
 env = "".join("    <qemu:env name='QEMU_IDENTITY_%s' value='%s'/>\n" % (v, html.escape(prof[k], quote=True))
               for k, v in ENV_KEYS if prof.get(k))
-cmdline = "  <qemu:commandline>\n%s  </qemu:commandline>\n" % env if env else ""
 # "hypervisor CPU flag": "not set" -> hide the CPUID hypervisor bit (stock QEMU can)
+hv_off = prof.get("hypervisor CPU flag", "").lower() in OFF
+# smbios_vm_bit: the SMBIOS type 0 "Virtual Machine" characteristic (what
+# systemd-detect-virt reads as root); off explicitly, or implied by a hidden
+# hypervisor bit unless the profile says otherwise
+vm_bit = prof.get("smbios_vm_bit", "").lower()
+if vm_bit in OFF or (hv_off and not vm_bit):
+    env += "    <qemu:env name='QEMU_IDENTITY_SMBIOS_VM_BIT' value='0'/>\n"
+cmdline = "  <qemu:commandline>\n%s  </qemu:commandline>\n" % env if env else ""
 cpu = "  <cpu mode='host-passthrough' check='none'/>"
-if prof.get("hypervisor CPU flag", "").lower() in ("not set", "unset", "off", "hidden", "no", "0"):
+if hv_off:
     cpu = "  <cpu mode='host-passthrough' check='none'>\n    <feature policy='disable' name='hypervisor'/>\n  </cpu>"
+# bios_vendor is either "vendor" (with a separate bios_version key) or the
+# combined "vendor version" form the checks print ("SeaBIOS 1.16.3-debian")
 bios = prof.get("bios_vendor") or "SeaBIOS 1.16.3-debian"
-bios_vendor, _, bios_version = bios.partition(" ")
+if prof.get("bios_version"):
+    bios_vendor, bios_version = bios, prof["bios_version"]
+else:
+    bios_vendor, _, bios_version = bios.partition(" ")
+board = "".join(opt(n, k) for n, k in (("manufacturer", "board_vendor"), ("product", "board_name"),
+                                        ("version", "board_version"), ("serial", "board_serial"),
+                                        ("asset", "board_asset_tag")))
 sysinfo = ""
 if mode == "sysinfo":
     sysinfo = """  <sysinfo type='smbios'>
     <bios>
       <entry name='vendor'>%s</entry>
       <entry name='version'>%s</entry>
-    </bios>
+%s    </bios>
     <system>
       <entry name='manufacturer'>%s</entry>
       <entry name='product'>%s</entry>
       <entry name='version'>%s</entry>
       <entry name='serial'>%s</entry>
       <entry name='uuid'>%s</entry>
-      <entry name='family'>Virtual Machine</entry>
+      <entry name='family'>%s</entry>
     </system>
-    <chassis>
+%s    <chassis>
       <entry name='manufacturer'>%s</entry>
-    </chassis>
+%s    </chassis>
   </sysinfo>
-""" % (html.escape(bios_vendor), html.escape(bios_version or "1.16.3-debian"),
+""" % (html.escape(bios_vendor), html.escape(bios_version or "1.16.3-debian"), opt("date", "bios_date"),
        g("sys_vendor", "OpenStack Foundation"), g("product_name", "OpenStack Nova"),
-       g("product_version", "2024.1"), g("product_serial", uuid), uuid,
-       g("chassis_vendor", "QEMU"))
+       g("product_version", "2024.1"), g("product_serial", uuid), uuid, g("product_family", "Virtual Machine"),
+       ("    <baseBoard>\n%s    </baseBoard>\n" % board) if board else "",
+       g("chassis_vendor", "QEMU"),
+       opt("version", "chassis_version") + opt("serial", "chassis_serial") + opt("asset", "chassis_asset_tag"))
 print("""<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
   <name>%s</name>
   <uuid>%s</uuid>
@@ -399,6 +420,8 @@ out.append({"check": "acpi_oem_id", "name": field(dsdt, 10, 16)})
 out.append({"check": "acpi_oem_table_id", "name": field(dsdt, 16, 24)})
 out.append({"check": "acpi_creator_id", "name": field(dsdt, 28, 32)})
 out.append({"check": "smbios_manufacturer", "name": smbios_str("4-0", 7)})
+t0 = raw("/sys/firmware/dmi/entries/0-0/raw")
+out.append({"check": "smbios_vm_bit", "name": ("set" if t0[0x13] & 0x10 else "not set") if len(t0) > 0x13 else "?"})
 cd = [d for d in sorted(os.listdir("/sys/block")) if d.startswith("sr")]
 out.append({"check": "drive_vendor", "name": cat("/sys/block/%s/device/vendor" % cd[0]) if cd else "?"})
 out.append({"check": "cdrom_model", "name": cat("/sys/block/%s/device/model" % cd[0]) if cd else "?"})

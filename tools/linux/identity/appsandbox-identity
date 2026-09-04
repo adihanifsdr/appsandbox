@@ -24,13 +24,16 @@ What can be overlaid inside the guest:
     (honours -q / -c / --list / --help by deferring to the real binary).
   * chipset: when the value names 440FX/PIIX3, lspci with no arguments is
     diverted to print the classic QEMU/OpenStack PCI list.
+  * chassis_type also sets systemd's chassis (hostnamectl set-chassis, i.e.
+    /etc/machine-info), so hostnamectl stops reporting "Chassis: vm".
 
 What cannot (hypervisor-level, reported as "not overlayable"): the CPUID
 hypervisor leaf (0x40000000), the hypervisor CPU flag, and the kernel
 clocksource. Those need the nested-KVM replica instead.
 
 Replica-only keys (acpi_oem_id, acpi_oem_table_id, acpi_creator_id,
-smbios_manufacturer, drive_vendor, disk_model, cdrom_model, usb_vendor) are
+smbios_manufacturer, smbios_vm_bit, drive_vendor, disk_model, cdrom_model,
+usb_vendor) are
 what the emulator itself reports; they are left to appsandbox-replica,
 which hands them to its identity-patched QEMU, and skipped here.
 
@@ -62,7 +65,15 @@ NOT_OVERLAYABLE = {
 # what the emulator reports: honoured by appsandbox-replica (identity-patched QEMU)
 REPLICA_KEYS = {
     "acpi_oem_id", "acpi_oem_table_id", "acpi_creator_id", "smbios_manufacturer",
-    "drive_vendor", "disk_model", "cdrom_model", "usb_vendor",
+    "smbios_vm_bit", "drive_vendor", "disk_model", "cdrom_model", "usb_vendor",
+}
+# SMBIOS chassis type -> systemd chassis name (hostnamectl set-chassis)
+CHASSIS_NAMES = {
+    "3": "desktop", "4": "desktop", "6": "desktop", "7": "desktop", "13": "desktop",
+    "15": "desktop", "16": "desktop", "35": "desktop", "36": "desktop",
+    "8": "laptop", "9": "laptop", "10": "laptop", "14": "laptop", "31": "convertible",
+    "32": "convertible", "11": "handset", "30": "tablet", "17": "server", "23": "server",
+    "28": "server", "5": "server", "1": "", "2": "",
 }
 # "chipset" -> lspci wrapper; "systemd-detect-virt" -> wrapper
 
@@ -81,14 +92,16 @@ DETECT_VIRT_WRAPPER = """#!/bin/sh
 %s
 V=$(cat %s 2>/dev/null)
 [ -z "$V" ] && exec %s.real "$@"
+# like the real tool: exit 0 when virtualization is "detected", 1 for none
+RC=0; [ "$V" = none ] && RC=1
 case " $* " in
   *" -c "*|*" --container "*) echo none; exit 1 ;;
   *" -r "*|*" --chroot "*|*" --private-users "*|*" --cvm "*|*" --list"*|*" -h "*|*" --help "*|*" --version "*)
       exec %s.real "$@" ;;
-  *" -q "*|*" --quiet "*) exit 0 ;;
+  *" -q "*|*" --quiet "*) exit $RC ;;
 esac
 echo "$V"
-exit 0
+exit $RC
 """
 
 DMIDECODE_WRAPPER = """#!/usr/bin/python3
@@ -254,6 +267,15 @@ def apply():
         else:
             skipped.append("%s (unknown check)" % key)
 
+    # systemd derives "Chassis: vm" from its own virtualization detection;
+    # an explicit chassis in /etc/machine-info takes precedence
+    if prof.get("chassis_type") in CHASSIS_NAMES and os.path.exists("/usr/bin/hostnamectl"):
+        r = run(["hostnamectl", "set-chassis", CHASSIS_NAMES[prof["chassis_type"]]])
+        if r.returncode == 0:
+            applied.append("chassis (hostnamectl)")
+        else:
+            skipped.append("chassis (hostnamectl: %s)" % r.stdout.strip())
+
     # dmidecode answers from the overlaid sysfs keys
     if any(k in DMI_KEYS for k in prof):
         p = which("dmidecode")
@@ -282,6 +304,8 @@ def remove():
             os.remove(f)
         except OSError:
             pass
+    if os.path.exists("/usr/bin/hostnamectl"):
+        run(["hostnamectl", "set-chassis", ""])
     log("identity overlay removed")
     return 0
 

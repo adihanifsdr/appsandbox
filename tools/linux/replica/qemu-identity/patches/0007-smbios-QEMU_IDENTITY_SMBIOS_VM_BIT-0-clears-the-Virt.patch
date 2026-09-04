@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Adi Hanif <adihanifsdr@gmail.com>
+Date: Fri, 4 Sep 2026 16:35:55 +0700
+Subject: [PATCH] smbios: QEMU_IDENTITY_SMBIOS_VM_BIT=0 clears the "Virtual
+ Machine" BIOS characteristic
+
+The type 0 table sets bit 4 of BIOS Characteristics Extension Byte 2
+("Virtual Machine" per SMBIOS 2.5). It is the one DMI tell that survives
+every string override: systemd-detect-virt reports "vm-other" from it as
+root (and hostnamectl "Chassis: vm") even when the vendor/product strings
+name a physical board. Clear it when QEMU_IDENTITY_SMBIOS_VM_BIT is "0".
+---
+ hw/smbios/smbios.c      | 5 +++++
+ include/qemu/identity.h | 2 ++
+ 2 files changed, 7 insertions(+)
+
+diff --git a/hw/smbios/smbios.c b/hw/smbios/smbios.c
+index 8a44d3f2..b3e13b09 100644
+--- a/hw/smbios/smbios.c
++++ b/hw/smbios/smbios.c
+@@ -16,6 +16,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/identity.h"
+ #include "qemu/units.h"
+ #include "qapi/error.h"
+ #include "qemu/config-file.h"
+@@ -628,6 +629,10 @@ static void smbios_build_type_0_table(void)
+     t->bios_characteristics = cpu_to_le64(0x08); /* Not supported */
+     t->bios_characteristics_extension_bytes[0] = 0;
+     t->bios_characteristics_extension_bytes[1] = 0x14; /* TCD/SVVP | VM */
++    if (!strcmp(qemu_identity_str("SMBIOS_VM_BIT", "1"), "0")) {
++        /* QEMU_IDENTITY_SMBIOS_VM_BIT=0: not a virtual machine */
++        t->bios_characteristics_extension_bytes[1] &= ~0x10;
++    }
+     if (type0.uefi) {
+         t->bios_characteristics_extension_bytes[1] |= 0x08; /* |= UEFI */
+     }
+diff --git a/include/qemu/identity.h b/include/qemu/identity.h
+index a0a6df56..c972ee1c 100644
+--- a/include/qemu/identity.h
++++ b/include/qemu/identity.h
+@@ -17,6 +17,8 @@
+  *                                     "QEMU CD-ROM")
+  *   QEMU_IDENTITY_USB_VENDOR          USB HID / tablet vendor ("QEMU")
+  *   QEMU_IDENTITY_KVM_SIGNATURE       CPUID 0x40000000 signature ("KVMKVMKVM")
++ *   QEMU_IDENTITY_SMBIOS_VM_BIT       "0" clears the SMBIOS type 0 "Virtual
++ *                                     Machine" characteristic bit
+  *
+  * Unset or empty variables leave the defaults untouched, so a binary
+  * carrying these hooks behaves exactly like upstream unless asked not to.
