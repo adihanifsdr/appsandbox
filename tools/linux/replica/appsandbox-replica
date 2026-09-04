@@ -15,9 +15,10 @@
 #         appsandbox-replica create [--smbios sysinfo|host] [--disk 20G]
 #                                   [--ram 4096] [--cpus 4] [--vnc 5900]
 #                                   [--profile /etc/appsandbox/identity.json]
-#                                   [--image URL]
+#                                   [--image URL] [--video cirrus|virtio]
 #         appsandbox-replica reidentify [--restart] [--profile FILE]
 #         appsandbox-replica qemu build|restore|status
+#         appsandbox-replica desktop [--no-steam]     # XFCE + Steam + autologin, virtio video
 #         appsandbox-replica start|stop|destroy|status|ip|ssh [cmd]|console|xml|checks
 #
 # Hypervisor-level identity: the profile keys acpi_oem_id, acpi_oem_table_id,
@@ -43,6 +44,7 @@ DIR=${REPLICA_DIR:-/var/lib/appsandbox/replica}
 DEFAULT_IMAGE=https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img
 PROFILE=/etc/appsandbox/identity.json
 SMBIOS=sysinfo; DISK=20G; RAM=4096; CPUS=4; VNC=5900; IMAGE=$DEFAULT_IMAGE
+VIDEO=cirrus      # cirrus = the classic QEMU/OpenStack look; virtio = 2D virtio-vga, larger modes (desktop)
 QEMU_SRC=${REPLICA_QEMU_SRC:-/opt/appsandbox/qemu-identity}   # patches + build.sh, shipped in the guest image
 QEMU_BIN=/usr/bin/qemu-system-x86_64
 QEMU_DISTRIB=/usr/bin/qemu-system-x86_64.distrib
@@ -77,9 +79,12 @@ gen_xml() {
     # $1 = uuid, $2 = MAC (fixed: cloud-init pins the guest's netplan config to
     # it, so a redefined domain must keep it or the replica loses its DHCP
     # lease); reads PROFILE (either [{check,name}] or {key:value}) via python3
-    python3 - "$NAME" "$RAM" "$CPUS" "$DIR" "$VNC" "$SMBIOS" "$PROFILE" "$1" "$2" <<'PY'
+    python3 - "$NAME" "$RAM" "$CPUS" "$DIR" "$VNC" "$SMBIOS" "$PROFILE" "$1" "$2" "$VIDEO" <<'PY'
 import json, sys, html, os
-name, ram, cpus, d, vnc, mode, prof_path, uuid, mac = sys.argv[1:10]
+name, ram, cpus, d, vnc, mode, prof_path, uuid, mac, video = sys.argv[1:11]
+video_xml = "<model type='cirrus' vram='16384' heads='1'/>"
+if video == "virtio":
+    video_xml = "<model type='virtio' heads='1'><resolution x='1600' y='900'/></model>"
 prof = {}
 if os.path.exists(prof_path):
     try:
@@ -191,11 +196,11 @@ print("""<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1
     <serial type='pty'><target port='0'/></serial>
     <console type='pty'><target type='serial' port='0'/></console>
     <graphics type='vnc' port='%s' autoport='no' listen='127.0.0.1'/>
-    <video><model type='cirrus' vram='16384' heads='1'/></video>
+    <video>%s</video>
     <memballoon model='virtio'/>
     <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>
   </devices>
-%s</domain>""" % (name, uuid, ram, cpus, mode, sysinfo, cpu, d, d, mac, vnc, cmdline))
+%s</domain>""" % (name, uuid, ram, cpus, mode, sysinfo, cpu, d, d, mac, vnc, video_xml, cmdline))
 PY
 }
 
@@ -214,8 +219,8 @@ hv_note() {
 }
 
 save_conf() {
-    printf "RAM='%s'\nCPUS='%s'\nVNC='%s'\nSMBIOS='%s'\nPROFILE='%s'\nUUID='%s'\nMAC='%s'\n" \
-        "$RAM" "$CPUS" "$VNC" "$SMBIOS" "$PROFILE" "$1" "$2" > "$DIR/replica.conf"
+    printf "RAM='%s'\nCPUS='%s'\nVNC='%s'\nSMBIOS='%s'\nPROFILE='%s'\nUUID='%s'\nMAC='%s'\nVIDEO='%s'\n" \
+        "$RAM" "$CPUS" "$VNC" "$SMBIOS" "$PROFILE" "$1" "$2" "$VIDEO" > "$DIR/replica.conf"
 }
 
 cmd_create() {
@@ -229,10 +234,12 @@ cmd_create() {
             --vnc) VNC=$2; shift 2 ;;
             --profile) PROFILE=$2; shift 2 ;;
             --image) IMAGE=$2; shift 2 ;;
+            --video) VIDEO=$2; shift 2 ;;
             *) die "unknown option $1" ;;
         esac
     done
     case "$SMBIOS" in sysinfo|host) ;; *) die "--smbios must be sysinfo or host" ;; esac
+    case "$VIDEO" in cirrus|virtio) ;; *) die "--video must be cirrus or virtio" ;; esac
     command -v virsh >/dev/null || cmd_install
     # 5900 may already be taken by something the user runs in this VM (x11vnc,
     # a docker container publishing 127.0.0.1:5900 ...): pick the next free port.
@@ -296,21 +303,24 @@ cmd_reidentify() {
     need_root
     [ -f "$DIR/replica.conf" ] || die "no replica created here (appsandbox-replica create first)"
     # shellcheck disable=SC1091
-    MAC=""; . "$DIR/replica.conf"        # RAM CPUS VNC SMBIOS PROFILE UUID MAC
+    MAC=""; . "$DIR/replica.conf"        # RAM CPUS VNC SMBIOS PROFILE UUID MAC VIDEO
     local restart=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --restart) restart=1; shift ;;
             --profile) PROFILE=$2; shift 2 ;;
+            --video) VIDEO=$2; shift 2 ;;
             *) die "unknown option $1" ;;
         esac
     done
+    case "$VIDEO" in cirrus|virtio) ;; *) die "--video must be cirrus or virtio" ;; esac
     virsh dominfo "$NAME" >/dev/null 2>&1 || die "domain '$NAME' is not defined (appsandbox-replica create)"
     if [ -z "$MAC" ]; then   # replica created before the MAC was recorded: keep the one it has
         MAC=$(virsh dumpxml "$NAME" | sed -n "s/.*<mac address='\([^']*\)'.*/\1/p" | head -1)
         [ -n "$MAC" ] && save_conf "$UUID" "$MAC"
     fi
     gen_xml "$UUID" "$MAC" > "$DIR/$NAME.xml"
+    save_conf "$UUID" "$MAC"
     virsh define "$DIR/$NAME.xml" >/dev/null
     local src="$PROFILE"; [ -f "$PROFILE" ] || src="no profile (defaults)"
     if virsh domstate "$NAME" 2>/dev/null | grep -q running; then
@@ -366,11 +376,80 @@ cmd_ip() {
     virsh domifaddr "$NAME" 2>/dev/null | awk '/ipv4/ {sub(/\/.*/, "", $4); print $4; exit}'
 }
 
+ssh_run() {
+    # run a command in the replica and return (cmd_ssh execs, for the interactive case)
+    local ip; ip=$(cmd_ip)
+    [ -n "$ip" ] || die "replica has no IP yet (is it running? try again in a moment)"
+    ssh -i "$DIR/id_ed25519" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 "user@$ip" "$@"
+}
+
 cmd_ssh() {
     local ip; ip=$(cmd_ip)
     [ -n "$ip" ] || die "replica has no IP yet (is it running? try again in a moment)"
     exec ssh -i "$DIR/id_ed25519" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "user@$ip" "$@"
+}
+
+# Turn the replica into a usable desktop: XFCE (xubuntu-core) + LightDM
+# autologin for "user", Steam (i386 multiarch + steam-installer), and the
+# virtio video model (1600x900) instead of Cirrus. Rendering is software
+# (llvmpipe): there is no GPU in the replica, so this is for the Steam client,
+# store and light games - not for GPU-heavy titles. Console: the App Sandbox
+# VNC button. Re-runnable.
+cmd_desktop() {
+    need_root
+    local steam=1
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --no-steam) steam=0; shift ;;
+            *) die "unknown option $1" ;;
+        esac
+    done
+    [ -f "$DIR/replica.conf" ] || die "no replica created here (appsandbox-replica create first)"
+    virsh domstate "$NAME" 2>/dev/null | grep -q running || { virsh start "$NAME" >/dev/null 2>&1 || true; }
+    local i
+    for i in $(seq 1 36); do ssh_run true 2>/dev/null && break; sleep 5; done
+    ssh_run true 2>/dev/null || die "cannot reach the replica over ssh"
+    echo "==> installing XFCE desktop$( [ $steam = 1 ] && echo ' + Steam') in the replica (10-20 min, ~1.5 GB download) ..."
+    ssh_run "sudo STEAM=$steam bash -s" <<'EOF'
+set -e
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -q
+apt-get install -y -q xubuntu-core lightdm xterm dbus-x11
+# no lock screen / screensaver on a VNC console
+apt-get purge -y -q light-locker xfce4-screensaver >/dev/null 2>&1 || true
+install -d /etc/lightdm/lightdm.conf.d
+printf '[Seat:*]\nautologin-user=user\nautologin-user-timeout=0\nautologin-session=xubuntu\nuser-session=xubuntu\n' > /etc/lightdm/lightdm.conf.d/50-appsandbox-autologin.conf
+systemctl set-default graphical.target
+systemctl enable lightdm >/dev/null 2>&1 || true
+if [ "$STEAM" = 1 ]; then
+    dpkg --add-architecture i386
+    apt-get update -q
+    echo steam steam/question select "I AGREE" | debconf-set-selections
+    echo steam steam/license note '' | debconf-set-selections
+    apt-get install -y -q steam-installer || apt-get install -y -q steam
+    # software GL: keep the Steam UI on the CPU renderer
+    install -d -o user -g user /home/user/.config/autostart
+fi
+echo "desktop: OK"
+EOF
+    # virtio video for a real resolution (Cirrus tops out at 1024x768)
+    MAC=""; VIDEO=cirrus
+    # shellcheck disable=SC1091
+    . "$DIR/replica.conf"
+    if [ "$VIDEO" != virtio ]; then
+        VIDEO=virtio
+        gen_xml "$UUID" "$MAC" > "$DIR/$NAME.xml"
+        save_conf "$UUID" "$MAC"
+        virsh define "$DIR/$NAME.xml" >/dev/null
+    fi
+    echo "==> restarting the replica into the desktop"
+    virsh destroy "$NAME" >/dev/null 2>&1 || true
+    virsh start "$NAME" >/dev/null
+    echo "OK: replica desktop ready in ~1 min. Open it with the App Sandbox VNC button"
+    echo "    (user 'user' logs in automatically; password test123). Steam: menu > Games > Steam,"
+    echo "    or 'steam' in a terminal - the first start downloads the Steam runtime (~500 MB)."
 }
 
 cmd_checks() {
@@ -435,6 +514,7 @@ case "$cmd" in
     create)  cmd_create "$@" ;;
     reidentify) cmd_reidentify "$@" ;;
     qemu)    cmd_qemu "$@" ;;
+    desktop) cmd_desktop "$@" ;;
     start)   need_root; virsh start "$NAME" ;;
     stop)    need_root; virsh shutdown "$NAME" ;;
     destroy) need_root; virsh destroy "$NAME" 2>/dev/null || true; virsh undefine "$NAME" 2>/dev/null || true
@@ -446,5 +526,5 @@ case "$cmd" in
     console) exec virsh console "$NAME" ;;
     xml)     cat "$DIR/$NAME.xml" ;;
     checks)  cmd_checks ;;
-    *)       die "unknown command '$cmd' (install|create|reidentify|qemu|start|stop|destroy|status|ip|ssh|console|xml|checks)" ;;
+    *)       die "unknown command '$cmd' (install|create|reidentify|qemu|desktop|start|stop|destroy|status|ip|ssh|console|xml|checks)" ;;
 esac

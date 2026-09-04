@@ -39,7 +39,15 @@ sudo appsandbox-replica checks                    # prints the checks as [{check
 sudo appsandbox-replica ssh                       # user / test123, key auth
 sudo appsandbox-replica qemu build                # once: identity-patched QEMU (ACPI / SMBIOS / drive / CPUID strings)
 sudo appsandbox-replica reidentify [--restart]    # re-read the profile into the domain (the agent does this on every change)
+sudo appsandbox-replica desktop [--no-steam]      # XFCE + autologin + Steam inside the replica, virtio video 1600x900
 ```
+
+`desktop` makes the replica usable from the App Sandbox **VNC button**: it
+installs xubuntu-core with LightDM autologin for `user`, Steam (`steam-installer`,
+i386 multiarch) and switches the video model from Cirrus to virtio (`--video`
+on `create` / `reidentify` does the same). There is no GPU in the replica, so
+rendering is llvmpipe: fine for the Steam client, the store and light games,
+not for GPU-heavy titles.
 
 Editing the VM identity in the App Sandbox GUI (🪪) or with `vmIdentity` in
 the headless API pushes the profile to the guest agent, which re-applies the
