@@ -347,7 +347,7 @@ th.icon-col, td.icon-col {
 .icon-btn.delete.running { color: #642828; }
 .icon-btn.ssh { color: var(--accent); font-family: monospace; font-weight: bold; }
 .icon-btn.ssh.inactive { color: #505050; }
-.icon-btn.ssh.hidden, .icon-btn.vnc.hidden { display: none; }
+.icon-btn.ssh.hidden, .icon-btn.vnc.hidden, .icon-btn.identity.hidden { display: none; }
 .icon-btn.edit { color: var(--text-dim); }
 .icon-btn.edit:hover { color: var(--text); }
 

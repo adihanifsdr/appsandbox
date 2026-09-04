@@ -148,6 +148,7 @@ window.onHostMessage = function(msg) {
         case 'confirmResult': if (pendingConfirm) pendingConfirm.resolve(msg.confirmed); break;
         case 'adapters':      populateAdapters(msg.adapters, msg.defaultIndex); break;
         case 'templates':     populateTemplates(msg.templates); break;
+        case 'identity':      openIdentityModal(msg.vmIndex, msg.vmIdentity); break;
         case 'alert':         showModal('Error', msg.message, 'OK'); break;
         case 'prereqRequired': onPrereqRequired(); break;
         case 'prereqReboot':   onPrereqReboot(); break;
@@ -459,6 +460,34 @@ function gatherConfig() {
         gaKernel:    document.getElementById('ga-kernel').checked,
         vmIdentity:  compactIdentity(document.getElementById('vm-identity').value)
     };
+}
+
+/* ---- VM identity editor (per-VM modal) ---- */
+var identityVmIndex = -1;
+
+function openIdentityModal(idx, json) {
+    identityVmIndex = idx;
+    document.getElementById('identity-vm-name').textContent = (vms[idx] && vms[idx].name) || '';
+    var pretty = '';
+    if (json) { try { pretty = JSON.stringify(JSON.parse(json), null, 2); } catch (e) { pretty = json; } }
+    document.getElementById('identity-text').value = pretty;
+    document.getElementById('identity-overlay').classList.add('active');
+    setTimeout(function() { document.getElementById('identity-text').focus(); }, 50);
+}
+
+function closeIdentityModal() {
+    document.getElementById('identity-overlay').classList.remove('active');
+    identityVmIndex = -1;
+}
+
+function saveIdentity(clear) {
+    var idx = identityVmIndex;
+    var text = clear ? '' : document.getElementById('identity-text').value;
+    var compact;
+    try { compact = compactIdentity(text); }
+    catch (e) { showModal('VM identity', e.message, 'OK', { confirmClass: 'primary' }); return; }
+    sendCmd('setIdentity', { vmIndex: idx, vmIdentity: compact });
+    closeIdentityModal();
 }
 
 /* VM identity profile: accept the [{check,name}] list or a {key:value}
@@ -773,6 +802,13 @@ function buildRowCells(vm, i, statusTd) {
         vm.vncPort ? '' : 'hidden',
         vm.vncPort ? 'Open a VNC viewer on the guest\'s VNC server (guest port ' + vm.vncPort + ', tunneled over HvSocket)' : '');
 
+    /* VM identity editor (Linux): what the guest reports about its machine. */
+    var isLinux = vm.osType === 'Linux';
+    var identCell = makeIconCell('identity', '\uD83E\uDEAA', isLinux && !bld,
+        (function(idx) { return function() { sendCmd('getIdentity', {vmIndex: idx}); }; })(i),
+        isLinux ? '' : 'hidden',
+        'Edit the VM identity profile - what the guest reports about its machine (DMI strings, systemd-detect-virt, chipset). Applies immediately on a running VM.');
+
     var cells = [
         makeCell(vm.name, i, 0),
         makeCell(vm.osType, i, 1),
@@ -809,6 +845,7 @@ function buildRowCells(vm, i, statusTd) {
         makeIconCell('connect-idd', '\uD83D\uDCFA', vm.running && !bld, function() { sendCmd('connectIddVm', {vmIndex: i}); }, '', 'Open the VM display window (IDD virtual monitor)'),
         sshCell,
         vncCell,
+        identCell,
         makeIconCell('shutdown', '\u23FB', vm.running && !bld, function() { sendCmd('shutdownVm', {vmIndex: i}); }, '', 'Request a graceful shutdown from the guest OS'),
         makeIconCell('stop', '\u2715\uFE0F', vm.running && !bld, function() { onStopVm(i); }, '', 'Force power off the VM immediately (may lose unsaved guest data)'),
         makeIconCell('delete', '\uD83D\uDDD1\uFE0F', !bld, function() { onDeleteVm(i); }, vm.running ? 'running' : '', 'Delete this VM and its virtual disks'),

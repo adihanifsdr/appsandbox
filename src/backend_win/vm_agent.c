@@ -56,7 +56,7 @@ typedef struct AgentConn {
     /* Command synchronization */
     volatile BOOL  cmd_pending;
     HANDLE         cmd_done;     /* Event: signaled when response is ready */
-    char           cmd[64];
+    char           cmd[4400];      /* room for "identity <json>" (4 KB profile) */
     char           rsp[256];
     unsigned int   cmd_seq;      /* Monotonic sequence ID for tagged commands */
     int            last_mtu;     /* path MTU last sent to a Linux guest (0 = none) */
@@ -569,7 +569,7 @@ static DWORD WINAPI agent_thread_proc(LPVOID param)
 
             /* Check for pending command first */
             if (conn->cmd_pending) {
-                char tagged[512];
+                char tagged[4480];
                 conn->cmd_seq++;
                 sprintf_s(tagged, sizeof(tagged), "%u:%s", conn->cmd_seq, conn->cmd);
                 if (send_line(s, tagged) <= 0) break;

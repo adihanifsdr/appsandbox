@@ -34,6 +34,7 @@
                 <th class="icon-col" title="IDD Display">&#x1F4FA;</th>
                 <th class="icon-col" title="SSH">&gt;_</th>
                 <th class="icon-col" title="VNC">&#x1F5A5;&#xFE0F;</th>
+                <th class="icon-col" title="VM identity">&#x1FAAA;</th>
                 <th class="icon-col">&#x23FB;</th>
                 <th class="icon-col">&#x2715;&#xFE0F;</th>
                 <th class="icon-col">&#x1F5D1;&#xFE0F;</th>
@@ -172,6 +173,20 @@
             <button onclick="closeCreateModal()">Cancel</button>
             <button id="btn-create-template" class="win-only" disabled onclick="onCreateTemplate()">Build Template</button>
             <button id="btn-create" class="primary" disabled onclick="onCreateVm()">Create Sandbox</button>
+        </div>
+    </div>
+</div>
+
+<!-- VM identity editor -->
+<div class="modal-overlay" id="identity-overlay">
+    <div class="modal wide">
+        <h3>VM identity &mdash; <span id="identity-vm-name"></span></h3>
+        <p>What the guest reports about the machine it runs on. DMI strings (sys_vendor, product_name, bios_vendor, chassis_vendor, ...), systemd-detect-virt and the chipset are overlaid inside the guest; CPUID and the clocksource cannot be changed this way (use <code>appsandbox-replica</code> in the guest for a real KVM machine). Saved to the VM, pushed to a running guest immediately, and re-applied at every boot.</p>
+        <textarea id="identity-text" rows="12" spellcheck="false" autocorrect="off" autocapitalize="off" style="width:100%; box-sizing:border-box; font-family: Consolas, monospace; font-size: 12px;" placeholder='[{"check":"sys_vendor","name":"OpenStack Foundation"},{"check":"product_name","name":"OpenStack Nova"},{"check":"systemd-detect-virt","name":"kvm"}]'></textarea>
+        <div class="modal-buttons">
+            <button onclick="closeIdentityModal()">Cancel</button>
+            <button class="danger" onclick="saveIdentity(true)">Clear</button>
+            <button class="primary" onclick="saveIdentity(false)">Save</button>
         </div>
     </div>
 </div>

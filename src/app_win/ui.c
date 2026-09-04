@@ -1087,6 +1087,49 @@ static void on_webview2_message(const wchar_t *json)
                        inst ? inst->ssh_enabled : 0, inst ? inst->ssh_port : 0);
             }
         }
+    } else if (wcscmp(action, L"getIdentity") == 0) {
+        /* Reply with the VM's identity profile for the editor (not part of the
+           VM list: a profile can be several KB). */
+        int idx;
+        if (json_get_int(json, L"vmIndex", &idx) && idx >= 0 && idx < asb_vm_count()) {
+            VmInstance *inst = asb_vm_instance(asb_vm_get(idx));
+            static wchar_t out[8192];
+            JsonBuilder jb;
+            jb_init(&jb, out, 8192);
+            jb_object_begin(&jb);
+            jb_string(&jb, L"type", L"identity");
+            jb_int(&jb, L"vmIndex", idx);
+            jb_string(&jb, L"vmIdentity", inst ? inst->identity : L"");
+            jb_object_end(&jb);
+            webview2_post(out);
+        }
+    } else if (wcscmp(action, L"setIdentity") == 0) {
+        int idx;
+        if (json_get_int(json, L"vmIndex", &idx) && idx >= 0 && idx < asb_vm_count()) {
+            AsbVm vm = asb_vm_get(idx);
+            VmInstance *inst = asb_vm_instance(vm);
+            static wchar_t ident[4096];
+            ident[0] = L'\0';
+            json_get_string(json, L"vmIdentity", ident, 4096);
+            asb_vm_set_identity(vm, ident);
+            if (inst && inst->running && inst->agent_online && _wcsicmp(inst->os_type, L"Linux") == 0) {
+                /* Push it to the running guest now; the agent applies it at once. */
+                static char line[4400];
+                if (ident[0]) {
+                    memcpy(line, "identity ", 9);
+                    WideCharToMultiByte(CP_UTF8, 0, ident, -1, line + 9, (int)sizeof(line) - 9, NULL, NULL);
+                } else {
+                    strcpy_s(line, sizeof(line), "identity none");
+                }
+                vm_agent_send(inst, line, NULL, 0, 0);
+                ui_log(L"VM identity for \"%s\" %s; pushed to the running guest.",
+                       inst->name, ident[0] ? L"updated" : L"cleared");
+            } else if (inst) {
+                ui_log(L"VM identity for \"%s\" %s; applies at the next boot.",
+                       inst->name, ident[0] ? L"updated" : L"cleared");
+            }
+            send_vm_list();
+        }
     } else if (wcscmp(action, L"vncConnect") == 0) {
         int idx;
         if (json_get_int(json, L"vmIndex", &idx) && idx >= 0 && idx < asb_vm_count()) {
