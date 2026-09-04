@@ -499,8 +499,10 @@ static void *heartbeat_thread(void *arg)
 
 /* ---- Command handlers ---- */
 
-/* set_ip:<ip>/<prefix>:<gw>
- *   e.g. set_ip:192.168.42.2/24:192.168.42.1
+/* set_ip:<ip>/<prefix>:<gw>[:<mtu>]
+ *   e.g. set_ip:192.168.42.2/24:192.168.42.1:1400
+ *   <mtu> is the path MTU the host measured for its own uplink (see
+ *   probe_path_mtu in vm_agent.c); 1400 when absent.
  *
  * Mirrors the Windows agent's `netsh ip set static` clobber semantics:
  *   1. Disable cloud-init's network module so it stops re-writing
@@ -517,6 +519,7 @@ static void *heartbeat_thread(void *arg)
 static void handle_set_ip(int fd, const char *tag, const char *args)
 {
     char ip[64], prefix[8], gw[64];
+    int mtu = 1400;
     const char *slash  = strchr(args, '/');
     const char *colon2 = slash ? strchr(slash, ':') : NULL;
     size_t ip_len, pfx_len;
@@ -536,6 +539,14 @@ static void handle_set_ip(int fd, const char *tag, const char *args)
     memcpy(ip,     args,        ip_len);  ip[ip_len]   = '\0';
     memcpy(prefix, slash + 1,   pfx_len); prefix[pfx_len] = '\0';
     snprintf(gw, sizeof(gw), "%s", colon2 + 1);
+    {
+        char *m = strchr(gw, ':');
+        if (m) {
+            *m = '\0';
+            mtu = atoi(m + 1);
+            if (mtu < 1000 || mtu > 1500) mtu = 1400;
+        }
+    }
 
     n = snprintf(cmd, sizeof(cmd),
         /* Pick the renderer by probing whether the NetworkManager service
@@ -575,13 +586,14 @@ static void handle_set_ip(int fd, const char *tag, const char *args)
         "      dhcp6: false\n"
         /* Below the usual 1500: the host's NAT (WinNAT) does not relay the
          * ICMP "fragmentation needed" that an uplink with a smaller MTU
-         * (PPPoE = 1492, VPNs less) sends back, so full-size segments from
-         * the guest are silently black-holed. Small requests still work,
-         * anything that needs a big outbound packet -- a browser's
-         * post-quantum TLS ClientHello, uploads -- hangs forever ("always
-         * loading" on store.steampowered.com in Chrome and Firefox while
-         * python fetched it fine). 1400 clears every common uplink. */
-        "      mtu: 1400\n"
+         * (PPPoE = 1492, Cloudflare WARP = 1280, other VPNs less) sends
+         * back, so full-size segments from the guest are silently
+         * black-holed. Small requests still work, anything that needs a big
+         * outbound packet -- a browser's post-quantum TLS ClientHello,
+         * uploads -- hangs forever ("always loading" on
+         * store.steampowered.com in Chrome and Firefox while python fetched
+         * it fine). The host measures its own path MTU and sends it. */
+        "      mtu: %d\n"
         "      addresses: [\"%s/%s\"]\n"
         "      routes:\n"
         "        - to: default\n"
@@ -620,13 +632,13 @@ static void handle_set_ip(int fd, const char *tag, const char *args)
         "  sleep 0.5; "
         "done; "
         "echo 'set_ip: address never appeared'; ip -4 addr show; exit 1",
-        ip, prefix, gw, gw, ip);
+        mtu, ip, prefix, gw, gw, ip);
     if (n < 0 || n >= (int)sizeof(cmd)) {
         send_reply(fd, tag, "error:cmd_too_long");
         return;
     }
     rc = run_sync(cmd);
-    agent_log("set_ip: %s/%s via %s → rc=%d", ip, prefix, gw, rc);
+    agent_log("set_ip: %s/%s via %s mtu %d → rc=%d", ip, prefix, gw, mtu, rc);
     send_reply(fd, tag, rc == 0 ? "ok" : "error:netplan_failed");
 }
 

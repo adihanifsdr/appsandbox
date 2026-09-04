@@ -1,5 +1,9 @@
 #include <winsock2.h>
+#include <ws2tcpip.h>   /* sockaddr_in6 before icmpapi.h */
 #include "vm_agent.h"
+#include <iphlpapi.h>
+#include <icmpapi.h>
+#pragma comment(lib, "iphlpapi.lib")
 #include "vm_ssh_proxy.h"
 #include "asb_core.h"
 #include "hcn_network.h"
@@ -55,7 +59,64 @@ typedef struct AgentConn {
     char           cmd[64];
     char           rsp[256];
     unsigned int   cmd_seq;      /* Monotonic sequence ID for tagged commands */
+    int            last_mtu;     /* path MTU last sent to a Linux guest (0 = none) */
+    ULONGLONG      last_mtu_probe;
 } AgentConn;
+
+/* ---- Path MTU of the host's own uplink ----
+   WinNAT does not relay ICMP "fragmentation needed" to the guest, so a guest
+   that keeps a 1500 MTU black-holes every full-size packet whenever the
+   host's path is smaller: PPPoE (1492), Cloudflare WARP (1280), corporate
+   VPNs. Symptom: small requests work, anything with a big outbound packet
+   (a browser's post-quantum TLS ClientHello, uploads) hangs forever.
+   Measure it here with DF pings to 1.1.1.1 and hand the guest that MTU.
+   Largest working candidate wins; a fully offline host gets the floor. */
+static int probe_path_mtu(void)
+{
+    static const int cands[] = { 1500, 1400, 1280, 1200 };
+    HANDLE h = IcmpCreateFile();
+    int result = 1200;
+    if (h == INVALID_HANDLE_VALUE) return 1400;
+    for (size_t i = 0; i < ARRAYSIZE(cands); i++) {
+        int payload = cands[i] - 28;             /* IP + ICMP headers */
+        DWORD reply_size = sizeof(ICMP_ECHO_REPLY) + (DWORD)payload + 8;
+        char *send_buf = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)payload);
+        char *reply_buf = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, reply_size);
+        IP_OPTION_INFORMATION opt;
+        DWORD got = 0;
+        int attempt;
+        if (!send_buf || !reply_buf) { if (send_buf) HeapFree(GetProcessHeap(), 0, send_buf); if (reply_buf) HeapFree(GetProcessHeap(), 0, reply_buf); break; }
+        ZeroMemory(&opt, sizeof(opt));
+        opt.Ttl = 64;
+        opt.Flags = IP_FLAG_DF;
+        for (attempt = 0; attempt < 2 && !got; attempt++) {
+            got = IcmpSendEcho(h, 0x01010101 /* 1.1.1.1 */, send_buf, (WORD)payload,
+                               &opt, reply_buf, reply_size, 900);
+            if (got) {
+                PICMP_ECHO_REPLY r = (PICMP_ECHO_REPLY)reply_buf;
+                if (r->Status != IP_SUCCESS) got = 0;
+                if (r->Status == IP_PACKET_TOO_BIG || r->Status == IP_DEST_HOST_UNREACHABLE)
+                    break;                       /* definitive: try the next size */
+            }
+        }
+        HeapFree(GetProcessHeap(), 0, send_buf);
+        HeapFree(GetProcessHeap(), 0, reply_buf);
+        if (got) { result = cands[i]; break; }
+    }
+    IcmpCloseHandle(h);
+    return result;
+}
+
+/* "set_ip:<ip>/24:<gw>[:<mtu>]" -- the MTU field only for Linux guests (the
+   Windows agent parses the gateway up to end of line and does its own
+   PMTU black-hole detection). */
+static void build_set_ip_cmd(VmInstance *vm, int mtu, char *out, size_t cap)
+{
+    if (_wcsicmp(vm->os_type, L"Linux") == 0 && mtu > 0)
+        sprintf_s(out, cap, "set_ip:%s/24:%s.1:%d", vm->nat_ip, hcn_nat_subnet_base(), mtu);
+    else
+        sprintf_s(out, cap, "set_ip:%s/24:%s.1", vm->nat_ip, hcn_nat_subnet_base());
+}
 
 #define MAX_AGENTS 16
 static AgentConn g_conns[MAX_AGENTS];
@@ -227,6 +288,12 @@ static void vm_agent_send_deploy_key(SOCKET s, VmInstance *vm)
                 keep trying to reconnect). */
 static int process_async_message(VmInstance *vm, SOCKET s, const char *buf)
 {
+    /* "<seq>:<reply>" to a fire-and-forget tagged command (the periodic
+       set_ip re-send) -- nothing waits for it. */
+    if (buf[0] >= '0' && buf[0] <= '9' && strchr(buf, ':')) {
+        ui_log(L"[%s] %S", vm->name, buf);
+        return 0;
+    }
     if (strcmp(buf, "heartbeat") == 0) {
         vm->last_heartbeat = GetTickCount64();
     } else if (strcmp(buf, "os_shutdown") == 0) {
@@ -416,12 +483,13 @@ static DWORD WINAPI agent_thread_proc(LPVOID param)
         /* Send NAT IP to agent (only for NAT mode). Gateway is the chosen
            subnet's .1; prefix length is always /24 for our NAT. */
         if (vm->network_mode == NET_NAT && vm->nat_ip[0] != '\0') {
-            char ip_cmd[64];
-            sprintf_s(ip_cmd, sizeof(ip_cmd), "set_ip:%s/24:%s.1",
-                       vm->nat_ip, hcn_nat_subnet_base());
+            char ip_cmd[96];
+            conn->last_mtu = probe_path_mtu();
+            conn->last_mtu_probe = GetTickCount64();
+            build_set_ip_cmd(vm, conn->last_mtu, ip_cmd, sizeof(ip_cmd));
             n = send_tagged_cmd(s, vm, &conn->cmd_seq, ip_cmd, buf, sizeof(buf));
             if (n <= 0) goto disconnected;
-            ui_log(L"NAT IP config for \"%s\": %S", vm->name, buf);
+            ui_log(L"NAT IP config for \"%s\": %S (path MTU %d)", vm->name, buf, conn->last_mtu);
         }
 
         /* Send GPU share info to agent (if GPU-PV is assigned).
@@ -524,7 +592,29 @@ static DWORD WINAPI agent_thread_proc(LPVOID param)
 
             ret = select(0, &rfds, NULL, NULL, &tv);
             if (ret < 0) break;
-            if (ret == 0) continue; /* timeout - loop back to check cmd_pending/stop */
+            if (ret == 0) {
+                /* Idle: once a minute re-measure the host's path MTU (a VPN
+                   such as Cloudflare WARP can connect or drop while the VM
+                   runs) and push a new set_ip to a Linux NAT guest when it
+                   changed. Fire-and-forget; the reply is swallowed above. */
+                if (vm->network_mode == NET_NAT && vm->nat_ip[0] != '\0' &&
+                    _wcsicmp(vm->os_type, L"Linux") == 0 &&
+                    GetTickCount64() - conn->last_mtu_probe > 60000) {
+                    int mtu = probe_path_mtu();
+                    conn->last_mtu_probe = GetTickCount64();
+                    if (mtu != conn->last_mtu) {
+                        char ip_cmd[96], tagged[128];
+                        ui_log(L"Path MTU changed %d -> %d; updating \"%s\".",
+                               conn->last_mtu, mtu, vm->name);
+                        conn->last_mtu = mtu;
+                        build_set_ip_cmd(vm, mtu, ip_cmd, sizeof(ip_cmd));
+                        conn->cmd_seq++;
+                        sprintf_s(tagged, sizeof(tagged), "%u:%s", conn->cmd_seq, ip_cmd);
+                        if (send_line(s, tagged) <= 0) break;
+                    }
+                }
+                continue; /* loop back to check cmd_pending/stop */
+            }
 
             n = recv_line(s, buf, sizeof(buf));
             if (n <= 0) break; /* connection lost */
