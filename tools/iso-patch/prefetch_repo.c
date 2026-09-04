@@ -364,6 +364,13 @@ int do_prefetch_repo(const wchar_t *repo, const wchar_t *branch, const wchar_t *
         swprintf_s(s, MAX_PATH, L"%s\\tools\\linux\\identity\\README.md", extracted_root);
         swprintf_s(d, MAX_PATH, L"%s\\identity-README.md", out_dir);
         u_cp_file(s, d);
+        /* nested-KVM VPS replica tool (tools/linux/replica) */
+        swprintf_s(s, MAX_PATH, L"%s\\tools\\linux\\replica\\appsandbox-replica", extracted_root);
+        swprintf_s(d, MAX_PATH, L"%s\\appsandbox-replica", out_dir);
+        u_cp_file(s, d);
+        swprintf_s(s, MAX_PATH, L"%s\\tools\\linux\\replica\\README.md", extracted_root);
+        swprintf_s(d, MAX_PATH, L"%s\\replica-README.md", out_dir);
+        u_cp_file(s, d);
     }
 
     /* wsl-mesa pieces */

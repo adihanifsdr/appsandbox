@@ -416,3 +416,12 @@ shows it as `vncPort` (0 = none) and the GUI shows a VNC button on the row.
 /vms/{name}/vnc` opens a `127.0.0.1` tunnel to it (HvSocket, like SSH) and
 returns the same fields with `port` filled in. Point any VNC viewer at
 `host:port`. `asb.py`: `vnc_info(name)` / `open_vnc(name)`.
+
+## VM identity and the VPS replica
+
+`vmIdentity` (above) changes what a Linux guest *reports* about its machine.
+For the checks that live in the hypervisor (CPUID leaf, clocksource, real
+chipset) a guest can run `appsandbox-replica` — a nested QEMU/KVM guest
+shaped like an OpenStack/KVM VPS; see `tools/linux/replica/README.md`. Its
+console is a VNC server on the guest's `127.0.0.1:5900`, i.e. what the VNC
+button / `POST /vms/{name}/vnc` tunnel to.

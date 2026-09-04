@@ -1,0 +1,267 @@
+#!/bin/bash
+# appsandbox-replica - a nested QEMU/KVM guest inside an App Sandbox Linux VM
+# that looks, from the inside, like a KVM / OpenStack Nova VPS:
+#
+#   i440FX + PIIX3 chipset, SeaBIOS, Cirrus VGA, virtio disk/net/balloon,
+#   SMBIOS strings from the VM identity profile (or the "host"'s, see
+#   --smbios), CPUID hypervisor leaf "KVMKVMKVM", hypervisor CPU flag,
+#   systemd-detect-virt = kvm, clocksource kvm-clock.
+#
+# Everything the guest-side identity overlay cannot fake is real here,
+# because it IS a KVM guest. Needs nested virtualization, which App Sandbox
+# enables for Linux VMs (/dev/kvm inside the guest).
+#
+# Usage:  appsandbox-replica install
+#         appsandbox-replica create [--smbios sysinfo|host] [--disk 20G]
+#                                   [--ram 4096] [--cpus 4] [--vnc 5900]
+#                                   [--profile /etc/appsandbox/identity.json]
+#                                   [--image URL]
+#         appsandbox-replica start|stop|destroy|status|ip|ssh [cmd]|console|xml|checks
+#
+# The replica's console is served on 127.0.0.1:<vnc port> (default 5900),
+# which is exactly what the App Sandbox VNC button tunnels to - so the
+# button opens the replica's screen. `ssh` logs in as "user" with a keypair
+# generated here (also password test123). Files live in /var/lib/appsandbox/replica.
+set -euo pipefail
+
+NAME=${REPLICA_NAME:-replica}
+DIR=${REPLICA_DIR:-/var/lib/appsandbox/replica}
+DEFAULT_IMAGE=https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img
+PROFILE=/etc/appsandbox/identity.json
+SMBIOS=sysinfo; DISK=20G; RAM=4096; CPUS=4; VNC=5900; IMAGE=$DEFAULT_IMAGE
+
+die() { echo "appsandbox-replica: $*" >&2; exit 1; }
+need_root() { [ "$(id -u)" = 0 ] || die "run as root (sudo)"; }
+
+primary_user() {
+    # the interactive account firstboot created (same rule as the agent)
+    getent passwd | awk -F: '$3>=1000 && $3<65534 && $6 ~ /^\/home\// && $7 !~ /nologin|false/ {print $1; exit}'
+}
+
+cmd_install() {
+    need_root
+    [ -e /dev/kvm ] || die "/dev/kvm missing: nested virtualization is not available in this VM"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y -q qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients \
+        cloud-image-utils genisoimage
+    systemctl enable --now libvirtd >/dev/null 2>&1 || true
+    local u; u=$(primary_user || true)
+    [ -n "$u" ] && usermod -aG libvirt,kvm "$u" || true
+    # libvirt's NAT network for the replica (dnsmasq on virbr0)
+    virsh net-info default >/dev/null 2>&1 || virsh net-define /usr/share/libvirt/networks/default.xml >/dev/null
+    virsh net-autostart default >/dev/null 2>&1 || true
+    virsh net-start default >/dev/null 2>&1 || true
+    echo "OK: qemu/libvirt installed, default network up"
+}
+
+gen_xml() {
+    # $1 = uuid ; reads PROFILE (either [{check,name}] or {key:value}) via python3
+    python3 - "$NAME" "$RAM" "$CPUS" "$DIR" "$VNC" "$SMBIOS" "$PROFILE" "$1" <<'PY'
+import json, sys, html, os
+name, ram, cpus, d, vnc, mode, prof_path, uuid = sys.argv[1:9]
+prof = {}
+if os.path.exists(prof_path):
+    try:
+        data = json.load(open(prof_path))
+        if isinstance(data, list):
+            prof = {str(e.get("check", "")).strip(): str(e.get("name", "")).strip() for e in data if isinstance(e, dict)}
+        elif isinstance(data, dict):
+            prof = {str(k).strip(): str(v).strip() for k, v in data.items()}
+    except Exception:
+        pass
+def g(k, default): return html.escape(prof.get(k) or default)
+bios = prof.get("bios_vendor") or "SeaBIOS 1.16.3-debian"
+bios_vendor, _, bios_version = bios.partition(" ")
+sysinfo = ""
+if mode == "sysinfo":
+    sysinfo = """  <sysinfo type='smbios'>
+    <bios>
+      <entry name='vendor'>%s</entry>
+      <entry name='version'>%s</entry>
+    </bios>
+    <system>
+      <entry name='manufacturer'>%s</entry>
+      <entry name='product'>%s</entry>
+      <entry name='version'>%s</entry>
+      <entry name='serial'>%s</entry>
+      <entry name='uuid'>%s</entry>
+      <entry name='family'>Virtual Machine</entry>
+    </system>
+    <chassis>
+      <entry name='manufacturer'>%s</entry>
+    </chassis>
+  </sysinfo>
+""" % (html.escape(bios_vendor), html.escape(bios_version or "1.16.3-debian"),
+       g("sys_vendor", "OpenStack Foundation"), g("product_name", "OpenStack Nova"),
+       g("product_version", "2024.1"), g("product_serial", uuid), uuid,
+       g("chassis_vendor", "QEMU"))
+print("""<domain type='kvm'>
+  <name>%s</name>
+  <uuid>%s</uuid>
+  <memory unit='MiB'>%s</memory>
+  <vcpu placement='static'>%s</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc'>hvm</type>
+    <boot dev='hd'/>
+    <smbios mode='%s'/>
+  </os>
+%s  <features><acpi/><apic/></features>
+  <cpu mode='host-passthrough' check='none'/>
+  <clock offset='utc'>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='hpet' present='no'/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='%s/disk.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='%s/seed.iso'/>
+      <target dev='hda' bus='ide'/>
+      <readonly/>
+    </disk>
+    <interface type='network'>
+      <source network='default'/>
+      <model type='virtio'/>
+    </interface>
+    <serial type='pty'><target port='0'/></serial>
+    <console type='pty'><target type='serial' port='0'/></console>
+    <graphics type='vnc' port='%s' autoport='no' listen='127.0.0.1'/>
+    <video><model type='cirrus' vram='16384' heads='1'/></video>
+    <memballoon model='virtio'/>
+    <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>
+  </devices>
+</domain>""" % (name, uuid, ram, cpus, mode, sysinfo, d, d, vnc))
+PY
+}
+
+cmd_create() {
+    need_root
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --smbios) SMBIOS=$2; shift 2 ;;
+            --disk) DISK=$2; shift 2 ;;
+            --ram) RAM=$2; shift 2 ;;
+            --cpus) CPUS=$2; shift 2 ;;
+            --vnc) VNC=$2; shift 2 ;;
+            --profile) PROFILE=$2; shift 2 ;;
+            --image) IMAGE=$2; shift 2 ;;
+            *) die "unknown option $1" ;;
+        esac
+    done
+    case "$SMBIOS" in sysinfo|host) ;; *) die "--smbios must be sysinfo or host" ;; esac
+    command -v virsh >/dev/null || cmd_install
+    mkdir -p "$DIR"; cd "$DIR"
+    if virsh dominfo "$NAME" >/dev/null 2>&1; then
+        die "domain '$NAME' already exists (appsandbox-replica destroy first)"
+    fi
+    if [ ! -s base.img ]; then
+        echo "downloading $IMAGE ..."
+        curl -fL --retry 3 -o base.img.part "$IMAGE" && mv base.img.part base.img
+    fi
+    qemu-img create -q -f qcow2 -b "$DIR/base.img" -F qcow2 disk.qcow2 "$DISK"
+    # ssh keypair for `appsandbox-replica ssh`
+    [ -f id_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -f id_ed25519 -C appsandbox-replica
+    local pub; pub=$(cat id_ed25519.pub)
+    local u; u=$(primary_user || echo user)
+    local extra_keys=""
+    if [ -s "/home/$u/.ssh/authorized_keys" ]; then
+        extra_keys=$(sed 's/^/      - /' "/home/$u/.ssh/authorized_keys")
+    fi
+    cat > user-data <<EOF
+#cloud-config
+hostname: $NAME
+manage_etc_hosts: true
+ssh_pwauth: true
+users:
+  - name: user
+    groups: [sudo, adm]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: false
+    plain_text_passwd: test123
+    ssh_authorized_keys:
+      - $pub
+$extra_keys
+package_update: false
+growpart: {mode: auto, devices: ["/"]}
+EOF
+    printf 'instance-id: %s-1\nlocal-hostname: %s\n' "$NAME" "$NAME" > meta-data
+    cloud-localds seed.iso user-data meta-data
+    local uuid; uuid=$(cat /proc/sys/kernel/random/uuid)
+    gen_xml "$uuid" > "$NAME.xml"
+    virsh define "$NAME.xml" >/dev/null
+    virsh start "$NAME" >/dev/null
+    echo "OK: replica '$NAME' defined and started (smbios=$SMBIOS, vnc 127.0.0.1:$VNC)"
+    echo "    XML: $DIR/$NAME.xml   (edit + 'virsh define' to tweak, e.g. <smbios mode='host'/>)"
+    echo "    first boot takes ~1 min (cloud-init); then: appsandbox-replica ssh"
+}
+
+cmd_ip() {
+    virsh domifaddr "$NAME" 2>/dev/null | awk '/ipv4/ {sub(/\/.*/, "", $4); print $4; exit}'
+}
+
+cmd_ssh() {
+    local ip; ip=$(cmd_ip)
+    [ -n "$ip" ] || die "replica has no IP yet (is it running? try again in a moment)"
+    exec ssh -i "$DIR/id_ed25519" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "user@$ip" "$@"
+}
+
+cmd_checks() {
+    # the nine identity checks, printed in the [{check,name}] format
+    cmd_ssh 'sudo modprobe cpuid 2>/dev/null; python3 - <<"PY"
+import json, subprocess, os
+def cat(p):
+    try: return open(p).read().strip()
+    except OSError: return "?"
+def sh(c): return subprocess.run(c, shell=True, capture_output=True, text=True).stdout.strip()
+out = [{"check": k, "name": cat("/sys/class/dmi/id/" + k)} for k in ("sys_vendor", "product_name")]
+out.append({"check": "bios_vendor", "name": (cat("/sys/class/dmi/id/bios_vendor") + " " + cat("/sys/class/dmi/id/bios_version")).strip()})
+out.append({"check": "chassis_vendor", "name": cat("/sys/class/dmi/id/chassis_vendor")})
+pci = sh("lspci 2>/dev/null")
+parts = []
+if "440FX" in pci: parts.append("440FX")
+if "PIIX3" in pci: parts.append("PIIX3")
+chip = " + ".join(parts)
+if "Cirrus" in pci: chip += ", Cirrus VGA"
+if "Virtio" in pci or "virtio" in pci: chip += ", virtio"
+out.append({"check": "chipset", "name": chip or "?"})
+sig = "?"
+try:
+    f = open("/dev/cpu/0/cpuid", "rb", 0); f.seek(0x40000000); d = f.read(16)
+    sig = (d[4:8] + d[8:12] + d[12:16]).decode("ascii", "replace").strip("\\x00")
+except OSError: pass
+out.append({"check": "CPUID 0x40000000", "name": sig})
+out.append({"check": "hypervisor CPU flag", "name": "set" if " hypervisor" in open("/proc/cpuinfo").read() else "not set"})
+out.append({"check": "systemd-detect-virt", "name": sh("systemd-detect-virt")})
+out.append({"check": "clocksource", "name": cat("/sys/devices/system/clocksource/clocksource0/current_clocksource")})
+print(json.dumps(out, indent=2))
+PY'
+}
+
+cmd=${1:-status}; shift || true
+case "$cmd" in
+    install) cmd_install ;;
+    create)  cmd_create "$@" ;;
+    start)   need_root; virsh start "$NAME" ;;
+    stop)    need_root; virsh shutdown "$NAME" ;;
+    destroy) need_root; virsh destroy "$NAME" 2>/dev/null || true; virsh undefine "$NAME" 2>/dev/null || true
+             rm -f "$DIR/disk.qcow2" "$DIR/seed.iso" "$DIR/$NAME.xml"; echo "replica removed (base image kept in $DIR)" ;;
+    status)  virsh dominfo "$NAME" 2>/dev/null | grep -E "^(Name|State|CPU\(s\)|Max memory)" || echo "no replica defined"
+             ip=$(cmd_ip || true); [ -n "$ip" ] && echo "IP:              $ip" || true ;;
+    ip)      cmd_ip ;;
+    ssh)     cmd_ssh "$@" ;;
+    console) exec virsh console "$NAME" ;;
+    xml)     cat "$DIR/$NAME.xml" ;;
+    checks)  cmd_checks ;;
+    *)       die "unknown command '$cmd' (install|create|start|stop|destroy|status|ip|ssh|console|xml|checks)" ;;
+esac

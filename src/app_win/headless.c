@@ -739,6 +739,23 @@ static int handle_request(PHTTP_REQUEST req)
             }
             if (verb == HttpVerbPUT) {   /* edit (PUT instead of PATCH: PATCH isn't in the http.sys verb enum) */
                 wchar_t body[8192]; int iv; HRESULT hr = S_OK;
+                BOOL other_fields;
+                body_to_wide(req, body, 8192);
+                /* vmIdentity may change any time (the agent re-applies it at its
+                   next connect, the guest's boot unit at the next boot), so it is
+                   handled before the building/running guard below. */
+                {
+                    static wchar_t ident[4096];
+                    if (json_get_string(body, L"vmIdentity", ident, 4096))
+                        hr = asb_vm_set_identity(vm, ident);
+                }
+                other_fields = json_get_int(body, L"ramMb", &iv) || json_get_int(body, L"cpuCores", &iv) ||
+                               json_get_int(body, L"gpuMode", &iv) || json_get_int(body, L"networkMode", &iv);
+                if (!other_fields) {
+                    append_vm_json(buf, sizeof(buf), 0, inst);
+                    send_json(req->RequestId, 200, "OK", buf);
+                    return 0;
+                }
                 /* config is locked while building or running -- return a clean 409,
                    not the generic 500 that asb_vm_set_*'s E_ACCESSDENIED would
                    produce. The GUI likewise disables the edit control while a VM is
@@ -752,7 +769,6 @@ static int handle_request(PHTTP_REQUEST req)
                     send_err(req->RequestId, 409, "Conflict", "vm_running", "cannot edit a running VM; stop it first");
                     return 0;
                 }
-                body_to_wide(req, body, 8192);
                 /* name is the guest hostname -- fixed at create, NOT editable. */
                 if (json_get_int(body, L"ramMb", &iv)) {
                     if (iv < 512 || iv % 2 != 0) { send_err(req->RequestId, 400, "Bad Request", "invalid_arg", "RAM must be 2 MB-aligned and at least 512 MB"); return 0; }
@@ -761,12 +777,6 @@ static int handle_request(PHTTP_REQUEST req)
                 if (json_get_int(body, L"cpuCores", &iv)) {
                     if (iv < 1) { send_err(req->RequestId, 400, "Bad Request", "invalid_arg", "CPU cores must be at least 1"); return 0; }
                     hr = asb_vm_set_cpu(vm, (DWORD)iv);
-                }
-                {
-                    /* vmIdentity: compact JSON profile, "" clears it */
-                    static wchar_t ident[4096];
-                    if (json_get_string(body, L"vmIdentity", ident, 4096))
-                        hr = asb_vm_set_identity(vm, ident);
                 }
                 if (json_get_int(body, L"gpuMode", &iv)) {
                     if (iv < 0 || iv > 2) { send_err(req->RequestId, 400, "Bad Request", "invalid_arg", "gpuMode must be 0 (None), 1 (Default), or 2 (Try all)"); return 0; }
