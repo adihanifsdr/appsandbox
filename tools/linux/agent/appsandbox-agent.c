@@ -621,6 +621,13 @@ static void handle_set_ip(int fd, const char *tag, const char *args)
         "netplan apply 2>&1; "
         "if [ \"$RENDERER\" = NetworkManager ]; then "
         "  systemctl restart NetworkManager 2>&1; "
+        /* After the restart NM finds the NIC still carrying the address
+         * from the previous profile and adopts it as an 'external'
+         * connection instead of activating netplan-appsbnic -- so a NAT
+         * address that changed since last boot (VM start order) never
+         * shows up. Activating our profile explicitly replaces that. */
+        "  for i in 1 2 3 4 5 6 7 8 9 10; do nmcli -t g >/dev/null 2>&1 && break; sleep 0.5; done; "
+        "  nmcli -w 20 con up netplan-appsbnic 2>&1 | tail -1; "
         "else "
         "  systemctl restart systemd-networkd 2>&1; "
         "fi; "
