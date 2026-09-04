@@ -243,7 +243,7 @@ out.append({"check": "chipset", "name": chip or "?"})
 sig = "?"
 try:
     f = open("/dev/cpu/0/cpuid", "rb", 0); f.seek(0x40000000); d = f.read(16)
-    sig = (d[4:8] + d[8:12] + d[12:16]).decode("ascii", "replace").strip("\\x00")
+    sig = (d[4:8] + d[8:12] + d[12:16]).decode("ascii", "replace").rstrip("\x00")
 except OSError: pass
 out.append({"check": "CPUID 0x40000000", "name": sig})
 out.append({"check": "hypervisor CPU flag", "name": "set" if " hypervisor" in open("/proc/cpuinfo").read() else "not set"})
