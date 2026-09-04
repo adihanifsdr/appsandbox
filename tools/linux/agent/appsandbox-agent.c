@@ -520,7 +520,7 @@ static void handle_set_ip(int fd, const char *tag, const char *args)
     const char *slash  = strchr(args, '/');
     const char *colon2 = slash ? strchr(slash, ':') : NULL;
     size_t ip_len, pfx_len;
-    char cmd[2400];
+    char cmd[3200];
     int n, rc;
 
     if (!slash || !colon2) {
@@ -559,6 +559,11 @@ static void handle_set_ip(int fd, const char *tag, const char *args)
         "  ! -name '99-appsandbox.yaml' -delete; "
         /* Our authoritative config. Heredoc is unquoted so $RENDERER
          * expands; nothing else in the YAML uses '$'. */
+        /* Belt and braces for the same black-hole: let TCP probe the path
+         * MTU itself when retransmissions stall (RFC 4821). */
+        "printf 'net.ipv4.tcp_mtu_probing = 1\\n' "
+        "  > /etc/sysctl.d/90-appsandbox-pmtu.conf && "
+        "sysctl -q -p /etc/sysctl.d/90-appsandbox-pmtu.conf 2>/dev/null; "
         "umask 077 && cat > /etc/netplan/99-appsandbox.yaml <<EOF\n"
         "network:\n"
         "  version: 2\n"
@@ -568,6 +573,15 @@ static void handle_set_ip(int fd, const char *tag, const char *args)
         "      match: { name: \"e*\" }\n"
         "      dhcp4: false\n"
         "      dhcp6: false\n"
+        /* Below the usual 1500: the host's NAT (WinNAT) does not relay the
+         * ICMP "fragmentation needed" that an uplink with a smaller MTU
+         * (PPPoE = 1492, VPNs less) sends back, so full-size segments from
+         * the guest are silently black-holed. Small requests still work,
+         * anything that needs a big outbound packet -- a browser's
+         * post-quantum TLS ClientHello, uploads -- hangs forever ("always
+         * loading" on store.steampowered.com in Chrome and Firefox while
+         * python fetched it fine). 1400 clears every common uplink. */
+        "      mtu: 1400\n"
         "      addresses: [\"%s/%s\"]\n"
         "      routes:\n"
         "        - to: default\n"
