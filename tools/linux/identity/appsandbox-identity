@@ -26,6 +26,11 @@ What can be overlaid inside the guest:
     diverted to print the classic QEMU/OpenStack PCI list.
   * chassis_type also sets systemd's chassis (hostnamectl set-chassis, i.e.
     /etc/machine-info), so hostnamectl stops reporting "Chassis: vm".
+  * udev's DMI properties (ID_VENDOR / ID_MODEL, what hostnamectl prints as
+    "Hardware Vendor / Model") are recomputed from the overlaid attributes
+    with `udevadm trigger --action=change --subsystem-match=dmi`. The
+    kernel's MODALIAS uevent value and hostnamectl's "Virtualization:" line
+    (CPUID) still show the real hypervisor.
 
 What cannot (hypervisor-level, reported as "not overlayable"): the CPUID
 hypervisor leaf (0x40000000), the hypervisor CPU flag, and the kernel
@@ -46,6 +51,8 @@ CONF = "/etc/appsandbox/identity.json"
 STATE_DIR = "/etc/appsandbox"
 RUN = "/run/appsandbox/identity"
 DMI = "/sys/class/dmi/id"
+# /sys/class/dmi/id is a symlink; mountinfo lists the resolved path
+DMI_REAL = os.path.realpath(DMI)
 VIRT_STATE = STATE_DIR + "/identity-virt"
 LSPCI_STATE = STATE_DIR + "/identity-lspci"
 MARK = "# appsandbox-identity wrapper"
@@ -211,6 +218,13 @@ def which(name):
     return None
 
 
+def refresh_udev_dmi():
+    if os.path.exists("/usr/bin/udevadm"):
+        run(["udevadm", "trigger", "--action=change", "--subsystem-match=dmi"])
+        run(["udevadm", "settle", "--timeout=5"])
+    run(["systemctl", "stop", "systemd-hostnamed"])
+
+
 def apply():
     if not os.path.exists(CONF):
         log("no %s: nothing to apply" % CONF)
@@ -234,8 +248,10 @@ def apply():
             with open(src, "w") as f:
                 f.write(val + "\n")
             os.chmod(src, 0o444)
-            if target in mounts:
-                run(["umount", target])
+            while "%s/%s" % (DMI_REAL, key) in mounts:   # replace, never stack, earlier overlays
+                if run(["umount", target]).returncode != 0:
+                    break
+                mounts = mounted_targets()
             r = run(["mount", "--bind", src, target])
             if r.returncode == 0:
                 applied.append(key)
@@ -267,6 +283,12 @@ def apply():
         else:
             skipped.append("%s (unknown check)" % key)
 
+    # udev computed ID_VENDOR / ID_MODEL from the firmware strings at boot;
+    # a change event makes it re-read the (now overlaid) attributes.
+    # systemd-hostnamed caches them too: stop it, it is bus-activated.
+    if any(k in DMI_KEYS for k in applied):
+        refresh_udev_dmi()
+
     # systemd derives "Chassis: vm" from its own virtualization detection;
     # an explicit chassis in /etc/machine-info takes precedence
     if prof.get("chassis_type") in CHASSIS_NAMES and os.path.exists("/usr/bin/hostnamectl"):
@@ -293,8 +315,10 @@ def remove():
     mounts = mounted_targets()
     for key in sorted(DMI_KEYS):
         target = "%s/%s" % (DMI, key)
-        if target in mounts:
-            run(["umount", target])
+        while "%s/%s" % (DMI_REAL, key) in mounts:
+            if run(["umount", target]).returncode != 0:
+                break
+            mounts = mounted_targets()
     for name in ("systemd-detect-virt", "dmidecode", "lspci"):
         p = which(name)
         if p:
@@ -306,6 +330,7 @@ def remove():
             pass
     if os.path.exists("/usr/bin/hostnamectl"):
         run(["hostnamectl", "set-chassis", ""])
+    refresh_udev_dmi()
     log("identity overlay removed")
     return 0
 
@@ -324,7 +349,7 @@ def status():
                 cur = open("%s/%s" % (DMI, key)).read().strip()
             except OSError:
                 cur = "(n/a)"
-            ov = "overlay" if "%s/%s" % (DMI, key) in mounts else "firmware"
+            ov = "overlay" if "%s/%s" % (DMI_REAL, key) in mounts else "firmware"
             log("%-22s %-40s [%s]" % (key, cur, ov))
     r = run(["systemd-detect-virt"])
     log("%-22s %-40s [%s]" % ("systemd-detect-virt", r.stdout.strip(), "wrapper" if is_our_wrapper(which("systemd-detect-virt") or "") else "real"))

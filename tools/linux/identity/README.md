@@ -83,6 +83,8 @@ kvm-clock).
 | `dmidecode -s <keyword>` | diverted to a wrapper answering from those keys; other invocations run the real binary |
 | `systemd-detect-virt` | diverted to a wrapper printing the profile value (`-q`, `-c`, `--list`, `--help` behave as usual) |
 | `chipset` naming 440FX / PIIX3 | `lspci` (no arguments) prints the classic QEMU/OpenStack device list |
+| `chassis_type` | also `hostnamectl set-chassis` (desktop / laptop / server ...), so `hostnamectl` stops saying "Chassis: vm" |
+| udev DMI properties | `ID_VENDOR` / `ID_MODEL` are recomputed from the overlaid strings (`udevadm trigger` on the dmi subsystem), so `hostnamectl` shows the profile's "Hardware Vendor / Model" |
 
 ## What it cannot change (hypervisor level)
 
