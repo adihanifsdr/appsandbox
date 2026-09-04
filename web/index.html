@@ -166,8 +166,8 @@
                 <label class="needs-linux" title="Install the GA kernel (linux-generic, e.g. 6.8 on 24.04) from the Ubuntu archive at first boot and boot it instead of the ISO's HWE kernel - what a stock server / VPS runs. Needs internet during create."><input type="checkbox" id="ga-kernel"> GA kernel</label>
             </div>
 
-            <label class="needs-linux" for="vm-identity" title="Optional. What the guest reports about the machine it runs on: DMI strings (sys_vendor, product_name, bios_vendor, chassis_vendor, ...), systemd-detect-virt, chipset. Applied inside the guest at every boot. CPUID / clocksource cannot be changed this way; the nested VPS replica (appsandbox-replica) honours those and the ACPI / SMBIOS / drive strings with its identity-patched QEMU.">VM identity (JSON):</label>
-            <textarea class="needs-linux" id="vm-identity" rows="3" spellcheck="false" placeholder='[{"check":"sys_vendor","name":"OpenStack Foundation"},{"check":"product_name","name":"OpenStack Nova"},{"check":"systemd-detect-virt","name":"kvm"}]'></textarea>
+            <label class="needs-linux" for="vm-identity" title="What the guest reports about the machine it runs on: DMI strings (sys_vendor, product_name, bios_vendor, chassis_vendor, ...), systemd-detect-virt, chipset. Applied inside the guest at every boot. Prefilled with a bare-metal desktop profile; clear it to keep the real (Hyper-V) identity. CPUID / clocksource cannot be changed this way; the nested VPS replica (appsandbox-replica) honours those and the ACPI / SMBIOS / drive strings with its identity-patched QEMU.">VM identity (JSON) <a href="#" class="small-link" onclick="fillDefaultIdentity('vm-identity'); return false;">default</a> &middot; <a href="#" class="small-link" onclick="document.getElementById('vm-identity').value=''; return false;">none</a>:</label>
+            <textarea class="needs-linux" id="vm-identity" rows="5" spellcheck="false" placeholder='(empty: the guest reports its real identity)'></textarea>
         </div>
         <div class="modal-buttons">
             <button onclick="closeCreateModal()">Cancel</button>
@@ -186,6 +186,7 @@
         <textarea id="identity-text" rows="12" spellcheck="false" autocorrect="off" autocapitalize="off" style="width:100%; box-sizing:border-box; font-family: Consolas, monospace; font-size: 12px;" placeholder='[{"check":"sys_vendor","name":"OpenStack Foundation"},{"check":"product_name","name":"OpenStack Nova"},{"check":"systemd-detect-virt","name":"kvm"},{"check":"acpi_oem_id","name":"BOCHS"},{"check":"cdrom_model","name":"QEMU DVD-ROM"},{"check":"CPUID 0x40000000","name":"KVMKVMKVM"}]'></textarea>
         <div class="modal-buttons">
             <button onclick="closeIdentityModal()">Cancel</button>
+            <button onclick="fillDefaultIdentity('identity-text')" title="Fill in the default bare-metal desktop profile (not saved until you press Save)">Default</button>
             <button class="danger" onclick="saveIdentity(true)">Clear</button>
             <button class="primary" onclick="saveIdentity(false)">Save</button>
         </div>

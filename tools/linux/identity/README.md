@@ -21,8 +21,10 @@ Profile format (either shape):
 ]
 ```
 
-## Example: a bare-metal desktop profile
+## Example: a bare-metal desktop profile (the GUI's default)
 
+**New Sandbox** prefills this profile for Linux guests (the `default` link
+restores it, `none` clears it; the per-VM 🪪 editor has a Default button).
 What a self-built ASUS/AMI desktop really reports (ASUS boards ship the
 literal "System Product Name" / "Default string" values). The guest overlay
 takes the DMI keys and `systemd-detect-virt`; the replica takes those plus

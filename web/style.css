@@ -526,3 +526,7 @@ td.editing select {
     color: #888;
     text-align: center;
 }
+
+/* inline helper links next to a form label (VM identity: default / none) */
+.small-link { font-size: 11px; font-weight: normal; text-decoration: none; opacity: 0.8; }
+.small-link:hover { text-decoration: underline; opacity: 1; }

@@ -465,6 +465,52 @@ function gatherConfig() {
 /* ---- VM identity editor (per-VM modal) ---- */
 var identityVmIndex = -1;
 
+/* Default VM identity for a new Linux sandbox: a bare-metal ASUS/AMI desktop
+   (the literal strings such boards ship, so nothing looks invented). The
+   guest overlay takes the DMI keys + systemd-detect-virt; the nested replica
+   takes those plus the ACPI / SMBIOS / drive / USB / CPUID keys with its
+   identity-patched QEMU. Same profile as tools/linux/identity/README.md.
+   Clear the field to create a VM that reports its real (Hyper-V) identity. */
+var DEFAULT_VM_IDENTITY = [
+    {check: 'sys_vendor',          name: 'ASUS'},
+    {check: 'product_name',        name: 'System Product Name'},
+    {check: 'product_version',     name: 'System Version'},
+    {check: 'product_serial',      name: 'System Serial Number'},
+    {check: 'product_family',      name: 'To be filled by O.E.M.'},
+    {check: 'bios_vendor',         name: 'American Megatrends Inc.'},
+    {check: 'bios_version',        name: '2604'},
+    {check: 'bios_date',           name: '01/15/2024'},
+    {check: 'board_vendor',        name: 'ASUSTeK COMPUTER INC.'},
+    {check: 'board_name',          name: 'ROG STRIX Z690-F GAMING WIFI'},
+    {check: 'board_version',       name: 'Rev 1.xx'},
+    {check: 'board_serial',        name: '230712345678901'},
+    {check: 'chassis_vendor',      name: 'Default string'},
+    {check: 'chassis_type',        name: '3'},
+    {check: 'chassis_version',     name: 'Default string'},
+    {check: 'chassis_serial',      name: 'Default string'},
+    {check: 'systemd-detect-virt', name: 'none'},
+    {check: 'acpi_oem_id',         name: 'ALASKA'},
+    {check: 'acpi_oem_table_id',   name: 'A M I'},
+    {check: 'acpi_creator_id',     name: 'AMI'},
+    {check: 'smbios_manufacturer', name: 'Intel(R) Corporation'},
+    {check: 'drive_vendor',        name: 'HL-DT-ST'},
+    {check: 'cdrom_model',         name: 'DVDRAM GH24NSD1'},
+    {check: 'disk_model',          name: 'Samsung SSD 870 EVO 1TB'},
+    {check: 'usb_vendor',          name: 'Logitech'},
+    {check: 'CPUID 0x40000000',    name: 'GenuineIntel'},
+    {check: 'hypervisor CPU flag', name: 'not set'},
+    {check: 'smbios_vm_bit',       name: 'not set'}
+];
+
+/* One {check,name} entry per line: readable in a textarea, still valid JSON. */
+function defaultIdentityText() {
+    return '[\n' + DEFAULT_VM_IDENTITY.map(function(e) { return '  ' + JSON.stringify(e); }).join(',\n') + '\n]';
+}
+
+function fillDefaultIdentity(id) {
+    document.getElementById(id).value = defaultIdentityText();
+}
+
 function openIdentityModal(idx, json) {
     identityVmIndex = idx;
     document.getElementById('identity-vm-name').textContent = (vms[idx] && vms[idx].name) || '';
@@ -646,6 +692,7 @@ function openCreateModal() {
     document.getElementById('ssh-enabled').checked = false;
     document.getElementById('ssh-deploy-key').checked = false;
     onSshToggle();   /* re-grey "Deploy SSH key" to match the cleared SSH checkbox */
+    fillDefaultIdentity('vm-identity');   /* Linux guests report a bare-metal desktop unless cleared */
     /* Reset OS type to Windows on each open. Valid on both hosts (a Mac host
        supports Windows via QEMU); the user can switch to macOS on a Mac. */
     document.getElementById('os-type').value = 'Windows';
