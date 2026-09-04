@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Adi Hanif <adihanifsdr@gmail.com>
+Date: Fri, 4 Sep 2026 15:41:57 +0700
+Subject: [PATCH] ide/scsi: QEMU_IDENTITY_{DRIVE_VENDOR,HD_MODEL,CD_MODEL} for
+ drive strings
+
+IDE IDENTIFY reports "QEMU HARDDISK" / "QEMU DVD-ROM" / "QEMU MICRODRIVE",
+the ATAPI INQUIRY reports vendor "QEMU" and product "QEMU DVD-ROM", and
+scsi-hd / scsi-cd default to vendor "QEMU" with product "QEMU HARDDISK" /
+"QEMU CD-ROM". All of them now read the environment first; explicit
+model= / vendor= / product= device properties keep winning.
+---
+ hw/ide/atapi.c      |  5 +++--
+ hw/ide/core.c       | 11 ++++++++---
+ hw/scsi/scsi-disk.c |  7 ++++---
+ 3 files changed, 15 insertions(+), 8 deletions(-)
+
+diff --git a/hw/ide/atapi.c b/hw/ide/atapi.c
+index dcc39df9..ec1b31d8 100644
+--- a/hw/ide/atapi.c
++++ b/hw/ide/atapi.c
+@@ -24,6 +24,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/identity.h"
+ #include "hw/ide/internal.h"
+ #include "hw/scsi/scsi.h"
+ #include "sysemu/block-backend.h"
+@@ -797,8 +798,8 @@ static void cmd_inquiry(IDEState *s, uint8_t *buf)
+         buf[5] = 0;    /* reserved */
+         buf[6] = 0;    /* reserved */
+         buf[7] = 0;    /* reserved */
+-        padstr8(buf + 8, 8, "QEMU");
+-        padstr8(buf + 16, 16, "QEMU DVD-ROM");
++        padstr8(buf + 8, 8, qemu_identity_str("DRIVE_VENDOR", "QEMU"));
++        padstr8(buf + 16, 16, qemu_identity_str("CD_MODEL", "QEMU DVD-ROM"));
+         padstr8(buf + 32, 4, s->version);
+         idx = 36;
+     }
+diff --git a/hw/ide/core.c b/hw/ide/core.c
+index 8a0579bf..44c1b418 100644
+--- a/hw/ide/core.c
++++ b/hw/ide/core.c
+@@ -24,6 +24,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/identity.h"
+ #include "hw/irq.h"
+ #include "hw/isa/isa.h"
+ #include "migration/vmstate.h"
+@@ -2637,13 +2638,17 @@ int ide_init_drive(IDEState *s, BlockBackend *blk, IDEDriveKind kind,
+     } else {
+         switch (kind) {
+         case IDE_CD:
+-            strcpy(s->drive_model_str, "QEMU DVD-ROM");
++            pstrcpy(s->drive_model_str, sizeof(s->drive_model_str),
++                    qemu_identity_str("CD_MODEL", "QEMU DVD-ROM"));
+             break;
+         case IDE_CFATA:
+-            strcpy(s->drive_model_str, "QEMU MICRODRIVE");
++            snprintf(s->drive_model_str, sizeof(s->drive_model_str),
++                     "%s MICRODRIVE",
++                     qemu_identity_str("DRIVE_VENDOR", "QEMU"));
+             break;
+         default:
+-            strcpy(s->drive_model_str, "QEMU HARDDISK");
++            pstrcpy(s->drive_model_str, sizeof(s->drive_model_str),
++                    qemu_identity_str("HD_MODEL", "QEMU HARDDISK"));
+             break;
+         }
+     }
+diff --git a/hw/scsi/scsi-disk.c b/hw/scsi/scsi-disk.c
+index 6691f5ed..71df319b 100644
+--- a/hw/scsi/scsi-disk.c
++++ b/hw/scsi/scsi-disk.c
+@@ -20,6 +20,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/identity.h"
+ #include "qemu/units.h"
+ #include "qapi/error.h"
+ #include "qemu/error-report.h"
+@@ -2509,7 +2510,7 @@ static void scsi_realize(SCSIDevice *dev, Error **errp)
+         s->version = g_strdup(qemu_hw_version());
+     }
+     if (!s->vendor) {
+-        s->vendor = g_strdup("QEMU");
++        s->vendor = g_strdup(qemu_identity_str("DRIVE_VENDOR", "QEMU"));
+     }
+     if (!s->device_id) {
+         if (s->serial) {
+@@ -2564,7 +2565,7 @@ static void scsi_hd_realize(SCSIDevice *dev, Error **errp)
+     s->qdev.blocksize = s->qdev.conf.logical_block_size;
+     s->qdev.type = TYPE_DISK;
+     if (!s->product) {
+-        s->product = g_strdup("QEMU HARDDISK");
++        s->product = g_strdup(qemu_identity_str("HD_MODEL", "QEMU HARDDISK"));
+     }
+     scsi_realize(&s->qdev, errp);
+ out:
+@@ -2598,7 +2599,7 @@ static void scsi_cd_realize(SCSIDevice *dev, Error **errp)
+     s->qdev.type = TYPE_ROM;
+     s->features |= 1 << SCSI_DISK_F_REMOVABLE;
+     if (!s->product) {
+-        s->product = g_strdup("QEMU CD-ROM");
++        s->product = g_strdup(qemu_identity_str("CD_MODEL", "QEMU CD-ROM"));
+     }
+     scsi_realize(&s->qdev, errp);
+     aio_context_release(ctx);

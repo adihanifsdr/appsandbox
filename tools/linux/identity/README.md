@@ -39,6 +39,26 @@ Hyper-V. For a faithful KVM/OpenStack machine — SeaBIOS, i440FX + PIIX3,
 Cirrus, virtio, `KVMKVMKVM`, `kvm-clock` — use the nested-KVM replica
 instead, which runs a real QEMU/KVM guest inside the sandbox VM.
 
+## Keys the replica honours (same profile)
+
+The profile may also carry what only the emulator decides. `appsandbox-identity`
+skips these ("emulator level"); `appsandbox-replica` passes them to its QEMU
+as `QEMU_IDENTITY_*` environment variables, honoured once the guest has built
+the identity-patched QEMU (`sudo appsandbox-replica qemu build`, see
+`tools/linux/replica/qemu-identity/README.md`):
+
+| check | default | meaning |
+|---|---|---|
+| `acpi_oem_id`, `acpi_oem_table_id`, `acpi_creator_id` | `BOCHS`, `BXPC`, `BXPC` | ACPI table header IDs |
+| `smbios_manufacturer` | `QEMU` | manufacturer of the SMBIOS entries `<sysinfo>` leaves alone (processor, DIMMs) |
+| `drive_vendor`, `disk_model`, `cdrom_model` | `QEMU`, `QEMU HARDDISK`, `QEMU DVD-ROM` | IDE / ATAPI / SCSI INQUIRY strings |
+| `usb_vendor` | `QEMU` | USB HID / tablet string descriptors |
+| `CPUID 0x40000000` | `KVMKVMKVM` | hypervisor CPUID signature (a non-KVM value also drops kvm-clock) |
+| `hypervisor CPU flag` | `set` | `not set` hides the CPUID hypervisor bit (stock QEMU can) |
+
+Every profile change the agent receives also redefines an existing replica
+(`appsandbox-replica reidentify`); the replica shows it at its next boot.
+
 `appsandbox-identity status` shows what is currently visible and where it
 comes from (`firmware` vs `overlay`); `appsandbox-identity remove` undoes
 everything.

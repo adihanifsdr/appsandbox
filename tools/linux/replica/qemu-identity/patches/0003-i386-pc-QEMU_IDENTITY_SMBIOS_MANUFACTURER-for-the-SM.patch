@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Adi Hanif <adihanifsdr@gmail.com>
+Date: Fri, 4 Sep 2026 15:41:57 +0700
+Subject: [PATCH] i386/pc: QEMU_IDENTITY_SMBIOS_MANUFACTURER for the SMBIOS
+ default manufacturer
+
+smbios_set_defaults("QEMU", ...) is what the guest sees as the
+manufacturer of the SMBIOS system, baseboard, chassis, processor and
+memory-device entries that -smbios (or libvirt's <sysinfo>) does not set
+explicitly; the processor and DIMM manufacturers in particular are
+usually left at "QEMU". Both the i440FX and the Q35 machines honour the
+override.
+---
+ hw/i386/pc_piix.c | 7 +++++--
+ hw/i386/pc_q35.c  | 7 +++++--
+ 2 files changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/hw/i386/pc_piix.c b/hw/i386/pc_piix.c
+index eace8543..c03f8266 100644
+--- a/hw/i386/pc_piix.c
++++ b/hw/i386/pc_piix.c
+@@ -23,6 +23,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/identity.h"
+ #include CONFIG_DEVICES
+ 
+ #include "qemu/units.h"
+@@ -234,8 +235,10 @@ static void pc_init1(MachineState *machine,
+ 
+     if (pcmc->smbios_defaults) {
+         MachineClass *mc = MACHINE_GET_CLASS(machine);
+-        /* These values are guest ABI, do not change */
+-        smbios_set_defaults("QEMU", mc->desc,
++        /* These values are guest ABI, do not change (the manufacturer
++         * can be overridden with QEMU_IDENTITY_SMBIOS_MANUFACTURER) */
++        smbios_set_defaults(qemu_identity_str("SMBIOS_MANUFACTURER", "QEMU"),
++                            mc->desc,
+                             mc->name, pcmc->smbios_legacy_mode,
+                             pcmc->smbios_uuid_encoded,
+                             pcms->smbios_entry_point_type);
+diff --git a/hw/i386/pc_q35.c b/hw/i386/pc_q35.c
+index 4f3e5412..b27b4805 100644
+--- a/hw/i386/pc_q35.c
++++ b/hw/i386/pc_q35.c
+@@ -29,6 +29,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/identity.h"
+ #include "qemu/units.h"
+ #include "hw/char/parallel-isa.h"
+ #include "hw/loader.h"
+@@ -202,8 +203,10 @@ static void pc_q35_init(MachineState *machine)
+     pc_guest_info_init(pcms);
+ 
+     if (pcmc->smbios_defaults) {
+-        /* These values are guest ABI, do not change */
+-        smbios_set_defaults("QEMU", mc->desc,
++        /* These values are guest ABI, do not change (the manufacturer
++         * can be overridden with QEMU_IDENTITY_SMBIOS_MANUFACTURER) */
++        smbios_set_defaults(qemu_identity_str("SMBIOS_MANUFACTURER", "QEMU"),
++                            mc->desc,
+                             mc->name, pcmc->smbios_legacy_mode,
+                             pcmc->smbios_uuid_encoded,
+                             pcms->smbios_entry_point_type);

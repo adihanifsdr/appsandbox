@@ -655,7 +655,19 @@ static void handle_set_ip(int fd, const char *tag, const char *args)
  *                      and run `appsandbox-identity apply` (DMI overlay,
  *                      systemd-detect-virt / dmidecode / lspci wrappers).
  * "identity none"    : delete the profile and `appsandbox-identity remove`.
- * Untagged reply: identity_applied:<summary> / identity_failed:<detail>. */
+ * Untagged reply: identity_applied:<summary> / identity_failed:<detail>.
+ *
+ * A nested VPS replica (appsandbox-replica) bakes the profile into its
+ * libvirt domain (SMBIOS sysinfo + QEMU_IDENTITY_* for the patched QEMU),
+ * so after every change it is redefined too; the replica shows the new
+ * identity at its next boot. Detached: virsh can take a moment. */
+static void replica_reidentify(void)
+{
+    if (access("/usr/local/sbin/appsandbox-replica", X_OK) == 0 &&
+        access("/var/lib/appsandbox/replica/replica.conf", F_OK) == 0)
+        spawn_detached("/usr/local/sbin/appsandbox-replica reidentify >/dev/null 2>&1");
+}
+
 static void handle_identity(int fd, const char *json)
 {
     const char *tool = "/usr/local/sbin/appsandbox-identity";
@@ -669,6 +681,7 @@ static void handle_identity(int fd, const char *json)
         }
         unlink("/etc/appsandbox/identity.json");
         if (access(tool, X_OK) == 0) run_sync("/usr/local/sbin/appsandbox-identity remove >/dev/null 2>&1");
+        replica_reidentify();
         agent_log("identity: profile removed");
         send_line(fd, "identity_applied:removed");
         return;
@@ -692,6 +705,7 @@ static void handle_identity(int fd, const char *json)
     }
     for (char *q = out; *q; q++) if (*q == '\n' || *q == '\r') *q = ' ';
     agent_log("identity: %s", out);
+    replica_reidentify();
     if (strncmp(out, "applied:", 8) == 0 && strncmp(out, "applied: nothing", 16) != 0) {
         char msg[560];
         snprintf(msg, sizeof(msg), "identity_applied:%s", out);

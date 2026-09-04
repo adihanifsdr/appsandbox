@@ -425,3 +425,13 @@ chipset) a guest can run `appsandbox-replica` — a nested QEMU/KVM guest
 shaped like an OpenStack/KVM VPS; see `tools/linux/replica/README.md`. Its
 console is a VNC server on the guest's `127.0.0.1:5900`, i.e. what the VNC
 button / `POST /vms/{name}/vnc` tunnel to.
+
+The same profile also carries the strings only the emulator decides:
+`acpi_oem_id`, `acpi_oem_table_id`, `acpi_creator_id`, `smbios_manufacturer`,
+`drive_vendor`, `disk_model`, `cdrom_model`, `usb_vendor`, `CPUID 0x40000000`
+and `hypervisor CPU flag` (`"not set"`). The replica passes them to QEMU as
+`QEMU_IDENTITY_*` environment variables; they take effect once the guest has
+built the identity-patched QEMU (`sudo appsandbox-replica qemu build`, see
+`tools/linux/replica/qemu-identity/README.md`). Every `vmIdentity` change is
+pushed to the guest, which also redefines an existing replica; the replica
+shows the new identity at its next boot.

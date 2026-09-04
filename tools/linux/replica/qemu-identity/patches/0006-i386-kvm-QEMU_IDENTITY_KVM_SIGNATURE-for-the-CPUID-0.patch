@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Adi Hanif <adihanifsdr@gmail.com>
+Date: Fri, 4 Sep 2026 15:41:58 +0700
+Subject: [PATCH] i386/kvm: QEMU_IDENTITY_KVM_SIGNATURE for the CPUID
+ 0x40000000 signature
+
+The KVM paravirt leaf advertises "KVMKVMKVM" (NUL padded to 12 bytes)
+whenever the CPU exposes KVM. Take the signature from the environment
+when set, truncated / NUL padded to 12 bytes. Note that a guest kernel
+only binds kvm-clock and the other KVM paravirt features when it finds
+the canonical signature, so a different one also hides those - which is
+the point when it is used.
+---
+ target/i386/kvm/kvm.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/target/i386/kvm/kvm.c b/target/i386/kvm/kvm.c
+index a0bc9ea7..49954989 100644
+--- a/target/i386/kvm/kvm.c
++++ b/target/i386/kvm/kvm.c
+@@ -42,6 +42,7 @@
+ #include "qemu/ratelimit.h"
+ #include "qemu/config-file.h"
+ #include "qemu/error-report.h"
++#include "qemu/identity.h"
+ #include "qemu/memalign.h"
+ #include "hw/i386/x86.h"
+ #include "hw/i386/kvm/xen_evtchn.h"
+@@ -1855,7 +1856,9 @@ int kvm_arch_init_vcpu(CPUState *cs)
+         abort();
+ #endif
+     } else if (cpu->expose_kvm) {
+-        memcpy(signature, "KVMKVMKVM\0\0\0", 12);
++        /* "KVMKVMKVM" unless QEMU_IDENTITY_KVM_SIGNATURE says otherwise */
++        qemu_identity_fixed("KVM_SIGNATURE", "KVMKVMKVM",
++                            (char *)signature, 12, '\0');
+         c = &cpuid_data.entries[cpuid_i++];
+         c->function = KVM_CPUID_SIGNATURE | kvm_base;
+         c->eax = KVM_CPUID_FEATURES | kvm_base;

@@ -16,7 +16,21 @@
 #                                   [--ram 4096] [--cpus 4] [--vnc 5900]
 #                                   [--profile /etc/appsandbox/identity.json]
 #                                   [--image URL]
+#         appsandbox-replica reidentify [--restart] [--profile FILE]
+#         appsandbox-replica qemu build|restore|status
 #         appsandbox-replica start|stop|destroy|status|ip|ssh [cmd]|console|xml|checks
+#
+# Hypervisor-level identity: the profile keys acpi_oem_id, acpi_oem_table_id,
+# acpi_creator_id, smbios_manufacturer, drive_vendor, disk_model, cdrom_model,
+# usb_vendor and "CPUID 0x40000000" are handed to the emulator as
+# QEMU_IDENTITY_* environment variables (libvirt <qemu:env>). The stock QEMU
+# ignores them; `appsandbox-replica qemu build` builds QEMU 8.2.2 with the
+# patches in /opt/appsandbox/qemu-identity (the parameterised form of
+# github.com/kila58/qemu-patched) and installs it over the distro binary with
+# dpkg-divert. "hypervisor CPU flag": "not set" hides the CPUID hypervisor bit
+# (stock QEMU can do that). `reidentify` regenerates the domain from the
+# current profile - the agent runs it whenever the profile changes; the
+# replica picks the new identity up at its next boot.
 #
 # The replica's console is served on 127.0.0.1:<vnc port> (default 5900),
 # which is exactly what the App Sandbox VNC button tunnels to - so the
@@ -29,6 +43,11 @@ DIR=${REPLICA_DIR:-/var/lib/appsandbox/replica}
 DEFAULT_IMAGE=https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img
 PROFILE=/etc/appsandbox/identity.json
 SMBIOS=sysinfo; DISK=20G; RAM=4096; CPUS=4; VNC=5900; IMAGE=$DEFAULT_IMAGE
+QEMU_SRC=${REPLICA_QEMU_SRC:-/opt/appsandbox/qemu-identity}   # patches + build.sh, shipped in the guest image
+QEMU_BIN=/usr/bin/qemu-system-x86_64
+QEMU_DISTRIB=/usr/bin/qemu-system-x86_64.distrib
+QEMU_STAMP=/opt/appsandbox/qemu-identity.installed
+HV_KEYS='acpi_oem_id|acpi_oem_table_id|acpi_creator_id|smbios_manufacturer|drive_vendor|disk_model|cdrom_model|usb_vendor|CPUID 0x40000000'
 
 die() { echo "appsandbox-replica: $*" >&2; exit 1; }
 need_root() { [ "$(id -u)" = 0 ] || die "run as root (sudo)"; }
@@ -55,10 +74,12 @@ cmd_install() {
 }
 
 gen_xml() {
-    # $1 = uuid ; reads PROFILE (either [{check,name}] or {key:value}) via python3
-    python3 - "$NAME" "$RAM" "$CPUS" "$DIR" "$VNC" "$SMBIOS" "$PROFILE" "$1" <<'PY'
+    # $1 = uuid, $2 = MAC (fixed: cloud-init pins the guest's netplan config to
+    # it, so a redefined domain must keep it or the replica loses its DHCP
+    # lease); reads PROFILE (either [{check,name}] or {key:value}) via python3
+    python3 - "$NAME" "$RAM" "$CPUS" "$DIR" "$VNC" "$SMBIOS" "$PROFILE" "$1" "$2" <<'PY'
 import json, sys, html, os
-name, ram, cpus, d, vnc, mode, prof_path, uuid = sys.argv[1:9]
+name, ram, cpus, d, vnc, mode, prof_path, uuid, mac = sys.argv[1:10]
 prof = {}
 if os.path.exists(prof_path):
     try:
@@ -70,6 +91,19 @@ if os.path.exists(prof_path):
     except Exception:
         pass
 def g(k, default): return html.escape(prof.get(k) or default)
+# hypervisor-level keys -> QEMU_IDENTITY_* in the emulator's environment
+# (honoured by the identity-patched QEMU, ignored by the stock one)
+ENV_KEYS = [("acpi_oem_id", "ACPI_OEM_ID"), ("acpi_oem_table_id", "ACPI_OEM_TABLE_ID"),
+            ("acpi_creator_id", "ACPI_CREATOR_ID"), ("smbios_manufacturer", "SMBIOS_MANUFACTURER"),
+            ("drive_vendor", "DRIVE_VENDOR"), ("disk_model", "HD_MODEL"), ("cdrom_model", "CD_MODEL"),
+            ("usb_vendor", "USB_VENDOR"), ("CPUID 0x40000000", "KVM_SIGNATURE")]
+env = "".join("    <qemu:env name='QEMU_IDENTITY_%s' value='%s'/>\n" % (v, html.escape(prof[k], quote=True))
+              for k, v in ENV_KEYS if prof.get(k))
+cmdline = "  <qemu:commandline>\n%s  </qemu:commandline>\n" % env if env else ""
+# "hypervisor CPU flag": "not set" -> hide the CPUID hypervisor bit (stock QEMU can)
+cpu = "  <cpu mode='host-passthrough' check='none'/>"
+if prof.get("hypervisor CPU flag", "").lower() in ("not set", "unset", "off", "hidden", "no", "0"):
+    cpu = "  <cpu mode='host-passthrough' check='none'>\n    <feature policy='disable' name='hypervisor'/>\n  </cpu>"
 bios = prof.get("bios_vendor") or "SeaBIOS 1.16.3-debian"
 bios_vendor, _, bios_version = bios.partition(" ")
 sysinfo = ""
@@ -95,7 +129,7 @@ if mode == "sysinfo":
        g("sys_vendor", "OpenStack Foundation"), g("product_name", "OpenStack Nova"),
        g("product_version", "2024.1"), g("product_serial", uuid), uuid,
        g("chassis_vendor", "QEMU"))
-print("""<domain type='kvm'>
+print("""<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
   <name>%s</name>
   <uuid>%s</uuid>
   <memory unit='MiB'>%s</memory>
@@ -106,7 +140,7 @@ print("""<domain type='kvm'>
     <smbios mode='%s'/>
   </os>
 %s  <features><acpi/><apic/></features>
-  <cpu mode='host-passthrough' check='none'/>
+%s
   <clock offset='utc'>
     <timer name='pit' tickpolicy='delay'/>
     <timer name='rtc' tickpolicy='catchup'/>
@@ -129,6 +163,7 @@ print("""<domain type='kvm'>
       <readonly/>
     </disk>
     <interface type='network'>
+      <mac address='%s'/>
       <source network='default'/>
       <model type='virtio'/>
     </interface>
@@ -139,8 +174,27 @@ print("""<domain type='kvm'>
     <memballoon model='virtio'/>
     <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>
   </devices>
-</domain>""" % (name, uuid, ram, cpus, mode, sysinfo, d, d, vnc))
+%s</domain>""" % (name, uuid, ram, cpus, mode, sysinfo, cpu, d, d, mac, vnc, cmdline))
 PY
+}
+
+qemu_patched_installed() {
+    [ -f "$QEMU_STAMP" ] && dpkg-divert --list "$QEMU_BIN" 2>/dev/null | grep -q "$QEMU_DISTRIB"
+}
+
+# Tell the user when the profile asks for something only the patched QEMU does.
+hv_note() {
+    [ -f "$PROFILE" ] || return 0
+    if grep -qE "\"($HV_KEYS)\"" "$PROFILE" && ! qemu_patched_installed; then
+        echo "note: the profile has hypervisor-level keys (ACPI / SMBIOS / drive / CPUID strings)."
+        echo "      The stock QEMU ignores them: run 'sudo appsandbox-replica qemu build' once (~10 min),"
+        echo "      then 'sudo appsandbox-replica reidentify --restart'."
+    fi
+}
+
+save_conf() {
+    printf "RAM='%s'\nCPUS='%s'\nVNC='%s'\nSMBIOS='%s'\nPROFILE='%s'\nUUID='%s'\nMAC='%s'\n" \
+        "$RAM" "$CPUS" "$VNC" "$SMBIOS" "$PROFILE" "$1" "$2" > "$DIR/replica.conf"
 }
 
 cmd_create() {
@@ -202,12 +256,89 @@ EOF
     printf 'instance-id: %s-1\nlocal-hostname: %s\n' "$NAME" "$NAME" > meta-data
     cloud-localds seed.iso user-data meta-data
     local uuid; uuid=$(cat /proc/sys/kernel/random/uuid)
-    gen_xml "$uuid" > "$NAME.xml"
+    local mac; mac=$(printf '52:54:00:%02x:%02x:%02x' $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)))
+    gen_xml "$uuid" "$mac" > "$NAME.xml"
+    save_conf "$uuid" "$mac"
     virsh define "$NAME.xml" >/dev/null
     virsh start "$NAME" >/dev/null
-    echo "OK: replica '$NAME' defined and started (smbios=$SMBIOS, vnc 127.0.0.1:$VNC)"
+    echo "OK: replica '$NAME' defined and started (smbios=$SMBIOS, vnc 127.0.0.1:$VNC, qemu=$(qemu_patched_installed && echo identity-patched || echo stock))"
     echo "    XML: $DIR/$NAME.xml   (edit + 'virsh define' to tweak, e.g. <smbios mode='host'/>)"
     echo "    first boot takes ~1 min (cloud-init); then: appsandbox-replica ssh"
+    hv_note
+}
+
+# Regenerate the domain XML from the current identity profile (same size /
+# ports / uuid as at create time) and redefine it. ACPI, SMBIOS, drive and
+# CPUID strings are fixed at boot, so a running replica keeps the old ones
+# until it restarts (--restart does that now).
+cmd_reidentify() {
+    need_root
+    [ -f "$DIR/replica.conf" ] || die "no replica created here (appsandbox-replica create first)"
+    # shellcheck disable=SC1091
+    MAC=""; . "$DIR/replica.conf"        # RAM CPUS VNC SMBIOS PROFILE UUID MAC
+    local restart=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --restart) restart=1; shift ;;
+            --profile) PROFILE=$2; shift 2 ;;
+            *) die "unknown option $1" ;;
+        esac
+    done
+    virsh dominfo "$NAME" >/dev/null 2>&1 || die "domain '$NAME' is not defined (appsandbox-replica create)"
+    if [ -z "$MAC" ]; then   # replica created before the MAC was recorded: keep the one it has
+        MAC=$(virsh dumpxml "$NAME" | sed -n "s/.*<mac address='\([^']*\)'.*/\1/p" | head -1)
+        [ -n "$MAC" ] && save_conf "$UUID" "$MAC"
+    fi
+    gen_xml "$UUID" "$MAC" > "$DIR/$NAME.xml"
+    virsh define "$DIR/$NAME.xml" >/dev/null
+    local src="$PROFILE"; [ -f "$PROFILE" ] || src="no profile (defaults)"
+    if virsh domstate "$NAME" 2>/dev/null | grep -q running; then
+        if [ "$restart" = 1 ]; then
+            virsh destroy "$NAME" >/dev/null; virsh start "$NAME" >/dev/null
+            echo "OK: replica redefined from $src and restarted"
+        else
+            echo "OK: replica redefined from $src; the new identity shows after its next boot"
+            echo "    (appsandbox-replica stop + start, or 'reidentify --restart')"
+        fi
+    else
+        echo "OK: replica redefined from $src; applies when it starts"
+    fi
+    hv_note
+}
+
+# The identity-patched QEMU (see /opt/appsandbox/qemu-identity/README.md):
+# built from the upstream 8.2.2 tarball + patches, installed over the distro
+# binary with dpkg-divert so libvirt, AppArmor and the firmware paths are
+# untouched. `restore` puts the distro binary back.
+cmd_qemu() {
+    case "${1:-status}" in
+        build)
+            need_root; shift
+            [ -x "$QEMU_SRC/build.sh" ] || [ -f "$QEMU_SRC/build.sh" ] \
+                || die "no $QEMU_SRC/build.sh (the patches + build script ship in the guest image under /opt/appsandbox)"
+            [ -x "$QEMU_BIN" ] || [ -x "$QEMU_DISTRIB" ] || cmd_install
+            exec bash "$QEMU_SRC/build.sh" "$@" ;;
+        restore)
+            need_root
+            if dpkg-divert --list "$QEMU_BIN" 2>/dev/null | grep -q "$QEMU_DISTRIB"; then
+                rm -f "$QEMU_BIN"
+                dpkg-divert --quiet --local --rename --remove "$QEMU_BIN"
+                rm -f "$QEMU_STAMP"
+                rm -f /var/cache/libvirt/qemu/capabilities/*.xml 2>/dev/null || true
+                systemctl try-restart libvirtd 2>/dev/null || true
+                echo "OK: distro qemu-system-x86_64 restored (running replica keeps the patched one until restarted)"
+            else
+                echo "stock qemu-system-x86_64 already in place"
+            fi ;;
+        status)
+            if qemu_patched_installed; then
+                echo "identity-patched QEMU $(sed -n 's/^version=//p' "$QEMU_STAMP") at $QEMU_BIN (distro binary kept at $QEMU_DISTRIB)"
+            else
+                echo "stock $QEMU_BIN: $("$QEMU_BIN" --version 2>/dev/null | head -1 || echo "not installed")"
+                echo "run 'sudo appsandbox-replica qemu build' for the identity-patched one"
+            fi ;;
+        *) die "usage: appsandbox-replica qemu build|restore|status" ;;
+    esac
 }
 
 cmd_ip() {
@@ -222,13 +353,27 @@ cmd_ssh() {
 }
 
 cmd_checks() {
-    # the nine identity checks, printed in the [{check,name}] format
+    # the identity checks, printed in the [{check,name}] format: the nine
+    # guest-visible ones plus what only the emulator decides (ACPI header
+    # IDs, SMBIOS processor manufacturer, CD-ROM vendor/model)
     cmd_ssh 'sudo modprobe cpuid 2>/dev/null; sudo python3 - <<"PY"
 import json, subprocess, os
 def cat(p):
     try: return open(p).read().strip()
     except OSError: return "?"
 def sh(c): return subprocess.run(c, shell=True, capture_output=True, text=True).stdout.strip()
+def raw(p, n=None):
+    try:
+        with open(p, "rb") as f: return f.read(n) if n else f.read()
+    except OSError: return b""
+def field(b, a, z): return b[a:z].decode("ascii", "replace").strip(" \x00") if len(b) >= z else "?"
+def smbios_str(entry, off):
+    # DMI structure: header (type, length, handle), formatted area, then the string set
+    b = raw("/sys/firmware/dmi/entries/%s/raw" % entry)
+    if len(b) < 4 or len(b) <= off: return "?"
+    n, idx = b[1], b[off]
+    strs = b[n:].split(b"\x00")
+    return strs[idx - 1].decode("ascii", "replace").strip() if 0 < idx <= len(strs) else ""
 out = [{"check": k, "name": cat("/sys/class/dmi/id/" + k)} for k in ("sys_vendor", "product_name")]
 out.append({"check": "bios_vendor", "name": (cat("/sys/class/dmi/id/bios_vendor") + " " + cat("/sys/class/dmi/id/bios_version")).strip()})
 out.append({"check": "chassis_vendor", "name": cat("/sys/class/dmi/id/chassis_vendor")})
@@ -249,6 +394,14 @@ out.append({"check": "CPUID 0x40000000", "name": sig})
 out.append({"check": "hypervisor CPU flag", "name": "set" if " hypervisor" in open("/proc/cpuinfo").read() else "not set"})
 out.append({"check": "systemd-detect-virt", "name": sh("systemd-detect-virt")})
 out.append({"check": "clocksource", "name": cat("/sys/devices/system/clocksource/clocksource0/current_clocksource")})
+dsdt = raw("/sys/firmware/acpi/tables/DSDT", 36)
+out.append({"check": "acpi_oem_id", "name": field(dsdt, 10, 16)})
+out.append({"check": "acpi_oem_table_id", "name": field(dsdt, 16, 24)})
+out.append({"check": "acpi_creator_id", "name": field(dsdt, 28, 32)})
+out.append({"check": "smbios_manufacturer", "name": smbios_str("4-0", 7)})
+cd = [d for d in sorted(os.listdir("/sys/block")) if d.startswith("sr")]
+out.append({"check": "drive_vendor", "name": cat("/sys/block/%s/device/vendor" % cd[0]) if cd else "?"})
+out.append({"check": "cdrom_model", "name": cat("/sys/block/%s/device/model" % cd[0]) if cd else "?"})
 print(json.dumps(out, indent=2))
 PY'
 }
@@ -257,10 +410,12 @@ cmd=${1:-status}; shift || true
 case "$cmd" in
     install) cmd_install ;;
     create)  cmd_create "$@" ;;
+    reidentify) cmd_reidentify "$@" ;;
+    qemu)    cmd_qemu "$@" ;;
     start)   need_root; virsh start "$NAME" ;;
     stop)    need_root; virsh shutdown "$NAME" ;;
     destroy) need_root; virsh destroy "$NAME" 2>/dev/null || true; virsh undefine "$NAME" 2>/dev/null || true
-             rm -f "$DIR/disk.qcow2" "$DIR/seed.iso" "$DIR/$NAME.xml"; echo "replica removed (base image kept in $DIR)" ;;
+             rm -f "$DIR/disk.qcow2" "$DIR/seed.iso" "$DIR/$NAME.xml" "$DIR/replica.conf"; echo "replica removed (base image kept in $DIR)" ;;
     status)  virsh dominfo "$NAME" 2>/dev/null | grep -E "^(Name|State|CPU\(s\)|Max memory)" || echo "no replica defined"
              ip=$(cmd_ip || true); [ -n "$ip" ] && echo "IP:              $ip" || true ;;
     ip)      cmd_ip ;;
@@ -268,5 +423,5 @@ case "$cmd" in
     console) exec virsh console "$NAME" ;;
     xml)     cat "$DIR/$NAME.xml" ;;
     checks)  cmd_checks ;;
-    *)       die "unknown command '$cmd' (install|create|start|stop|destroy|status|ip|ssh|console|xml|checks)" ;;
+    *)       die "unknown command '$cmd' (install|create|reidentify|qemu|start|stop|destroy|status|ip|ssh|console|xml|checks)" ;;
 esac

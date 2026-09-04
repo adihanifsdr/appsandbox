@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Adi Hanif <adihanifsdr@gmail.com>
+Date: Fri, 4 Sep 2026 15:41:57 +0700
+Subject: [PATCH] usb: QEMU_IDENTITY_USB_VENDOR for the HID and Wacom string
+ descriptors
+
+usb-tablet / usb-mouse / usb-kbd present manufacturer "QEMU" and products
+"QEMU USB Tablet" etc.; usb-wacom-tablet presents manufacturer "QEMU".
+With the variable set the manufacturer becomes that string and the "QEMU "
+prefix of the HID product strings is replaced by it. The runtime string
+list set with usb_desc_set_string() takes precedence over the static
+descriptor table, so no descriptor is rebuilt.
+---
+ hw/usb/dev-hid.c   | 28 ++++++++++++++++++++++++++++
+ hw/usb/dev-wacom.c |  6 ++++++
+ 2 files changed, 34 insertions(+)
+
+diff --git a/hw/usb/dev-hid.c b/hw/usb/dev-hid.c
+index bdd6d1ff..3ffac7e9 100644
+--- a/hw/usb/dev-hid.c
++++ b/hw/usb/dev-hid.c
+@@ -24,6 +24,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/identity.h"
+ #include "ui/console.h"
+ #include "hw/usb.h"
+ #include "migration/vmstate.h"
+@@ -695,6 +696,32 @@ static void usb_hid_unrealize(USBDevice *dev)
+     hid_free(&us->hid);
+ }
+ 
++/*
++ * QEMU_IDENTITY_USB_VENDOR replaces the "QEMU" manufacturer string and the
++ * "QEMU " prefix of the product strings the guest reads.
++ */
++static void usb_hid_apply_identity(USBDevice *dev)
++{
++    static const int products[] = {
++        STR_PRODUCT_MOUSE, STR_PRODUCT_TABLET, STR_PRODUCT_KEYBOARD
++    };
++    const char *vendor = qemu_identity_str("USB_VENDOR", NULL);
++    int i;
++
++    if (!vendor) {
++        return;
++    }
++    usb_desc_set_string(dev, STR_MANUFACTURER, vendor);
++    for (i = 0; i < ARRAY_SIZE(products); i++) {
++        const char *s = desc_strings[products[i]];
++
++        if (g_str_has_prefix(s, "QEMU ")) {
++            g_autofree char *p = g_strconcat(vendor, s + 4, NULL);
++            usb_desc_set_string(dev, products[i], p);
++        }
++    }
++}
++
+ static void usb_hid_initfn(USBDevice *dev, int kind,
+                            const USBDesc *usb1, const USBDesc *usb2,
+                            Error **errp)
+@@ -718,6 +745,7 @@ static void usb_hid_initfn(USBDevice *dev, int kind,
+ 
+     usb_desc_create_serial(dev);
+     usb_desc_init(dev);
++    usb_hid_apply_identity(dev);
+     us->intr = usb_ep_get(dev, USB_TOKEN_IN, 1);
+     hid_init(&us->hid, kind, usb_hid_changed);
+     if (us->display && us->hid.s) {
+diff --git a/hw/usb/dev-wacom.c b/hw/usb/dev-wacom.c
+index 7177c17f..9f817fb9 100644
+--- a/hw/usb/dev-wacom.c
++++ b/hw/usb/dev-wacom.c
+@@ -27,6 +27,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/identity.h"
+ #include "ui/console.h"
+ #include "hw/usb.h"
+ #include "hw/usb/hid.h"
+@@ -409,8 +410,13 @@ static void usb_wacom_unrealize(USBDevice *dev)
+ static void usb_wacom_realize(USBDevice *dev, Error **errp)
+ {
+     USBWacomState *s = USB_WACOM(dev);
++    const char *vendor = qemu_identity_str("USB_VENDOR", NULL);
++
+     usb_desc_create_serial(dev);
+     usb_desc_init(dev);
++    if (vendor) {
++        usb_desc_set_string(dev, STR_MANUFACTURER, vendor);
++    }
+     s->intr = usb_ep_get(dev, USB_TOKEN_IN, 1);
+     s->changed = 1;
+ }

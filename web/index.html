@@ -166,7 +166,7 @@
                 <label class="needs-linux" title="Install the GA kernel (linux-generic, e.g. 6.8 on 24.04) from the Ubuntu archive at first boot and boot it instead of the ISO's HWE kernel - what a stock server / VPS runs. Needs internet during create."><input type="checkbox" id="ga-kernel"> GA kernel</label>
             </div>
 
-            <label class="needs-linux" for="vm-identity" title="Optional. What the guest reports about the machine it runs on: DMI strings (sys_vendor, product_name, bios_vendor, chassis_vendor, ...), systemd-detect-virt, chipset. Applied inside the guest at every boot. CPUID / clocksource cannot be changed this way.">VM identity (JSON):</label>
+            <label class="needs-linux" for="vm-identity" title="Optional. What the guest reports about the machine it runs on: DMI strings (sys_vendor, product_name, bios_vendor, chassis_vendor, ...), systemd-detect-virt, chipset. Applied inside the guest at every boot. CPUID / clocksource cannot be changed this way; the nested VPS replica (appsandbox-replica) honours those and the ACPI / SMBIOS / drive strings with its identity-patched QEMU.">VM identity (JSON):</label>
             <textarea class="needs-linux" id="vm-identity" rows="3" spellcheck="false" placeholder='[{"check":"sys_vendor","name":"OpenStack Foundation"},{"check":"product_name","name":"OpenStack Nova"},{"check":"systemd-detect-virt","name":"kvm"}]'></textarea>
         </div>
         <div class="modal-buttons">
@@ -181,8 +181,9 @@
 <div class="modal-overlay" id="identity-overlay">
     <div class="modal wide">
         <h3>VM identity &mdash; <span id="identity-vm-name"></span></h3>
-        <p>What the guest reports about the machine it runs on. DMI strings (sys_vendor, product_name, bios_vendor, chassis_vendor, ...), systemd-detect-virt and the chipset are overlaid inside the guest; CPUID and the clocksource cannot be changed this way (use <code>appsandbox-replica</code> in the guest for a real KVM machine). Saved to the VM, pushed to a running guest immediately, and re-applied at every boot.</p>
-        <textarea id="identity-text" rows="12" spellcheck="false" autocorrect="off" autocapitalize="off" style="width:100%; box-sizing:border-box; font-family: Consolas, monospace; font-size: 12px;" placeholder='[{"check":"sys_vendor","name":"OpenStack Foundation"},{"check":"product_name","name":"OpenStack Nova"},{"check":"systemd-detect-virt","name":"kvm"}]'></textarea>
+        <p>What the guest reports about the machine it runs on. DMI strings (sys_vendor, product_name, bios_vendor, chassis_vendor, ...), systemd-detect-virt and the chipset are overlaid inside the guest; CPUID and the clocksource cannot be changed this way. Saved to the VM, pushed to a running guest immediately, and re-applied at every boot.</p>
+        <p>Hypervisor-level keys are honoured by the nested VPS replica (<code>appsandbox-replica</code> in the guest) once it runs the identity-patched QEMU (<code>sudo appsandbox-replica qemu build</code>): <code>acpi_oem_id</code>, <code>acpi_oem_table_id</code>, <code>acpi_creator_id</code>, <code>smbios_manufacturer</code>, <code>drive_vendor</code>, <code>disk_model</code>, <code>cdrom_model</code>, <code>usb_vendor</code>, <code>CPUID 0x40000000</code> and <code>hypervisor CPU flag</code> ("not set"). The replica is redefined on every save and shows the new identity at its next boot.</p>
+        <textarea id="identity-text" rows="12" spellcheck="false" autocorrect="off" autocapitalize="off" style="width:100%; box-sizing:border-box; font-family: Consolas, monospace; font-size: 12px;" placeholder='[{"check":"sys_vendor","name":"OpenStack Foundation"},{"check":"product_name","name":"OpenStack Nova"},{"check":"systemd-detect-virt","name":"kvm"},{"check":"acpi_oem_id","name":"BOCHS"},{"check":"cdrom_model","name":"QEMU DVD-ROM"},{"check":"CPUID 0x40000000","name":"KVMKVMKVM"}]'></textarea>
         <div class="modal-buttons">
             <button onclick="closeIdentityModal()">Cancel</button>
             <button class="danger" onclick="saveIdentity(true)">Clear</button>

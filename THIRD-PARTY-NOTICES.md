@@ -84,6 +84,19 @@ governs that file.
   (both also shipped in the app bundle); `vendor/qemu-ivshmem/fetch-sources.sh`
   retrieves the corresponding source tarballs.
 
+## tools/linux/replica/qemu-identity/ — patches against QEMU (source only)
+
+- **License:** QEMU — GNU General Public License, version 2 or later (`SPDX: GPL-2.0-or-later`
+  for the patched files; the project as a whole is GPL-2.0).
+- **Copyright:** the QEMU project and its contributors; the patches
+  (`patches/*.patch`) are AppSandbox's, licensed under the same terms.
+- `build.sh` downloads the upstream `qemu-8.2.2.tar.xz` (sha256-pinned) *inside the
+  Linux guest*, applies the patches and builds `qemu-system-x86_64` there for the
+  nested VPS replica. No QEMU binary is shipped with AppSandbox for this feature; the
+  patches are the complete corresponding source of the local build. The idea follows
+  [kila58/qemu-patched](https://github.com/kila58/qemu-patched) (QEMU 8.1.3 with the
+  same strings hardcoded), reworked as runtime `QEMU_IDENTITY_*` overrides.
+
 ## vendor/virtio-win/ — NetKVM (Red Hat VirtIO Ethernet Adapter)
 
 - **License:** BSD 3-Clause (`SPDX: BSD-3-Clause`). License text:

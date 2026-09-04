@@ -373,6 +373,17 @@ int do_prefetch_repo(const wchar_t *repo, const wchar_t *branch, const wchar_t *
         u_cp_file(s, d);
     }
 
+    /* qemu-identity/: QEMU patches + build script for the replica's
+       identity-patched emulator (tools/linux/replica/qemu-identity); built
+       inside the guest on demand, nothing prebuilt is shipped */
+    {
+        wchar_t s[MAX_PATH], d[MAX_PATH];
+        swprintf_s(s, MAX_PATH, L"%s\\tools\\linux\\replica\\qemu-identity", extracted_root);
+        swprintf_s(d, MAX_PATH, L"%s\\qemu-identity", out_dir);
+        int c = u_cp_tree(s, d);
+        log_msg(L"prefetch-repo: staged qemu-identity/ (%d files)", c);
+    }
+
     /* wsl-mesa pieces */
     {
         const wchar_t *files[] = {

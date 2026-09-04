@@ -29,6 +29,11 @@ What cannot (hypervisor-level, reported as "not overlayable"): the CPUID
 hypervisor leaf (0x40000000), the hypervisor CPU flag, and the kernel
 clocksource. Those need the nested-KVM replica instead.
 
+Replica-only keys (acpi_oem_id, acpi_oem_table_id, acpi_creator_id,
+smbios_manufacturer, drive_vendor, disk_model, cdrom_model, usb_vendor) are
+what the emulator itself reports; they are left to appsandbox-replica,
+which hands them to its identity-patched QEMU, and skipped here.
+
 Everything is reversible: `remove` unmounts the overlays and undoes the
 dpkg diversions. Idempotent: `apply` can run at every boot.
 """
@@ -50,9 +55,14 @@ DMI_KEYS = {
     "chassis_type", "chassis_version", "chassis_serial", "chassis_asset_tag",
 }
 NOT_OVERLAYABLE = {
-    "CPUID 0x40000000": "the CPUID hypervisor leaf comes from the hypervisor",
-    "hypervisor CPU flag": "set by the hypervisor (already 'set' under Hyper-V)",
+    "CPUID 0x40000000": "the CPUID hypervisor leaf comes from the hypervisor (the replica's patched QEMU honours it)",
+    "hypervisor CPU flag": "set by the hypervisor (already 'set' under Hyper-V; the replica can hide it)",
     "clocksource": "kernel clocksource is chosen from the hypervisor's clock",
+}
+# what the emulator reports: honoured by appsandbox-replica (identity-patched QEMU)
+REPLICA_KEYS = {
+    "acpi_oem_id", "acpi_oem_table_id", "acpi_creator_id", "smbios_manufacturer",
+    "drive_vendor", "disk_model", "cdrom_model", "usb_vendor",
 }
 # "chipset" -> lspci wrapper; "systemd-detect-virt" -> wrapper
 
@@ -239,6 +249,8 @@ def apply():
                 skipped.append("%s (only a 440FX/PIIX3 list is available)" % key)
         elif key in NOT_OVERLAYABLE:
             skipped.append("%s (not overlayable: %s)" % (key, NOT_OVERLAYABLE[key]))
+        elif key in REPLICA_KEYS:
+            skipped.append("%s (emulator level: applied by appsandbox-replica with the identity-patched QEMU)" % key)
         else:
             skipped.append("%s (unknown check)" % key)
 

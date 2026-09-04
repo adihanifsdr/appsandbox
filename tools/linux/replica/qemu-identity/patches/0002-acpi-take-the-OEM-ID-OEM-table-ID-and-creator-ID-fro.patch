@@ -1,0 +1,131 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Adi Hanif <adihanifsdr@gmail.com>
+Date: Fri, 4 Sep 2026 15:41:56 +0700
+Subject: [PATCH] acpi: take the OEM ID, OEM table ID and creator ID from
+ QEMU_IDENTITY_ACPI_*
+
+x86 machines default their ACPI OEM ID / OEM table ID to "BOCHS " /
+"BXPC    " and every table built by aml-build carries the creator ID
+"BXPC"; the header template used for -acpitable blobs says "QEMUQE" /
+"QEMUQEMU" / "QEMU". Read QEMU_IDENTITY_ACPI_OEM_ID, _ACPI_OEM_TABLE_ID
+and _ACPI_CREATOR_ID first (space padded / truncated to 6, 8 and 4
+bytes). The x-oem-id / x-oem-table-id machine properties still override
+the environment.
+---
+ hw/acpi/aml-build.c |  6 +++++-
+ hw/acpi/core.c      | 22 +++++++++++++++++++++-
+ hw/i386/x86.c       | 11 +++++++++--
+ 3 files changed, 35 insertions(+), 4 deletions(-)
+
+diff --git a/hw/acpi/aml-build.c b/hw/acpi/aml-build.c
+index af66bde0..febe2f1f 100644
+--- a/hw/acpi/aml-build.c
++++ b/hw/acpi/aml-build.c
+@@ -20,6 +20,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/identity.h"
+ #include <glib/gprintf.h>
+ #include "hw/acpi/aml-build.h"
+ #include "qemu/bswap.h"
+@@ -1707,6 +1708,7 @@ Aml *aml_object_type(Aml *object)
+ 
+ void acpi_table_begin(AcpiTable *desc, GArray *array)
+ {
++    char creator_id[4];
+ 
+     desc->array = array;
+     desc->table_offset = array->len;
+@@ -1728,7 +1730,9 @@ void acpi_table_begin(AcpiTable *desc, GArray *array)
+     /* OEM Table ID */
+     build_append_padded_str(array, desc->oem_table_id, 8, '\0');
+     build_append_int_noprefix(array, 1, 4); /* OEM Revision */
+-    g_array_append_vals(array, ACPI_BUILD_APPNAME8, 4); /* Creator ID */
++    qemu_identity_fixed("ACPI_CREATOR_ID", ACPI_BUILD_APPNAME8,
++                        creator_id, sizeof(creator_id), ' ');
++    g_array_append_vals(array, creator_id, 4); /* Creator ID */
+     build_append_int_noprefix(array, 1, 4); /* Creator Revision */
+ }
+ 
+diff --git a/hw/acpi/core.c b/hw/acpi/core.c
+index ec5e127d..465c0ab3 100644
+--- a/hw/acpi/core.c
++++ b/hw/acpi/core.c
+@@ -20,6 +20,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/identity.h"
+ #include "hw/irq.h"
+ #include "hw/acpi/acpi.h"
+ #include "hw/nvram/fw_cfg.h"
+@@ -55,12 +56,30 @@ struct acpi_table_header {
+ #define ACPI_TABLE_HDR_SIZE sizeof(struct acpi_table_header)
+ #define ACPI_TABLE_PFX_SIZE sizeof(uint16_t)  /* size of the extra prefix */
+ 
+-static const char unsigned dfl_hdr[ACPI_TABLE_HDR_SIZE - ACPI_TABLE_PFX_SIZE] =
++static char unsigned dfl_hdr[ACPI_TABLE_HDR_SIZE - ACPI_TABLE_PFX_SIZE] =
+     "QEMU\0\0\0\0\1\0"       /* sig (4), len(4), revno (1), csum (1) */
+     "QEMUQEQEMUQEMU\1\0\0\0" /* OEM id (6), table (8), revno (4) */
+     "QEMU\1\0\0\0"           /* ASL compiler ID (4), version (4) */
+     ;
+ 
++/* Apply the QEMU_IDENTITY_ACPI_* overrides to the template header once. */
++static void dfl_hdr_apply_identity(void)
++{
++    static bool done;
++
++    if (done) {
++        return;
++    }
++    done = true;
++    /* offsets within the header without the 2-byte prefix */
++    qemu_identity_fixed("ACPI_OEM_ID", "QEMUQE",
++                        (char *)dfl_hdr + 10, 6, ' ');
++    qemu_identity_fixed("ACPI_OEM_TABLE_ID", "QEMUQEMU",
++                        (char *)dfl_hdr + 16, 8, ' ');
++    qemu_identity_fixed("ACPI_CREATOR_ID", "QEMU",
++                        (char *)dfl_hdr + 28, 4, ' ');
++}
++
+ char unsigned *acpi_tables;
+ size_t acpi_tables_len;
+ 
+@@ -147,6 +166,7 @@ static void acpi_table_install(const char unsigned *blob, size_t bloblen,
+          *                                  acpi_payload_size
+          */
+         body_start = 0;
++        dfl_hdr_apply_identity();
+         hdr_src = dfl_hdr;
+     }
+     body_size = bloblen - body_start;
+diff --git a/hw/i386/x86.c b/hw/i386/x86.c
+index 2b6291ad..774a4c3c 100644
+--- a/hw/i386/x86.c
++++ b/hw/i386/x86.c
+@@ -24,6 +24,7 @@
+ #include "qemu/error-report.h"
+ #include "qemu/option.h"
+ #include "qemu/cutils.h"
++#include "qemu/identity.h"
+ #include "qemu/units.h"
+ #include "qemu/datadir.h"
+ #include "qapi/error.h"
+@@ -1395,8 +1396,14 @@ static void x86_machine_initfn(Object *obj)
+     x86ms->pit = ON_OFF_AUTO_AUTO;
+     x86ms->pic = ON_OFF_AUTO_AUTO;
+     x86ms->pci_irq_mask = ACPI_BUILD_PCI_IRQS;
+-    x86ms->oem_id = g_strndup(ACPI_BUILD_APPNAME6, 6);
+-    x86ms->oem_table_id = g_strndup(ACPI_BUILD_APPNAME8, 8);
++    /* The defaults can be overridden from the environment; the x-oem-id
++     * and x-oem-table-id machine properties still win over both. */
++    x86ms->oem_id = g_malloc0(6 + 1);
++    qemu_identity_fixed("ACPI_OEM_ID", ACPI_BUILD_APPNAME6,
++                        x86ms->oem_id, 6, ' ');
++    x86ms->oem_table_id = g_malloc0(8 + 1);
++    qemu_identity_fixed("ACPI_OEM_TABLE_ID", ACPI_BUILD_APPNAME8,
++                        x86ms->oem_table_id, 8, ' ');
+     x86ms->bus_lock_ratelimit = 0;
+     x86ms->above_4g_mem_start = 4 * GiB;
+ }

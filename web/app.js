@@ -807,7 +807,7 @@ function buildRowCells(vm, i, statusTd) {
     var identCell = makeIconCell('identity', '\uD83E\uDEAA', isLinux && !bld,
         (function(idx) { return function() { sendCmd('getIdentity', {vmIndex: idx}); }; })(i),
         isLinux ? '' : 'hidden',
-        'Edit the VM identity profile - what the guest reports about its machine (DMI strings, systemd-detect-virt, chipset). Applies immediately on a running VM.');
+        'Edit the VM identity profile - what the guest reports about its machine (DMI strings, systemd-detect-virt, chipset; ACPI / SMBIOS / drive / CPUID strings for the nested VPS replica). Applies immediately on a running VM; a replica picks it up at its next boot.');
 
     var cells = [
         makeCell(vm.name, i, 0),
