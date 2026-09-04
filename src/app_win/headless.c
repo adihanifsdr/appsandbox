@@ -249,7 +249,7 @@ static int append_vm_json(char *out, int cap, int pos, VmInstance *v)
     pos  = append_wstr(out, cap, pos, v->os_type);
     pos += sprintf_s(out + pos, cap - pos,
         ",\"state\":\"%s\",\"running\":%s,\"agentOnline\":%s,\"installComplete\":%s,"
-        "\"building\":%s,\"progress\":%d,\"sshState\":%d,\"sshPort\":%lu,\"vncPort\":%lu,"
+        "\"building\":%s,\"progress\":%d,\"sshState\":%d,\"sshPort\":%lu,\"vncPort\":%lu,\"hasIdentity\":%s,"
         "\"ramMb\":%lu,\"hddGb\":%lu,\"cpuCores\":%lu,\"gpuMode\":%d,\"networkMode\":%d,"
         "\"displayOpen\":%s,\"buildStep\":",
         derive_state(v),
@@ -258,6 +258,7 @@ static int append_vm_json(char *out, int cap, int pos, VmInstance *v)
         v->vhdx_progress,
         (v->ssh_key_deployed && v->ssh_state == 2) ? 4 : v->ssh_state,   /* 4 = ready + key deployed */
         (unsigned long)v->ssh_port, (unsigned long)v->vnc_guest_port,
+        v->identity[0] ? "true" : "false",
         (unsigned long)v->ram_mb, (unsigned long)v->hdd_gb, (unsigned long)v->cpu_cores,
         v->gpu_mode, v->network_mode,
         display_is_open(v->unique_id) ? "true" : "false");
@@ -678,6 +679,12 @@ static int handle_request(PHTTP_REQUEST req)
             if (json_get_bool(body, L"sshDeployKey", &bv)) cfg.ssh_deploy_key = bv;
             if (json_get_bool(body, L"gaKernel", &bv)) cfg.linux_ga_kernel = bv;
             if (json_get_bool(body, L"isTemplate", &bv)) cfg.is_template = bv;
+            {
+                static wchar_t ident[4096];
+                ident[0] = L'\0';
+                json_get_string(body, L"vmIdentity", ident, 4096);
+                cfg.identity = ident[0] ? ident : NULL;
+            }
             if (cfg.ssh_deploy_key && !cfg.ssh_enabled) {
                 send_err(req->RequestId, 400, "Bad Request", "invalid_arg",
                          "sshDeployKey requires sshEnabled");
@@ -731,7 +738,7 @@ static int handle_request(PHTTP_REQUEST req)
                 return 0;
             }
             if (verb == HttpVerbPUT) {   /* edit (PUT instead of PATCH: PATCH isn't in the http.sys verb enum) */
-                wchar_t body[2048]; int iv; HRESULT hr = S_OK;
+                wchar_t body[8192]; int iv; HRESULT hr = S_OK;
                 /* config is locked while building or running -- return a clean 409,
                    not the generic 500 that asb_vm_set_*'s E_ACCESSDENIED would
                    produce. The GUI likewise disables the edit control while a VM is
@@ -745,7 +752,7 @@ static int handle_request(PHTTP_REQUEST req)
                     send_err(req->RequestId, 409, "Conflict", "vm_running", "cannot edit a running VM; stop it first");
                     return 0;
                 }
-                body_to_wide(req, body, 2048);
+                body_to_wide(req, body, 8192);
                 /* name is the guest hostname -- fixed at create, NOT editable. */
                 if (json_get_int(body, L"ramMb", &iv)) {
                     if (iv < 512 || iv % 2 != 0) { send_err(req->RequestId, 400, "Bad Request", "invalid_arg", "RAM must be 2 MB-aligned and at least 512 MB"); return 0; }
@@ -754,6 +761,12 @@ static int handle_request(PHTTP_REQUEST req)
                 if (json_get_int(body, L"cpuCores", &iv)) {
                     if (iv < 1) { send_err(req->RequestId, 400, "Bad Request", "invalid_arg", "CPU cores must be at least 1"); return 0; }
                     hr = asb_vm_set_cpu(vm, (DWORD)iv);
+                }
+                {
+                    /* vmIdentity: compact JSON profile, "" clears it */
+                    static wchar_t ident[4096];
+                    if (json_get_string(body, L"vmIdentity", ident, 4096))
+                        hr = asb_vm_set_identity(vm, ident);
                 }
                 if (json_get_int(body, L"gpuMode", &iv)) {
                     if (iv < 0 || iv > 2) { send_err(req->RequestId, 400, "Bad Request", "invalid_arg", "gpuMode must be 0 (None), 1 (Default), or 2 (Try all)"); return 0; }

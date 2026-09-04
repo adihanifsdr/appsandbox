@@ -649,6 +649,60 @@ static void handle_set_ip(int fd, const char *tag, const char *args)
     send_reply(fd, tag, rc == 0 ? "ok" : "error:netplan_failed");
 }
 
+/* ---- VM identity profile ----
+ *
+ * "identity <json>"  : store the profile at /etc/appsandbox/identity.json
+ *                      and run `appsandbox-identity apply` (DMI overlay,
+ *                      systemd-detect-virt / dmidecode / lspci wrappers).
+ * "identity none"    : delete the profile and `appsandbox-identity remove`.
+ * Untagged reply: identity_applied:<summary> / identity_failed:<detail>. */
+static void handle_identity(int fd, const char *json)
+{
+    const char *tool = "/usr/local/sbin/appsandbox-identity";
+    char out[512];
+    FILE *p;
+
+    if (strcmp(json, "none") == 0) {
+        if (access("/etc/appsandbox/identity.json", F_OK) != 0) {
+            send_line(fd, "identity_applied:none");
+            return;
+        }
+        unlink("/etc/appsandbox/identity.json");
+        if (access(tool, X_OK) == 0) run_sync("/usr/local/sbin/appsandbox-identity remove >/dev/null 2>&1");
+        agent_log("identity: profile removed");
+        send_line(fd, "identity_applied:removed");
+        return;
+    }
+    if (access(tool, X_OK) != 0) {
+        send_line(fd, "identity_failed:appsandbox-identity tool not installed in the guest");
+        return;
+    }
+    mkdir("/etc/appsandbox", 0755);
+    {
+        FILE *f = fopen("/etc/appsandbox/identity.json", "w");
+        if (!f) { send_line(fd, "identity_failed:cannot write /etc/appsandbox/identity.json"); return; }
+        fputs(json, f); fputc('\n', f); fclose(f);
+        chmod("/etc/appsandbox/identity.json", 0644);
+    }
+    p = popen("/usr/local/sbin/appsandbox-identity apply 2>&1 | tr '\\n' ';' | cut -c1-400", "r");
+    out[0] = '\0';
+    if (p) {
+        if (!fgets(out, sizeof(out), p)) out[0] = '\0';
+        pclose(p);
+    }
+    for (char *q = out; *q; q++) if (*q == '\n' || *q == '\r') *q = ' ';
+    agent_log("identity: %s", out);
+    if (strncmp(out, "applied:", 8) == 0 && strncmp(out, "applied: nothing", 16) != 0) {
+        char msg[560];
+        snprintf(msg, sizeof(msg), "identity_applied:%s", out);
+        send_line(fd, msg);
+    } else {
+        char msg[560];
+        snprintf(msg, sizeof(msg), "identity_failed:%s", out[0] ? out : "no output");
+        send_line(fd, msg);
+    }
+}
+
 /* ---- SSH proxy: AF_VSOCK :7 ↔ localhost:22 ----
  *
  * Mirror of tools/agent/agent.c's ssh_proxy_thread + ssh_relay_thread.
@@ -1204,6 +1258,9 @@ static void handle_client(int fd)
         }
         else if (strcmp(cmd, "ssh_enable") == 0) {
             handle_ssh_enable(fd, tag);
+        }
+        else if (strncmp(cmd, "identity ", 9) == 0) {
+            handle_identity(fd, cmd + 9);
         }
         else if (strncmp(cmd, "ssh_deploy_key ", 15) == 0) {
             send_reply(fd, tag, deploy_ssh_key(cmd + 15) ? "ssh_key_deployed" : "ssh_key_failed");

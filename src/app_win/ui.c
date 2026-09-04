@@ -224,6 +224,7 @@ static void build_vm_json(JsonBuilder *jb, int i)
     jb_bool(jb, L"sshDeployKey", v->ssh_deploy_key);
     jb_bool(jb, L"sshKeyDeployed", v->ssh_key_deployed);
     jb_int(jb, L"vncPort", (int)v->vnc_guest_port);     /* guest listener, 0 = none */
+    jb_bool(jb, L"hasIdentity", v->identity[0] != L'\0');
     jb_int(jb, L"vncTunnelPort", (int)v->vnc_port);     /* host tunnel, 0 = not started */
 
     /* Snapshot tree */
@@ -988,6 +989,12 @@ static void on_webview2_message(const wchar_t *json)
         json_get_bool(json, L"sshEnabled", &cfg.ssh_enabled);
         json_get_bool(json, L"sshDeployKey", &cfg.ssh_deploy_key);
         json_get_bool(json, L"gaKernel", &cfg.linux_ga_kernel);
+        {
+            static wchar_t ident_buf[4096];
+            ident_buf[0] = L'\0';
+            json_get_string(json, L"vmIdentity", ident_buf, 4096);
+            cfg.identity = ident_buf[0] ? ident_buf : NULL;
+        }
 
         asb_vm_create(&cfg);
         SecureZeroMemory(pass_buf, sizeof(pass_buf));

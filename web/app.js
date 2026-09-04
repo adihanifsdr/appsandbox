@@ -456,8 +456,27 @@ function gatherConfig() {
         testMode:    document.getElementById('test-mode').checked,
         sshEnabled:  document.getElementById('ssh-enabled').checked,
         sshDeployKey: document.getElementById('ssh-deploy-key').checked,
-        gaKernel:    document.getElementById('ga-kernel').checked
+        gaKernel:    document.getElementById('ga-kernel').checked,
+        vmIdentity:  compactIdentity(document.getElementById('vm-identity').value)
     };
+}
+
+/* VM identity profile: accept the [{check,name}] list or a {key:value}
+   object, re-emit it compact (single line) for the config file, or '' when
+   empty. Throws with a readable message on invalid JSON. */
+function compactIdentity(text) {
+    text = (text || '').trim();
+    if (!text) return '';
+    var v;
+    try { v = JSON.parse(text); } catch (e) { throw new Error('VM identity is not valid JSON: ' + e.message); }
+    if (Array.isArray(v)) {
+        for (var i = 0; i < v.length; i++)
+            if (!v[i] || typeof v[i] !== 'object' || !('check' in v[i]))
+                throw new Error('VM identity: entry ' + (i + 1) + ' needs a "check" and a "name"');
+    } else if (!v || typeof v !== 'object') {
+        throw new Error('VM identity must be a JSON array of {"check","name"} or an object');
+    }
+    return JSON.stringify(v);
 }
 
 /* "Deploy SSH key" depends on "SSH Server": grey it out (and clear it) unless

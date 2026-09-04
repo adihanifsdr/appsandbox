@@ -380,6 +380,10 @@ static int process_async_message(VmInstance *vm, SOCKET s, const char *buf)
         ui_log(L"SSH ready for \"%s\".", vm->name);
         vm_agent_send_deploy_key(s, vm);   /* deploy the AppSandbox key now SSH is up */
         notify_agent_status(vm);
+    } else if (strncmp(buf, "identity_applied:", 17) == 0) {
+        ui_log(L"[%s] VM identity: %S", vm->name, buf + 17);
+    } else if (strncmp(buf, "identity_failed:", 16) == 0) {
+        ui_log(L"[%s] VM identity FAILED: %S", vm->name, buf + 16);
     } else if (strcmp(buf, "ssh_key_deployed") == 0) {
         vm->ssh_key_deployed = TRUE;
         ui_log(L"SSH key deployed for \"%s\".", vm->name);
@@ -490,6 +494,20 @@ static DWORD WINAPI agent_thread_proc(LPVOID param)
             n = send_tagged_cmd(s, vm, &conn->cmd_seq, ip_cmd, buf, sizeof(buf));
             if (n <= 0) goto disconnected;
             ui_log(L"NAT IP config for \"%s\": %S (path MTU %d)", vm->name, buf, conn->last_mtu);
+        }
+
+        /* VM identity profile (Linux): "identity <json>" or "identity none".
+           Fire-and-forget; the agent answers with an untagged
+           identity_applied / identity_failed line (process_async_message). */
+        if (_wcsicmp(vm->os_type, L"Linux") == 0) {
+            char line[4400];
+            if (vm->identity[0]) {
+                memcpy(line, "identity ", 9);
+                WideCharToMultiByte(CP_UTF8, 0, vm->identity, -1, line + 9, sizeof(line) - 9, NULL, NULL);
+            } else {
+                strcpy_s(line, sizeof(line), "identity none");
+            }
+            send_line(s, line);
         }
 
         /* Send GPU share info to agent (if GPU-PV is assigned).

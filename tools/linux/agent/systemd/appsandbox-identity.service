@@ -1,0 +1,15 @@
+[Unit]
+Description=App Sandbox guest identity overlay (DMI strings, virt detection)
+Documentation=file:/opt/appsandbox/identity-README.md
+ConditionPathExists=/etc/appsandbox/identity.json
+After=local-fs.target
+Before=appsandbox-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/appsandbox-identity apply
+ExecStop=/usr/local/sbin/appsandbox-identity remove
+
+[Install]
+WantedBy=multi-user.target

@@ -63,6 +63,7 @@ typedef struct {
     BOOL   ssh_deploy_key;         /* TRUE = deploy the AppSandbox public key (needs ssh_enabled) */
     BOOL   is_template;            /* TRUE = create as template VM */
     BOOL   linux_ga_kernel;        /* Linux: install + boot the GA kernel (linux-generic) instead of the ISO's HWE one */
+    const wchar_t *identity;       /* Linux: VM identity profile (JSON, see tools/linux/identity), NULL/"" = none */
 } AsbVmConfig;
 
 /* ---- Snapshot/branch info (returned by query functions) ---- */
@@ -176,6 +177,9 @@ ASB_API HRESULT asb_vm_set_name(AsbVm vm, const wchar_t *name);
 ASB_API HRESULT asb_vm_set_ram(AsbVm vm, DWORD ram_mb);
 ASB_API HRESULT asb_vm_set_cpu(AsbVm vm, DWORD cores);
 ASB_API HRESULT asb_vm_set_gpu(AsbVm vm, int gpu_mode);
+/* Linux: set / clear (NULL or "") the VM identity profile (compact JSON).
+   Allowed while running: the agent re-applies it at its next connect. */
+ASB_API HRESULT asb_vm_set_identity(AsbVm vm, const wchar_t *json);
 ASB_API HRESULT asb_vm_set_network(AsbVm vm, int mode);
 
 /* ---- Snapshots ---- */

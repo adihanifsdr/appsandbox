@@ -1,0 +1,303 @@
+#!/usr/bin/python3
+"""appsandbox-identity apply | remove | status
+
+Guest-side "VM identity" overlay for App Sandbox Linux guests.
+
+/etc/appsandbox/identity.json (written by the agent from the VM's identity
+profile, or by hand) lists what the guest should report about the machine
+it runs on, in either form:
+
+    [{"check": "sys_vendor", "name": "OpenStack Foundation"}, ...]
+    {"sys_vendor": "OpenStack Foundation", ...}
+
+What can be overlaid inside the guest:
+
+  * DMI strings (sys_vendor, product_name, product_version, product_serial,
+    product_uuid, product_family, bios_vendor, bios_version, bios_date,
+    board_vendor, board_name, board_version, board_serial, chassis_vendor,
+    chassis_type, chassis_version, chassis_serial, chassis_asset_tag):
+    the value is bind-mounted over /sys/class/dmi/id/<key>, so anything
+    reading sysfs (hostnamectl, lshw, inxi, python dmi readers, ...) sees it.
+  * dmidecode -s <keyword>: diverted to a wrapper that answers from the
+    (overlaid) sysfs keys; every other invocation runs the real binary.
+  * systemd-detect-virt: diverted to a wrapper printing the profile value
+    (honours -q / -c / --list / --help by deferring to the real binary).
+  * chipset: when the value names 440FX/PIIX3, lspci with no arguments is
+    diverted to print the classic QEMU/OpenStack PCI list.
+
+What cannot (hypervisor-level, reported as "not overlayable"): the CPUID
+hypervisor leaf (0x40000000), the hypervisor CPU flag, and the kernel
+clocksource. Those need the nested-KVM replica instead.
+
+Everything is reversible: `remove` unmounts the overlays and undoes the
+dpkg diversions. Idempotent: `apply` can run at every boot.
+"""
+import json, os, subprocess, sys
+
+CONF = "/etc/appsandbox/identity.json"
+STATE_DIR = "/etc/appsandbox"
+RUN = "/run/appsandbox/identity"
+DMI = "/sys/class/dmi/id"
+VIRT_STATE = STATE_DIR + "/identity-virt"
+LSPCI_STATE = STATE_DIR + "/identity-lspci"
+MARK = "# appsandbox-identity wrapper"
+
+DMI_KEYS = {
+    "sys_vendor", "product_name", "product_version", "product_serial",
+    "product_uuid", "product_family", "bios_vendor", "bios_version",
+    "bios_date", "bios_release", "board_vendor", "board_name",
+    "board_version", "board_serial", "board_asset_tag", "chassis_vendor",
+    "chassis_type", "chassis_version", "chassis_serial", "chassis_asset_tag",
+}
+NOT_OVERLAYABLE = {
+    "CPUID 0x40000000": "the CPUID hypervisor leaf comes from the hypervisor",
+    "hypervisor CPU flag": "set by the hypervisor (already 'set' under Hyper-V)",
+    "clocksource": "kernel clocksource is chosen from the hypervisor's clock",
+}
+# "chipset" -> lspci wrapper; "systemd-detect-virt" -> wrapper
+
+LSPCI_440FX = """00:00.0 Host bridge: Intel Corporation 440FX - 82441FX PMC [Natoma] (rev 02)
+00:01.0 ISA bridge: Intel Corporation 82371SB PIIX3 ISA [Natoma/Triton II]
+00:01.1 IDE interface: Intel Corporation 82371SB PIIX3 IDE [Natoma/Triton II]
+00:01.2 USB controller: Intel Corporation 82371SB PIIX3 USB [Natoma/Triton II] (rev 01)
+00:01.3 Bridge: Intel Corporation 82371AB/EB/MB PIIX4 ACPI (rev 03)
+00:02.0 VGA compatible controller: Cirrus Logic GD 5446
+00:03.0 Ethernet controller: Red Hat, Inc. Virtio network device
+00:04.0 SCSI storage controller: Red Hat, Inc. Virtio block device
+00:05.0 Unclassified device [00ff]: Red Hat, Inc. Virtio memory balloon
+"""
+
+DETECT_VIRT_WRAPPER = """#!/bin/sh
+%s
+V=$(cat %s 2>/dev/null)
+[ -z "$V" ] && exec %s.real "$@"
+case " $* " in
+  *" -c "*|*" --container "*) echo none; exit 1 ;;
+  *" -r "*|*" --chroot "*|*" --private-users "*|*" --cvm "*|*" --list"*|*" -h "*|*" --help "*|*" --version "*)
+      exec %s.real "$@" ;;
+  *" -q "*|*" --quiet "*) exit 0 ;;
+esac
+echo "$V"
+exit 0
+"""
+
+DMIDECODE_WRAPPER = """#!/usr/bin/python3
+%s
+import os, sys
+MAP = {"system-manufacturer": "sys_vendor", "system-product-name": "product_name",
+       "system-version": "product_version", "system-serial-number": "product_serial",
+       "system-uuid": "product_uuid", "system-family": "product_family",
+       "bios-vendor": "bios_vendor", "bios-version": "bios_version",
+       "bios-release-date": "bios_date", "baseboard-manufacturer": "board_vendor",
+       "baseboard-product-name": "board_name", "baseboard-version": "board_version",
+       "baseboard-serial-number": "board_serial", "baseboard-asset-tag": "board_asset_tag",
+       "chassis-manufacturer": "chassis_vendor", "chassis-type": "chassis_type",
+       "chassis-version": "chassis_version", "chassis-serial-number": "chassis_serial",
+       "chassis-asset-tag": "chassis_asset_tag"}
+a = sys.argv[1:]
+kw = None
+for i, x in enumerate(a):
+    if x in ("-s", "--string") and i + 1 < len(a): kw = a[i + 1]
+    elif x.startswith("--string="): kw = x[9:]
+if kw in MAP:
+    try:
+        print(open("/sys/class/dmi/id/" + MAP[kw]).read().strip()); sys.exit(0)
+    except OSError:
+        pass
+os.execv("%s.real", ["dmidecode"] + a)
+"""
+
+LSPCI_WRAPPER = """#!/bin/sh
+%s
+if [ $# -eq 0 ] && [ -s %s ]; then cat %s; exit 0; fi
+exec %s.real "$@"
+"""
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def load_profile():
+    with open(CONF) as f:
+        data = json.load(f)
+    prof = {}
+    if isinstance(data, list):
+        for e in data:
+            if isinstance(e, dict) and "check" in e:
+                prof[str(e["check"]).strip()] = str(e.get("name", e.get("value", ""))).strip()
+    elif isinstance(data, dict):
+        for k, v in data.items():
+            prof[str(k).strip()] = str(v).strip()
+    return prof
+
+
+def mounted_targets():
+    t = set()
+    try:
+        with open("/proc/self/mountinfo") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) > 4:
+                    t.add(parts[4].replace("\\040", " "))
+    except OSError:
+        pass
+    return t
+
+
+def run(cmd):
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+
+def is_our_wrapper(path):
+    try:
+        with open(path, "rb") as f:
+            return MARK.encode() in f.read(4096)
+    except OSError:
+        return False
+
+
+def divert(path, content):
+    real = path + ".real"
+    if not os.path.exists(real):
+        r = run(["dpkg-divert", "--quiet", "--local", "--rename", "--divert", real, "--add", path])
+        if r.returncode != 0:
+            log("FAIL: dpkg-divert %s: %s" % (path, r.stdout.strip()))
+            return False
+    with open(path, "w") as f:
+        f.write(content)
+    os.chmod(path, 0o755)
+    return True
+
+
+def undivert(path):
+    real = path + ".real"
+    if is_our_wrapper(path):
+        os.remove(path)
+    if os.path.exists(real):
+        run(["dpkg-divert", "--quiet", "--local", "--rename", "--remove", path])
+        if not os.path.exists(path) and os.path.exists(real):
+            os.rename(real, path)
+
+
+def which(name):
+    for d in ("/usr/bin", "/usr/sbin", "/bin", "/sbin"):
+        p = os.path.join(d, name)
+        if os.path.exists(p) or os.path.exists(p + ".real"):
+            return p
+    return None
+
+
+def apply():
+    if not os.path.exists(CONF):
+        log("no %s: nothing to apply" % CONF)
+        return 0
+    try:
+        prof = load_profile()
+    except (OSError, ValueError) as e:
+        log("FAIL: cannot read %s: %s" % (CONF, e))
+        return 1
+    os.makedirs(RUN + "/dmi", exist_ok=True)
+    mounts = mounted_targets()
+    applied, skipped = [], []
+
+    for key, val in prof.items():
+        if key in DMI_KEYS:
+            target = "%s/%s" % (DMI, key)
+            if not os.path.exists(target):
+                skipped.append("%s (no such sysfs attribute)" % key)
+                continue
+            src = "%s/dmi/%s" % (RUN, key)
+            with open(src, "w") as f:
+                f.write(val + "\n")
+            os.chmod(src, 0o444)
+            if target in mounts:
+                run(["umount", target])
+            r = run(["mount", "--bind", src, target])
+            if r.returncode == 0:
+                applied.append(key)
+            else:
+                skipped.append("%s (mount: %s)" % (key, r.stdout.strip()))
+        elif key == "systemd-detect-virt":
+            with open(VIRT_STATE, "w") as f:
+                f.write(val + "\n")
+            p = which("systemd-detect-virt")
+            if p and divert(p, DETECT_VIRT_WRAPPER % (MARK, VIRT_STATE, p, p)):
+                applied.append(key)
+            else:
+                skipped.append("%s (binary not found)" % key)
+        elif key == "chipset":
+            if "440FX" in val.upper() or "PIIX" in val.upper():
+                with open(LSPCI_STATE, "w") as f:
+                    f.write(LSPCI_440FX)
+                p = which("lspci")
+                if p and divert(p, LSPCI_WRAPPER % (MARK, LSPCI_STATE, LSPCI_STATE, p)):
+                    applied.append(key)
+                else:
+                    skipped.append("%s (lspci not installed)" % key)
+            else:
+                skipped.append("%s (only a 440FX/PIIX3 list is available)" % key)
+        elif key in NOT_OVERLAYABLE:
+            skipped.append("%s (not overlayable: %s)" % (key, NOT_OVERLAYABLE[key]))
+        else:
+            skipped.append("%s (unknown check)" % key)
+
+    # dmidecode answers from the overlaid sysfs keys
+    if any(k in DMI_KEYS for k in prof):
+        p = which("dmidecode")
+        if p:
+            if divert(p, DMIDECODE_WRAPPER % (MARK, p)):
+                applied.append("dmidecode")
+
+    log("applied: %s" % (", ".join(applied) or "nothing"))
+    for s in skipped:
+        log("skipped: %s" % s)
+    return 0
+
+
+def remove():
+    mounts = mounted_targets()
+    for key in sorted(DMI_KEYS):
+        target = "%s/%s" % (DMI, key)
+        if target in mounts:
+            run(["umount", target])
+    for name in ("systemd-detect-virt", "dmidecode", "lspci"):
+        p = which(name)
+        if p:
+            undivert(p)
+    for f in (VIRT_STATE, LSPCI_STATE):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+    log("identity overlay removed")
+    return 0
+
+
+def status():
+    prof = {}
+    if os.path.exists(CONF):
+        try:
+            prof = load_profile()
+        except (OSError, ValueError):
+            pass
+    mounts = mounted_targets()
+    for key in sorted(prof) or sorted(DMI_KEYS):
+        if key in DMI_KEYS:
+            try:
+                cur = open("%s/%s" % (DMI, key)).read().strip()
+            except OSError:
+                cur = "(n/a)"
+            ov = "overlay" if "%s/%s" % (DMI, key) in mounts else "firmware"
+            log("%-22s %-40s [%s]" % (key, cur, ov))
+    r = run(["systemd-detect-virt"])
+    log("%-22s %-40s [%s]" % ("systemd-detect-virt", r.stdout.strip(), "wrapper" if is_our_wrapper(which("systemd-detect-virt") or "") else "real"))
+    return 0
+
+
+if __name__ == "__main__":
+    action = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if os.geteuid() != 0 and action != "status":
+        log("must run as root")
+        sys.exit(1)
+    sys.exit({"apply": apply, "remove": remove, "status": status}.get(action, status)())

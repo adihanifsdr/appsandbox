@@ -164,6 +164,9 @@
                 <label title="Deploy the AppSandbox SSH public key so you can connect with key auth (requires SSH Server)"><input type="checkbox" id="ssh-deploy-key" disabled> Deploy SSH key</label>
                 <label class="needs-linux" title="Install the GA kernel (linux-generic, e.g. 6.8 on 24.04) from the Ubuntu archive at first boot and boot it instead of the ISO's HWE kernel - what a stock server / VPS runs. Needs internet during create."><input type="checkbox" id="ga-kernel"> GA kernel</label>
             </div>
+
+            <label class="needs-linux" for="vm-identity" title="Optional. What the guest reports about the machine it runs on: DMI strings (sys_vendor, product_name, bios_vendor, chassis_vendor, ...), systemd-detect-virt, chipset. Applied inside the guest at every boot. CPUID / clocksource cannot be changed this way.">VM identity (JSON):</label>
+            <textarea class="needs-linux" id="vm-identity" rows="3" spellcheck="false" placeholder='[{"check":"sys_vendor","name":"OpenStack Foundation"},{"check":"product_name","name":"OpenStack Nova"},{"check":"systemd-detect-virt","name":"kvm"}]'></textarea>
         </div>
         <div class="modal-buttons">
             <button onclick="closeCreateModal()">Cancel</button>

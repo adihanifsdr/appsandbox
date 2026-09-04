@@ -509,6 +509,8 @@ static void save_vm_list(void)
             fwprintf(f, L"SshDeployKey=1\n");
         if (g_vms[i].ssh_pubkey[0])
             fwprintf(f, L"SshPubKey=%s\n", g_vms[i].ssh_pubkey);
+        if (g_vms[i].identity[0])
+            fwprintf(f, L"Identity=%s\n", g_vms[i].identity);
         if (g_vms[i].install_complete)
             fwprintf(f, L"InstallComplete=1\n");
         fwprintf(f, L"\n");
@@ -606,6 +608,8 @@ static void load_vm_list(void)
                line comes from an editable config file. Generated ed25519 lines
                are ~100 chars; anything longer is corrupt -- truncate, don't die. */
             wcsncpy_s(vm->ssh_pubkey, 512, line + 10, _TRUNCATE);
+        else if (wcsncmp(line, L"Identity=", 9) == 0)
+            wcsncpy_s(vm->identity, 4096, line + 9, _TRUNCATE);
         else if (wcsncmp(line, L"InstallComplete=", 16) == 0)
             vm->install_complete = (_wtoi(line + 16) != 0);
     }
@@ -3170,6 +3174,8 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
             inst->ssh_enabled = cfg.ssh_enabled;
             inst->ssh_deploy_key = cfg.ssh_deploy_key;
             if (cfg.ssh_deploy_key) wcscpy_s(inst->ssh_pubkey, 512, ssh_pubkey);
+            if (config->identity && config->identity[0])
+                wcsncpy_s(inst->identity, 4096, config->identity, _TRUNCATE);
             inst->building_vhdx = TRUE;
             inst->vhdx_progress = 0;
             memcpy(&inst->gpu_shares, &cfg.gpu_shares, sizeof(GpuDriverShareList));
@@ -3239,6 +3245,8 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
             inst->ssh_enabled = cfg.ssh_enabled;
             inst->ssh_deploy_key = cfg.ssh_deploy_key;
             if (cfg.ssh_deploy_key) wcscpy_s(inst->ssh_pubkey, 512, ssh_pubkey);
+            if (config->identity && config->identity[0])
+                wcsncpy_s(inst->identity, 4096, config->identity, _TRUNCATE);
             inst->building_vhdx = TRUE;
             inst->vhdx_progress = 0;
             memcpy(&inst->gpu_shares, &cfg.gpu_shares, sizeof(GpuDriverShareList));
@@ -3406,6 +3414,8 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
        paths set them inline on their own instance copies). */
     inst->ssh_deploy_key = cfg.ssh_deploy_key;
     if (cfg.ssh_deploy_key) wcscpy_s(inst->ssh_pubkey, 512, ssh_pubkey);
+    if (config->identity && config->identity[0])
+        wcsncpy_s(inst->identity, 4096, config->identity, _TRUNCATE);
 
     { wchar_t sd[MAX_PATH]; swprintf_s(sd, MAX_PATH, L"%s\\snapshots", vhdx_dir);
       snapshot_init(&g_snap_trees[g_vm_count], sd); }
@@ -3809,6 +3819,19 @@ ASB_API HRESULT asb_vm_set_gpu(AsbVm vm, int gpu_mode)
     g_vms[idx].gpu_mode = gpu_mode;
     wcscpy_s(g_vms[idx].gpu_name, 256, gpu_mode == GPU_MIRROR ? L"Try all" :
                                         gpu_mode == GPU_DEFAULT ? L"Default GPU" : L"None");
+    save_vm_list();
+    if (g_state_cb) g_state_cb(vm, g_vms[idx].running, g_state_ud);
+    return S_OK;
+}
+
+ASB_API HRESULT asb_vm_set_identity(AsbVm vm, const wchar_t *json)
+{
+    int idx = vm_index_of(vm);
+    if (idx < 0) return E_INVALIDARG;
+    if (json && json[0])
+        wcsncpy_s(g_vms[idx].identity, 4096, json, _TRUNCATE);
+    else
+        g_vms[idx].identity[0] = L'\0';
     save_vm_list();
     if (g_state_cb) g_state_cb(vm, g_vms[idx].running, g_state_ud);
     return S_OK;

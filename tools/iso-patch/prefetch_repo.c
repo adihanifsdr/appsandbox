@@ -316,7 +316,8 @@ int do_prefetch_repo(const wchar_t *repo, const wchar_t *branch, const wchar_t *
         const wchar_t *units[] = {
             L"appsandbox-agent.service", L"appsandbox-audio.service",
             L"appsandbox-clipboard.service", L"appsandbox-display.service",
-            L"appsandbox-input.service", L"appsandbox-firstboot.service"
+            L"appsandbox-input.service", L"appsandbox-firstboot.service",
+            L"appsandbox-identity.service"
         };
         for (int i = 0; i < (int)(sizeof(units) / sizeof(units[0])); i++) {
             swprintf_s(s, MAX_PATH,
@@ -351,6 +352,17 @@ int do_prefetch_repo(const wchar_t *repo, const wchar_t *branch, const wchar_t *
         swprintf_s(s, MAX_PATH,
             L"%s\\tools\\linux\\asb_drm\\modprobe.d-asb_drm.conf", extracted_root);
         swprintf_s(d, MAX_PATH, L"%s\\modprobe.d-asb_drm.conf", out_dir);
+        u_cp_file(s, d);
+    }
+
+    /* guest identity overlay tool (tools/linux/identity) */
+    {
+        wchar_t s[MAX_PATH], d[MAX_PATH];
+        swprintf_s(s, MAX_PATH, L"%s\\tools\\linux\\identity\\appsandbox-identity", extracted_root);
+        swprintf_s(d, MAX_PATH, L"%s\\appsandbox-identity", out_dir);
+        u_cp_file(s, d);
+        swprintf_s(s, MAX_PATH, L"%s\\tools\\linux\\identity\\README.md", extracted_root);
+        swprintf_s(d, MAX_PATH, L"%s\\identity-README.md", out_dir);
         u_cp_file(s, d);
     }
 
