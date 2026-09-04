@@ -159,6 +159,11 @@ cmd_create() {
     done
     case "$SMBIOS" in sysinfo|host) ;; *) die "--smbios must be sysinfo or host" ;; esac
     command -v virsh >/dev/null || cmd_install
+    # 5900 may already be taken by something the user runs in this VM (x11vnc,
+    # a docker container publishing 127.0.0.1:5900 ...): pick the next free port.
+    local want=$VNC
+    while ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$VNC\$"; do VNC=$((VNC + 1)); [ $VNC -gt $((want + 20)) ] && die "no free VNC port near $want"; done
+    [ "$VNC" != "$want" ] && echo "note: 127.0.0.1:$want is in use, replica console on 127.0.0.1:$VNC instead"
     mkdir -p "$DIR"; cd "$DIR"
     if virsh dominfo "$NAME" >/dev/null 2>&1; then
         die "domain '$NAME' already exists (appsandbox-replica destroy first)"
@@ -218,7 +223,7 @@ cmd_ssh() {
 
 cmd_checks() {
     # the nine identity checks, printed in the [{check,name}] format
-    cmd_ssh 'sudo modprobe cpuid 2>/dev/null; python3 - <<"PY"
+    cmd_ssh 'sudo modprobe cpuid 2>/dev/null; sudo python3 - <<"PY"
 import json, subprocess, os
 def cat(p):
     try: return open(p).read().strip()
