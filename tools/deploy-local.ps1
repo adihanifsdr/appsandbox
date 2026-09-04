@@ -55,8 +55,13 @@ if (-not $NoBuild) {
 }
 
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
+# Root binaries: skip unchanged ones (the app may be running from -Dest, which
+# locks them); a changed but locked binary is reported instead of aborting.
+$locked = @()
 foreach ($b in @('AppSandbox.exe', 'appsandbox_core.dll', 'iso-patch.exe', 'WebView2Loader.dll')) {
-    Copy-Item (Join-Path $bin $b) (Join-Path $Dest $b) -Force
+    $src = Join-Path $bin $b; $dst = Join-Path $Dest $b
+    if ((Test-Path $dst) -and ((Get-FileHash $src).Hash -eq (Get-FileHash $dst).Hash)) { continue }
+    try { Copy-Item $src $dst -Force -ErrorAction Stop } catch { $locked += $b }
 }
 foreach ($sub in @('web', 'resources')) {
     robocopy (Join-Path $bin $sub) (Join-Path $Dest $sub) /E /XF *.pdb *.lib *.exp *.ilk *.iobj *.ipdb | Out-Null
@@ -69,6 +74,9 @@ foreach ($sub in @('examples', 'tests')) {
     robocopy (Join-Path $sdk $sub) (Join-Path $Dest "headless-api\$sub") /E /XD __pycache__ /XF *.pyc | Out-Null
 }
 $global:LASTEXITCODE = 0
+if ($locked.Count) {
+    Write-Warning ("NOT updated (in use - close App Sandbox and re-run with -NoBuild): " + ($locked -join ', '))
+}
 Write-Host "Deployed to $Dest"
 Get-Item (Join-Path $Dest 'AppSandbox.exe'), (Join-Path $Dest 'appsandbox_core.dll'), (Join-Path $Dest 'iso-patch.exe') |
     Format-Table Name, Length, LastWriteTime -AutoSize
