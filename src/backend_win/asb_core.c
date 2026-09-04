@@ -524,7 +524,9 @@ static void save_vm_list(void)
 static void load_vm_list(void)
 {
     wchar_t path[MAX_PATH];
-    wchar_t line[1024];
+    /* Identity= carries a compact JSON profile of up to 4096 chars: the
+       line buffer must hold it whole, or a reload truncates it mid-string. */
+    wchar_t line[8192];
     FILE *f;
     VmInstance *vm = NULL;
     BOOL in_settings = FALSE;
@@ -532,7 +534,7 @@ static void load_vm_list(void)
     get_config_path(path, MAX_PATH);
     if (_wfopen_s(&f, path, L"r") != 0 || !f) return;
 
-    while (fgetws(line, 1024, f)) {
+    while (fgetws(line, 8192, f)) {
         size_t len = wcslen(line);
         while (len > 0 && (line[len-1] == L'\n' || line[len-1] == L'\r'))
             line[--len] = L'\0';
