@@ -146,61 +146,65 @@ Dua hal lain yang tidak kelihatan di tabel:
   DigitalOcean, GCE, AWS, dan OCI ditagih per jam/detik, jadi risikonya
   hampir nol untuk menguji.
 
-### Worth it-nya
+### Peringkat akhir
 
-Tiga pertanyaan itu jarang punya satu jawaban yang menang di semuanya.
-Yang murah per replica CPU-nya tua, yang CPU-nya baru mahal per replica.
-Jadi pilihannya tergantung mana yang lebih penting:
+Kolom **nilai** adalah `tenaga per replica ÷ biaya per replica` — satu
+angka yang sekaligus memuat harga, umur CPU, jumlah core, dan berapa
+replica yang muat. Peringkatnya tidak murni mengikuti angka itu: yang
+nilainya tinggi tapi menuntut bayar di muka bertahun-tahun, tidak bisa
+refund, atau nested-nya belum dipastikan, diturunkan; yang stoknya selalu
+ada dan nested-nya sudah terbukti, dinaikkan.
 
-- **Pilihan terbaik secara keseluruhan: Advin Servers, plan EPYC Genoa
-  9654 8 vCPU / 16 GB / 256 GB seharga $20.** Dia menang di ketiga sumbu
-  sekaligus: CPU Genoa 2022-23 (sekitar 2,8x kecepatan satu core Haswell
-  OVHcloud), 8 core, muat 3 replica, $6,67 per replica, dan tenaga per
-  replica 6,4 — lebih tinggi daripada ExtraVM 16 GB dengan harga per
-  replica sepertiganya. Nested ditulis sendiri di halaman depan mereka,
-  refund 14 hari tanpa syarat, dan ada lokasi **Johor** yang secara
-  jaringan di-backhaul ke Equinix Singapura. Kelemahannya sama dengan
-  ExtraVM: stok habis-habisan, tapi mereka punya tombol "Get Notified"
-  per plan dan stok dilepas ke publik siapa cepat dia dapat.
-- **Kalau satu replica saja tapi harus paling kencang: GreenCloud
-  RyzenKVM-4 $40** (Ryzen 9950X, satu core tercepat di seluruh daftar,
-  ~3200) atau **Advin Singapura EPYC 9375F $19,90** (3,8 GHz, 8 GB).
-  Keduanya di Singapura, dan yang Advin setengah harganya.
-- **Kalau tiap replica harus terasa cepat dan stok ExtraVM kembali ada:**
-  CPU-nya Ryzen 9 / EPYC 4004-4005 (2024-2025). Plan 8 GB $32 untuk satu
-  replica memberi tenaga 10,0 — tertinggi di tabel — dan plan 16 GB $56
-  memberi 3 replica dengan tenaga 5,0 masing-masing di $18,7 per replica.
-  Per 5 September 2026 stok Singapura kosong; Tokyo dan Sydney kadang
-  masih ada, tetapi latensi Tokyo dari Indonesia sekitar 70-90 ms.
-- **Kalau yang dikejar jumlah replica per dolar: OVHcloud VPS-4, $23,37.**
-  5 replica di $4,67 masing-masing, kuota 3 TB, sudah terbukti nested-nya
-  di server yang dicek, dan bisa dibatalkan 14 hari. Harganya dibayar
-  dengan CPU 2013: tenaga per replica cuma 1,4, jadi replica terasa
-  lamban kalau lima-limanya dipakai bersamaan.
-- **Titik tengah paling aman: OVHcloud VPS-3, $12,32** — 2 replica,
-  $6,16 masing-masing, tenaga 2,5. Speknya sama persis dengan server yang
-  sudah Anda pakai, jadi hasilnya sudah bisa dibayangkan tanpa menebak.
-- **Contabo Cloud VDS S** menang di satu hal yang tidak muncul di angka:
-  3 core-nya **fisik**, tidak dibagi tetangga, jadi kecepatannya konstan.
-  RAM 24 GB dan disk 180 GB cukup untuk 5 replica di sekitar €8 masing-
-  masing. Tapi CPU-nya EPYC Rome 2019 dan cuma 3 core untuk 5 replica,
-  jadi ini pilihan kalau replica dipakai bergantian, bukan serentak.
-- **SSD Nodes murah karena core-nya banyak dan lambat.** 7 replica di
-  $1,58 terlihat mustahil dikalahkan, tapi Xeon Silver 2017-2019 membuat
-  tenaga per replica cuma 1,0, yang terendah di tabel, dan uangnya
-  terkunci 1-3 tahun di muka. Bagus untuk replica yang kebanyakan diam.
-- **GreenCloud hanya menarik lewat promo tahunannya** (~$2/bulan, nested
-  terbukti di review dari Indonesia, 13,68 ms dari Jakarta). Harga
-  bulanan normalnya, $20 untuk satu replica, kalah telak dari OVHcloud
-  dan ExtraVM di semua sumbu.
-- **CPU paling baru yang ada di Jakarta: GCE n4-standard-2** (Emerald
-  Rapids 2024, sekitar 2000 GB6 satu core, $89 + disk). Satu-satunya cara
-  mendapat CPU 2024 dengan latensi Jakarta, tapi hanya 1-2 replica dan
-  harganya 7x OVHcloud VPS-3. Masuk akal kalau dinyalakan per jam saat
-  dipakai saja, bukan 24/7.
-- **Hindari untuk Nestbox:** semua plan dengan disk 15 GB (GreenCloud $6
-  dan $10, ExtraVM $4,50). Base image 3,5 GB ditambah satu replica sudah
-  melewatinya, jadi murahnya percuma.
+| # | Plan | $/bulan | CPU | Core | Replica | $/replica | Tenaga | Nilai |
+|---|---|---|---|---|---|---|---|---|
+| 1 | **Advin Servers EPYC Genoa 9654, 8 vCPU / 16 GB / 256 GB** | 20 | Genoa (2022-23) | 8 | 3 | 6,67 | 6,4 | **0,96** |
+| 2 | Advin Servers EPYC Genoa 9654, 2 vCPU / 4 GB / 64 GB | 6 | Genoa (2022-23) | 2 | 1 | 6,00 | 4,8 | 0,80 |
+| 3 | OVHcloud VPS-3 | 12,32 | Haswell (2013) | 6 | 2 | 6,16 | 2,5 | 0,41 |
+| 4 | OVHcloud VPS-4 | 23,37 | Haswell (2013) | 8 | 5 | 4,67 | 1,4 | 0,30 |
+| 5 | GreenCloud RyzenKVM-4 | 40 | Ryzen 9950X (2024) | 4 | 1 | 40 | 12,8 | 0,32 |
+| 6 | ExtraVM 16 GB (stok SG kosong) | 56 | Ryzen 9 / EPYC 4004-4005 (2024-25) | 6 | 3 | 18,7 | 5,0 | 0,27 |
+| 7 | Advin Singapura EPYC 9375F | 19,90 | Genoa 3,8 GHz (2023) | 2 | 1 | 19,90 | 6,0 | 0,30 |
+| 8 | Cloudzy 4 GB | 14,48 | EPYC 9554 Genoa (2022) | 2 | 1 | 14,48 | 4,8 | 0,33 |
+| 9 | GreenCloud promo tahunan | ~2,08 | EPYC Rome/Milan | 2 | 1 | 2,08 | 2,6 | 1,25 |
+| 10 | SSD Nodes KVM/2X-LARGE | ~11,08 | Xeon Silver (2017-19) | 8 | 7 | 1,58 | 1,0 | 0,63 |
+| 11 | Contabo Cloud VDS S | €42,99 | EPYC 7282 Rome (2019), core fisik | 3 fisik | 5 | ~€8 | 0,7-1,1 | ~0,12 |
+| 12 | GCE Jakarta n4-standard-2 | 89 | Emerald Rapids (2024) | 2 | 1-2 | 45-89 | 4,0 | ~0,06 |
+| 13 | DigitalOcean 8 GB | 48 | Intel/AMD campuran | 4 | 1-2 | 24-48 | 3,5 | ~0,10 |
+| 14 | OCI Singapura VM.Standard3.Flex | ~38 | Ice Lake (2021) | 2 thread | 1 | 38 | 2,2 | 0,06 |
+| 15 | AWS Jakarta m7i.large | ~80 | Sapphire Rapids (2023) | 2 | 1-2 | 40-90 | 2,5 | ~0,04 |
+| 16 | GCE Jakarta n2-standard-2 | 76,28 | Cascade/Ice Lake | 2 | 1-2 | 40-76 | 2,2 | ~0,04 |
+
+**Peringkat 1-4 — beli sekarang.** Advin Servers plan $20 menang di semua
+sumbu sekaligus: CPU Genoa 2022-23 (2,8x kecepatan satu core Haswell),
+8 core, 3 replica, $6,67 per replica, nested ditulis sendiri di halaman
+depan mereka, refund 14 hari tanpa syarat, dan ada lokasi Johor yang
+di-backhaul ke Equinix Singapura. Satu-satunya penghalangnya stok, dan
+tiap plan punya tombol "Get Notified". Kalau kosong, OVHcloud VPS-3 atau
+VPS-4 selalu ada stoknya, nested-nya sudah terbukti di server yang dicek,
+dan CPU tuanya dibayar dengan harga per replica yang tetap bagus.
+
+**Peringkat 5-11 — bagus untuk kebutuhan tertentu.** GreenCloud RyzenKVM-4
+memberi satu replica tercepat yang bisa dibeli (Ryzen 9950X, tenaga 12,8).
+Cloudzy paling murah di antara yang CPU-nya Genoa, dengan refund 14 hari
+sebagai jaring pengaman karena nested-nya baru diklaim di halaman
+pemasaran. GreenCloud promo tahunan punya nilai tertinggi di tabel tapi
+tidak bisa refund dan stoknya musiman. SSD Nodes dan Contabo VDS S hanya
+masuk akal kalau replica dipakai bergantian, bukan serentak.
+
+**Peringkat 12-16 — hanya untuk alasan khusus:** server benar-benar di
+Jakarta, atau tagihan per jam untuk uji coba beberapa jam. Untuk dipakai
+24/7 semuanya kalah telak.
+
+**Belum bisa dipastikan, tanyakan dulu:** WebHorizon (Ryzen 9700X/9900X
+Singapura, menulis "Nested Virtualization Supported" di penawarannya),
+HostHatch. **Tidak menyebut nested sama sekali:** V.PS, Bloom.host,
+Kuroit, Melbicom.
+
+**Hindari untuk Nestbox:** semua plan dengan disk 15 GB (GreenCloud $6 dan
+$10, ExtraVM $4,50) — base image 3,5 GB ditambah satu replica sudah
+melewatinya. Juga GreenCloud SSDKVM-3 dan SSDKVM-5 dengan harga bulanan
+normal: $20-26,7 per replica untuk CPU 2019-21 kalah dari Advin dan
+OVHcloud di semua sumbu.
 
 ## VPS yang jelas tidak bisa
 
@@ -237,12 +241,9 @@ lokal untuk layar replica lewat browser.
 
 ## Saran
 
-- Ringkasan harga per replica dan pilihan terbaik ada di
-  [Perbandingan spek](#perbandingan-spek-berapa-replica-yang-muat-dan-berapa-harganya)
-  di atas: Advin Servers EPYC Genoa $20 sebagai pilihan terbaik secara
-  keseluruhan, ExtraVM kalau stoknya kembali ada, OVHcloud VPS-4 kalau
-  yang dikejar jumlah replica per dolar, OVHcloud VPS-3 sebagai titik
-  tengah, cloud besar kalau butuh Jakarta atau tagihan per jam.
+- Urutan lengkap 16 plan ada di [Peringkat akhir](#peringkat-akhir) di
+  atas. Tiga teratas: Advin Servers EPYC Genoa $20, Advin $6 untuk satu
+  replica, lalu OVHcloud VPS-3 sebagai pilihan yang stoknya selalu ada.
 - Latensi dari Indonesia ke Singapura sekitar 13-30 ms, cukup untuk
   layar replica lewat browser.
 - Sisakan disk: satu replica memakai 20 GB (thin, tumbuh sesuai isi)
