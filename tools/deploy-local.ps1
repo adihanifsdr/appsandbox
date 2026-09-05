@@ -63,10 +63,12 @@ foreach ($b in @('AppSandbox.exe', 'appsandbox_core.dll', 'iso-patch.exe', 'WebV
     if ((Test-Path $dst) -and ((Get-FileHash $src).Hash -eq (Get-FileHash $dst).Hash)) { continue }
     try { Copy-Item $src $dst -Force -ErrorAction Stop } catch { $locked += $b }
 }
-foreach ($sub in @('web', 'resources')) {
-    robocopy (Join-Path $bin $sub) (Join-Path $Dest $sub) /E /XF *.pdb *.lib *.exp *.ilk *.iobj *.ipdb | Out-Null
-    if ($LASTEXITCODE -ge 8) { throw "robocopy $sub failed" }
-}
+# web\ comes straight from the checkout (the build's post-build xcopy only
+# refreshes bin\Release\web on a build, so -NoBuild would ship stale files).
+robocopy (Join-Path $repo 'web') (Join-Path $Dest 'web') /E | Out-Null
+if ($LASTEXITCODE -ge 8) { throw "robocopy web failed" }
+robocopy (Join-Path $bin 'resources') (Join-Path $Dest 'resources') /E /XF *.pdb *.lib *.exp *.ilk *.iobj *.ipdb | Out-Null
+if ($LASTEXITCODE -ge 8) { throw "robocopy resources failed" }
 $sdk = Join-Path $repo 'tools\headless-api'
 New-Item -ItemType Directory -Force -Path (Join-Path $Dest 'headless-api') | Out-Null
 foreach ($f in @('asb.py', 'README.md')) { Copy-Item (Join-Path $sdk $f) (Join-Path $Dest "headless-api\$f") -Force }
