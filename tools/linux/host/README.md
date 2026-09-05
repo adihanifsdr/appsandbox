@@ -47,14 +47,21 @@ without it (virtualization disabled in the firmware) replicas cannot run.
 - External viewer: `vncviewer`, Remmina or `xdg-open vnc://` on
   `127.0.0.1:<port>`.
 
-## Without the QEMU patch
+## The QEMU patch
 
 By default the replicas use the distro's QEMU. Everything at the SMBIOS /
 DMI level (vendor, board, serial numbers), the hidden hypervisor CPU flag and
 the i440FX / SeaBIOS look are still there; only the hypervisor-level strings
 (ACPI OEM ids, SMBIOS manufacturer, drive / CD-ROM models, USB vendor, the
-CPUID 0x40000000 signature) are ignored. Run with `--qemu-patch`, or
-`sudo appsandbox-replica qemu build` once, to get those too.
+CPUID 0x40000000 signature) are ignored.
+
+The PC row shows which QEMU is in place: `qemu: stock` with a **Build patch**
+button, or `qemu: identity-patched ✔`. The button builds QEMU 8.2.2 with the
+identity patches on this PC and installs it over the distro binary
+(dpkg-divert, ~10 minutes, once; no replica needed first). The `+` dialog
+has the same as a checkbox for the first replica, and `--qemu-patch` on the
+command line does it before any replica is created. Running replicas pick
+the patched QEMU up at their next boot.
 
 ## Not on Linux
 

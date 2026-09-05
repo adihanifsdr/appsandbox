@@ -960,6 +960,45 @@ function buildRowCells(vm, i, statusTd) {
         tag.style.marginLeft = '8px';
         tag.textContent = 'this PC';
         nameTd.appendChild(tag);
+        /* The identity-patched QEMU (hypervisor-level identity strings for
+           the replicas): built once on this PC, from here. */
+        var qemu = document.createElement('span');
+        qemu.className = 'hint mono';
+        qemu.style.marginLeft = '10px';
+        if (vm.qemuPatched) {
+            qemu.textContent = 'qemu: identity-patched ✔';
+            qemu.title = 'The identity-patched QEMU is installed: ACPI / SMBIOS / drive / CPUID strings from the profile reach the replicas';
+        } else if (vm.qemuBuilding) {
+            qemu.textContent = 'qemu: building the patch…';
+            qemu.title = 'appsandbox-replica qemu build is running (~10 min); progress is in the log';
+        } else {
+            qemu.textContent = 'qemu: stock ';
+            var qb = document.createElement('button');
+            qb.textContent = 'Build patch';
+            qb.style.cssText = 'height:20px;padding:0 8px;font-size:11px;margin-left:4px';
+            qb.title = 'Build QEMU 8.2.2 with the identity patches and install it over the distro binary (~10 min, once). ' +
+                       'Without it the replicas run on the stock QEMU: DMI strings and the hidden hypervisor flag still work, ' +
+                       'the ACPI / SMBIOS-manufacturer / drive / CPUID strings are ignored.';
+            qb.onclick = function(e) {
+                e.stopPropagation();
+                showModal('Identity-patched QEMU',
+                    'Builds QEMU 8.2.2 with the identity patches on this PC and installs it over the distro binary ' +
+                    '(dpkg-divert, reversible with "appsandbox-replica qemu restore"). Takes about 10 minutes and ' +
+                    'downloads build dependencies plus the QEMU source. Running replicas keep the stock QEMU until their next boot.',
+                    'Build', { confirmClass: 'primary' })
+                .then(function(ok) { if (ok) sendCmd('qemuBuild', {}); });
+            };
+            qemu.appendChild(qb);
+        }
+        nameTd.appendChild(qemu);
+        if (vm.kvm === false) {
+            var nokvm = document.createElement('span');
+            nokvm.className = 'hint mono';
+            nokvm.style.cssText = 'margin-left:10px;color:hsl(var(--lamp-warn))';
+            nokvm.textContent = 'no /dev/kvm';
+            nokvm.title = 'KVM is not available: enable virtualization (VT-x / AMD-V) in the firmware; replicas cannot run without it';
+            nameTd.appendChild(nokvm);
+        }
         agentTd.title = 'nestbox is running on this PC';
         var hostCells = [
             nameTd,
@@ -1098,7 +1137,7 @@ function renderVmTable() {
             vm.installComplete, vm.isTemplate,
             vm.sshEnabled, vm.sshState, vm.sshPort,
             vm.vncPort, vm.replica, vm.replicas, vm.hasIdentity,   /* nested / VNC / identity cells */
-            vm.osType, vm.ramMb, vm.hddGb, vm.cpuCores, vm.isHost, vm.osName,
+            vm.osType, vm.ramMb, vm.hddGb, vm.cpuCores, vm.isHost, vm.osName, vm.qemuPatched, vm.qemuBuilding, vm.kvm,
             vm.gpuMode, vm.gpuName, vm.networkMode,
             selectedSnap[i] || 'current',
             /* Snapshot tree: take/delete/rename/branch must trigger a row rebuild
@@ -1235,24 +1274,35 @@ function replicaLimits(vm) {
 function addReplica(idx) {
     var existing = parseReplicas(vms[idx] && vms[idx].replicas).map(function(r) { return r.name; });
     var def = existing.indexOf('replica') < 0 ? 'replica' : 'replica' + (existing.length + 1);
-    var lim = replicaLimits(vms[idx]);
+    var vm = vms[idx] || {};
+    var lim = replicaLimits(vm);
+    var onHost = !!vm.isHost;
+    var where = onHost ? 'this PC' : 'sandbox';
+    var fields = [
+        { key: 'name', label: 'Name (letters, digits, - _ .)', type: 'text', value: def },
+        { key: 'cpus', label: 'Cores (' + where + ': ' + lim.cores + ')', type: 'number', value: Math.min(4, lim.cores), min: 1, max: lim.cores },
+        { key: 'ram', label: 'RAM in MB (' + where + ': ' + lim.vmRam + ')', type: 'number', value: Math.min(4096, lim.ram), min: 512, max: lim.ram, step: 256 },
+        { key: 'disk', label: 'Disk in GB', type: 'number', value: 20, min: 5, max: 2048 }
+    ];
+    /* Linux host: the patch is optional; the sandbox always builds it. */
+    if (onHost && !vm.qemuPatched)
+        fields.push({ key: 'patch', label: 'Build the identity-patched QEMU first (~10 min, once; hypervisor-level identity strings)', type: 'checkbox', value: false });
     showModal('New nested replica',
-        'A replica is a KVM guest inside this sandbox with the bare-metal identity from the profile. ' +
-        'Nestbox builds the patched QEMU (first time, ~10 min), creates the replica and installs XFCE + Steam (10-20 min). ' +
-        'Progress shows in the log; the row appears once it boots. Its size can be changed later from the row.',
-        'Create', { confirmClass: 'primary', fields: [
-            { key: 'name', label: 'Name (letters, digits, - _ .)', type: 'text', value: def },
-            { key: 'cpus', label: 'Cores (sandbox: ' + lim.cores + ')', type: 'number', value: Math.min(4, lim.cores), min: 1, max: lim.cores },
-            { key: 'ram', label: 'RAM in MB (sandbox: ' + lim.vmRam + ')', type: 'number', value: Math.min(4096, lim.ram), min: 512, max: lim.ram, step: 256 },
-            { key: 'disk', label: 'Disk in GB', type: 'number', value: 20, min: 5, max: 2048 }
-        ] })
+        onHost
+            ? 'A replica is a KVM guest on this PC with the bare-metal identity from the profile. ' +
+              'Nestbox creates it from the Ubuntu cloud image and installs XFCE + Steam (10-20 min). ' +
+              'Progress shows in the log; the row appears once it boots. Its size can be changed later from the row.'
+            : 'A replica is a KVM guest inside this sandbox with the bare-metal identity from the profile. ' +
+              'Nestbox builds the patched QEMU (first time, ~10 min), creates the replica and installs XFCE + Steam (10-20 min). ' +
+              'Progress shows in the log; the row appears once it boots. Its size can be changed later from the row.',
+        'Create', { confirmClass: 'primary', fields: fields })
     .then(function(f) {
         if (!f) return;
         var name = String(f.name || '').trim().replace(/[^A-Za-z0-9._-]/g, '-');
         if (!name) return;
         if (existing.indexOf(name) >= 0) { showModal('Nested replica', 'A replica named "' + name + '" already exists.', 'OK', { confirmClass: 'primary' }); return; }
         var cpus = parseInt(f.cpus, 10) || 4, ram = parseInt(f.ram, 10) || 4096, disk = parseInt(f.disk, 10) || 20;
-        sendCmd('replicaSetup', {vmIndex: idx, name: name, cpus: cpus, ram: ram, disk: disk});
+        sendCmd('replicaSetup', {vmIndex: idx, name: name, cpus: cpus, ram: ram, disk: disk, patch: !!f.patch});
     });
 }
 

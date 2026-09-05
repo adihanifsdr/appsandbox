@@ -368,7 +368,10 @@ def host_entry(reps):
         "replica": legacy, "replicas": json.dumps(reps, separators=(",", ":")),
         "replicaAuto": False, "hasIdentity": os.path.exists(PROFILE),
         "snapshots": [], "baseBranches": [], "hasSnapshots": False,
+        # the identity-patched QEMU: built once on this PC, used by every replica
         "qemuPatched": os.path.exists(QEMU_STAMP),
+        "qemuBuilding": "*qemu" in _busy,
+        "kvm": os.path.exists("/dev/kvm"),
     }
 
 
@@ -500,12 +503,21 @@ def handle(msg, ws):
     elif action == "replicaResize":
         args = sizing_args(msg) + (["--restart"] if msg.get("restart") else [])
         run_replica_job(name, name, [(["-n", name, "resize"] + args, "resizing")])
+    elif action == "qemuBuild":
+        # the button on the PC row: the identity-patched QEMU, no replica needed
+        if os.path.exists(QEMU_STAMP):
+            log("[qemu] the identity-patched QEMU is already installed.")
+            push_state(force=True)
+            return
+        run_replica_job("*qemu", "qemu", [(["install"], "installing qemu / libvirt"),
+                                          (["qemu", "build"], "building the identity-patched QEMU (~10 min)")])
+        push_state(force=True)
     elif action in ("replicaSetup", "replicaCreate"):
         if any(r.get("name") == name for r in replica_list()):
             log("[%s] already exists." % name)
             return
         steps = [(["install"], "installing qemu / libvirt")]
-        if ARGS.qemu_patch and not os.path.exists(QEMU_STAMP):
+        if (ARGS.qemu_patch or msg.get("patch")) and not os.path.exists(QEMU_STAMP):
             steps.append((["qemu", "build"], "building the identity-patched QEMU (~10 min)"))
         steps.append((["-n", name, "create"] + sizing_args(msg), "creating the replica"))
         if action == "replicaSetup":
