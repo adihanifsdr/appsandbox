@@ -1,7 +1,25 @@
 <img width="1028" height="446" alt="App Sandbox" src="https://github.com/user-attachments/assets/f66dcaff-201e-4cf5-8e23-bc480338f353" />
 
 
-# App Sandbox
+# App Sandbox Advanced
+
+An advanced fork of [App Sandbox](https://github.com/jamesstringer90/appsandbox) by
+James Stringer. The original is a virtual machine app for Windows and macOS focused
+on performance and ease of use; everything below in the feature lists is his work
+and stays MIT-licensed under his copyright. This fork adds what the original does not
+do, aimed at Linux guests that should not look like virtual machines:
+
+- **VM identity profiles**: a per-VM JSON profile (prefilled with a bare-metal ASUS/AMI desktop) that decides what the guest reports about its machine: DMI strings, `dmidecode`, `systemd-detect-virt`, `hostnamectl`, udev's vendor/model. Applied live from the GUI and at every boot.
+- **Nested replica on an identity-patched QEMU**: a KVM guest inside the sandbox VM whose ACPI, SMBIOS, drive, USB and CPUID identity all follow the same profile, built from seven small patches against upstream QEMU 8.2.2 (the parameterised form of [kila58/qemu-patched](https://github.com/kila58/qemu-patched)). Inside it `systemd-detect-virt` answers `none`, even as root. One command turns it into an XFCE + Steam desktop.
+- **In-app screens**: the nested replica's console opens inside the App Sandbox window (noVNC over a loopback WebSocket bridge), with start / stop / restart from the sandbox list; no external VNC viewer needed.
+- **A new interface**: the panel was redesigned around a warm "signal rack" look (mono labels, status lamps, one accent, light and dark themes) instead of emoji buttons and coloured text.
+- Fixes along the way: long identity profiles surviving a restart, rows re-rendering on agent state changes, a local deploy script for a shortcut install folder.
+
+Read [docs/vm-identity-dan-replica.md](docs/vm-identity-dan-replica.md) (Bahasa Indonesia) for a plain-language tour, or the technical READMEs under `tools/linux/identity`, `tools/linux/replica` and `tools/linux/replica/qemu-identity`.
+
+---
+
+## The original App Sandbox
 
 App Sandbox is a virtual machine app for Windows and macOS that's focused on performance and ease of use.
 

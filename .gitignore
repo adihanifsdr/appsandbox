@@ -453,3 +453,9 @@ src/app_mac/xcconfig/LocalUser.xcconfig
 !/vendor/qemu-ivshmem/dist/bin/
 !/vendor/qemu-ivshmem/dist/bin/*
 mac-gpu/
+
+# agent skill packs installed with `npx skills add` (local tooling, not part of the app)
+/.agents/
+/.cursor/
+/skills/
+/.claude/skills/

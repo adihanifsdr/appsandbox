@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -12,11 +12,48 @@
      rewriting VM names, usernames, paths, and snapshot names as you type. -->
 <body spellcheck="false" autocorrect="off" autocapitalize="off">
 
+<!-- Icon sheet: stroked 24-unit glyphs kept once here and referenced with
+     <use>, so the page (which runs from file://) never fetches anything. -->
+<svg style="display:none" aria-hidden="true">
+  <symbol id="i-box" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8v8l9 5 9-5V8Z"/><path d="M3 8l9 5 9-5M12 13v8"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M7 4.5v15l12-7.5-12-7.5Z"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
+  <symbol id="i-nest" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="13" height="13" rx="2"/><path d="M8 21h11a2 2 0 0 0 2-2V8"/></symbol>
+  <symbol id="i-screen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="13" height="13" rx="2"/><path d="M8 21h11a2 2 0 0 0 2-2V8"/><path d="M7 9.5l2.5 2.5L7 14.5"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-id" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="11.5" r="2"/><path d="M6 16.5c.7-1.5 1.8-2 3-2s2.3.5 3 2M14 10h4M14 14h4"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v9"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v5M14 11v5"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
+</svg>
+
+<div id="app">
+<header class="rack">
+    <div class="rack-row">
+        <div class="brand">
+            <svg class="ic brand-mark"><use href="#i-box"/></svg>
+            <span class="wordmark">App Sandbox</span>
+            <span class="hint mono" id="host-strip"></span>
+        </div>
+        <div class="spacer"></div>
+        <button id="btn-new-sandbox" class="primary" onclick="openCreateModal()"><svg class="ic"><use href="#i-plus"/></svg>New sandbox</button>
+        <button class="icon" id="btn-theme" onclick="toggleTheme()" title="Switch theme"><svg class="ic" id="theme-icon"><use href="#i-sun"/></svg></button>
+    </div>
+</header>
+
+<main>
 <!-- Virtual Machines -->
-<section id="vm-section">
-    <div class="section-header">
-        <h2>Sandboxes</h2>
-        <button id="btn-new-sandbox" class="primary" onclick="openCreateModal()">+ New Sandbox</button>
+<section id="vm-section" class="unit">
+    <div class="unit-head">
+        <span class="eyebrow">sandboxes</span>
+        <span class="hint mono" id="vm-count"></span>
     </div>
     <div class="vm-table-wrap">
         <table id="vm-table">
@@ -25,21 +62,21 @@
                 <th>OS</th>
                 <th>Status</th>
                 <th>Agent</th>
-                <th>CPU</th>
-                <th>RAM (MB)</th>
-                <th>HDD (GB)</th>
+                <th class="num">CPU</th>
+                <th class="num">RAM</th>
+                <th class="num">HDD</th>
                 <th>GPU</th>
                 <th>Network</th>
                 <th class="win-only">Snapshot</th>
-                <th class="icon-col">&#x25B6;&#xFE0F;</th>
-                <th class="icon-col" title="IDD Display">&#x1F4FA;</th>
-                <th class="icon-col" title="SSH">&gt;_</th>
-                <th class="icon-col" title="Nested replica (appsandbox-replica inside the guest): start it, then open its screen here">&#x1FA86;</th>
-                <th class="icon-col" title="VM identity">&#x1FAAA;</th>
-                <th class="icon-col">&#x23FB;</th>
-                <th class="icon-col">&#x2715;&#xFE0F;</th>
-                <th class="icon-col">&#x1F5D1;&#xFE0F;</th>
-                <th class="icon-col">&#x270F;&#xFE0F;</th>
+                <th class="icon-col" title="Start"><svg class="ic"><use href="#i-play"/></svg></th>
+                <th class="icon-col" title="Display"><svg class="ic"><use href="#i-monitor"/></svg></th>
+                <th class="icon-col" title="SSH"><span class="mono">&gt;_</span></th>
+                <th class="icon-col" title="Nested replica (appsandbox-replica inside the guest): start it, then open its screen here"><svg class="ic"><use href="#i-nest"/></svg></th>
+                <th class="icon-col" title="VM identity"><svg class="ic"><use href="#i-id"/></svg></th>
+                <th class="icon-col" title="Shut down"><svg class="ic"><use href="#i-power"/></svg></th>
+                <th class="icon-col" title="Force stop"><svg class="ic"><use href="#i-x"/></svg></th>
+                <th class="icon-col" title="Delete"><svg class="ic"><use href="#i-trash"/></svg></th>
+                <th class="icon-col" title="Edit"><svg class="ic"><use href="#i-pencil"/></svg></th>
             </tr></thead>
             <tbody id="vm-tbody"></tbody>
         </table>
@@ -47,16 +84,18 @@
 </section>
 
 <!-- Log -->
-<section id="log-section">
-    <h2 class="collapsible" onclick="toggleSection('log-section')"><span class="collapse-arrow" id="log-section-arrow">&#x25BC;</span> Log</h2>
+<section id="log-section" class="unit log">
+    <h2 class="collapsible" onclick="toggleSection('log-section')"><span class="collapse-arrow" id="log-section-arrow"><svg class="ic"><use href="#i-chev"/></svg></span><span class="eyebrow">log</span></h2>
     <div id="log-panel"></div>
 </section>
+</main>
+</div>
 
 <!-- Prerequisite modal -->
 <div class="modal-overlay" id="prereq-overlay">
     <div class="modal">
-        <h3>Virtual Machine Platform Required</h3>
-        <p id="prereq-message">App Sandbox requires the <strong>Virtual Machine Platform</strong> Windows feature to create and run VMs. This feature is not currently enabled.</p>
+        <h3>Virtual Machine Platform required</h3>
+        <p id="prereq-message">App Sandbox needs the <strong>Virtual Machine Platform</strong> Windows feature to create and run VMs. It is not enabled on this machine.</p>
         <div class="modal-buttons" id="prereq-buttons">
             <button onclick="document.getElementById('prereq-overlay').classList.remove('active')">Cancel</button>
             <button class="primary" onclick="enableFeature()">Enable</button>
@@ -67,9 +106,10 @@
 <!-- Create Sandbox modal -->
 <div class="modal-overlay" id="create-vm-overlay">
     <div class="modal wide">
-        <h3>New Sandbox</h3>
+        <span class="eyebrow">new sandbox</span>
+        <h3>Create a sandbox</h3>
         <div class="form-grid">
-            <label for="os-type">OS Type:</label>
+            <label for="os-type">OS</label>
             <div class="form-row">
                 <select id="os-type" onchange="applyOsTypeUI()">
                     <option value="Windows" selected>Windows</option>
@@ -78,18 +118,18 @@
                 </select>
             </div>
 
-            <label for="vm-name">VM Name:</label>
+            <label for="vm-name">Name</label>
             <div class="form-row">
                 <input type="text" id="vm-name" value="MyAppSandbox" class="input-md" autocorrect="off" autocapitalize="off" spellcheck="false">
                 <span class="field-warn" id="vm-name-warn"></span>
             </div>
 
-            <label class="needs-iso">OS Image:</label>
+            <label class="needs-iso">OS image</label>
             <div class="image-row needs-iso">
-                <input type="text" id="image-path" placeholder="Path to ISO or VHDX..." autocorrect="off" autocapitalize="off" spellcheck="false">
-                <button id="btn-browse" onclick="sendCmd('browseImage')">Browse...</button>
-                <span class="or-separator win-only">OR</span>
-                <label class="win-only" style="text-align:left">Template:</label>
+                <input type="text" id="image-path" placeholder="Path to ISO or VHDX" autocorrect="off" autocapitalize="off" spellcheck="false">
+                <button id="btn-browse" onclick="sendCmd('browseImage')">Browse</button>
+                <span class="or-separator win-only">or</span>
+                <label class="win-only inline">Template</label>
                 <div class="template-dropdown win-only" id="template-dropdown">
                     <div class="template-dropdown-selected" id="template-dropdown-selected">(None)</div>
                     <div class="template-dropdown-list" id="template-dropdown-list"></div>
@@ -97,7 +137,7 @@
                 </div>
             </div>
 
-            <label class="needs-linux-version">Distribution:</label>
+            <label class="needs-linux-version">Distribution</label>
             <div class="form-row needs-linux-version">
                 <select id="linux-version">
                     <option value="ubuntu-26.04" selected>Ubuntu 26.04 LTS</option>
@@ -105,25 +145,25 @@
                 <span class="host-info">Downloaded on first create (~600 MB), cached on the host</span>
             </div>
 
-            <label for="hdd-size">HDD Size:</label>
+            <label for="hdd-size">Disk</label>
             <div class="form-row">
-                <input type="number" id="hdd-size" value="64" min="1" class="input-sm"> GB
+                <input type="number" id="hdd-size" value="64" min="1" class="input-sm"><span class="unit-label">GB</span>
                 <span class="host-info" id="host-hdd"></span>
             </div>
 
-            <label for="ram-size">RAM Size:</label>
+            <label for="ram-size">Memory</label>
             <div class="form-row">
-                <input type="number" id="ram-size" value="16384" min="512" step="2" class="input-sm"> MB
+                <input type="number" id="ram-size" value="16384" min="512" step="2" class="input-sm"><span class="unit-label">MB</span>
                 <span class="host-info" id="host-ram"></span>
             </div>
 
-            <label for="cpu-cores">CPU Cores:</label>
+            <label for="cpu-cores">CPU cores</label>
             <div class="form-row">
                 <input type="number" id="cpu-cores" value="8" min="1" class="input-sm">
                 <span class="host-info" id="host-cpu"></span>
             </div>
 
-            <label for="gpu-mode">GPU:</label>
+            <label for="gpu-mode">GPU</label>
             <div class="form-row">
                 <select id="gpu-mode">
                     <option value="0">None</option>
@@ -132,7 +172,7 @@
                 </select>
             </div>
 
-            <label for="net-mode">Network:</label>
+            <label for="net-mode">Network</label>
             <div class="form-row">
                 <select id="net-mode" onchange="onNetModeChange()">
                     <option value="0">None</option>
@@ -140,40 +180,43 @@
                     <option value="2">External</option>
                     <option value="3">Internal</option>
                 </select>
-                <label id="net-adapter-label" style="text-align:left">Adapter:</label>
+                <label id="net-adapter-label" class="inline">Adapter</label>
                 <select id="net-adapter"></select>
             </div>
 
-            <label>Username:</label>
+            <label>Username</label>
             <div class="cred-row">
                 <input type="text" id="admin-user" value="user" class="input-md" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
                 <span class="field-warn" id="admin-user-warn"></span>
             </div>
 
-            <label>Password:</label>
+            <label>Password</label>
             <div class="cred-row">
                 <input type="password" id="admin-pass" value="test123">
-                <label>Confirm:</label>
+                <label class="inline">Confirm</label>
                 <input type="password" id="admin-confirm" value="test123">
-                <span class="toggle-pass" onmousedown="showPassword()" onmouseup="hidePassword()" onmouseleave="hidePassword()">&#x1F441;</span>
+                <span class="toggle-pass" title="Hold to show" onmousedown="showPassword()" onmouseup="hidePassword()" onmouseleave="hidePassword()"><svg class="ic"><use href="#i-eye"/></svg></span>
                 <span class="field-warn" id="admin-pass-warn"></span>
             </div>
 
-            <label>Options:</label>
-            <div class="form-row">
-                <label class="needs-windows" title="Disable Secure Boot and enable test-signing (required to load the test-signed guest drivers)"><input type="checkbox" id="test-mode"> Test Mode</label>
-                <label title="Exposes the VM's sshd on a host-loopback port, tunnelled over vsock"><input type="checkbox" id="ssh-enabled" onchange="onSshToggle()"> SSH Server</label>
-                <label title="Deploy the AppSandbox SSH public key so you can connect with key auth (requires SSH Server)"><input type="checkbox" id="ssh-deploy-key" disabled> Deploy SSH key</label>
-                <label class="needs-linux" title="Install the GA kernel (linux-generic, e.g. 6.8 on 24.04) from the Ubuntu archive at first boot and boot it instead of the ISO's HWE kernel - what a stock server / VPS runs. Needs internet during create."><input type="checkbox" id="ga-kernel"> GA kernel</label>
+            <label>Options</label>
+            <div class="form-row checks">
+                <label class="needs-windows check" title="Disable Secure Boot and enable test-signing (required to load the test-signed guest drivers)"><input type="checkbox" id="test-mode"> Test mode</label>
+                <label class="check" title="Exposes the VM's sshd on a host-loopback port, tunnelled over vsock"><input type="checkbox" id="ssh-enabled" onchange="onSshToggle()"> SSH server</label>
+                <label class="check" title="Deploy the AppSandbox SSH public key so you can connect with key auth (requires SSH Server)"><input type="checkbox" id="ssh-deploy-key" disabled> Deploy SSH key</label>
+                <label class="needs-linux check" title="Install the GA kernel (linux-generic, e.g. 6.8 on 24.04) from the Ubuntu archive at first boot and boot it instead of the ISO's HWE kernel - what a stock server / VPS runs. Needs internet during create."><input type="checkbox" id="ga-kernel"> GA kernel</label>
             </div>
 
-            <label class="needs-linux" for="vm-identity" title="What the guest reports about the machine it runs on: DMI strings (sys_vendor, product_name, bios_vendor, chassis_vendor, ...), systemd-detect-virt, chipset. Applied inside the guest at every boot. Prefilled with a bare-metal desktop profile; clear it to keep the real (Hyper-V) identity. CPUID / clocksource cannot be changed this way; the nested VPS replica (appsandbox-replica) honours those and the ACPI / SMBIOS / drive strings with its identity-patched QEMU.">VM identity (JSON) <a href="#" class="small-link" onclick="fillDefaultIdentity('vm-identity'); return false;">default</a> &middot; <a href="#" class="small-link" onclick="document.getElementById('vm-identity').value=''; return false;">none</a>:</label>
-            <textarea class="needs-linux" id="vm-identity" rows="5" spellcheck="false" placeholder='(empty: the guest reports its real identity)'></textarea>
+            <label class="needs-linux" for="vm-identity" title="What the guest reports about the machine it runs on: DMI strings (sys_vendor, product_name, bios_vendor, chassis_vendor, ...), systemd-detect-virt, chipset. Applied inside the guest at every boot. Prefilled with a bare-metal desktop profile; clear it to keep the real (Hyper-V) identity. CPUID / clocksource cannot be changed this way; the nested VPS replica (appsandbox-replica) honours those and the ACPI / SMBIOS / drive strings with its identity-patched QEMU.">Identity</label>
+            <div class="needs-linux identity-field">
+                <div class="field-tools"><a href="#" class="small-link" onclick="fillDefaultIdentity('vm-identity'); return false;">default</a><a href="#" class="small-link" onclick="document.getElementById('vm-identity').value=''; return false;">none</a></div>
+                <textarea id="vm-identity" rows="5" spellcheck="false" placeholder="(empty: the guest reports its real identity)"></textarea>
+            </div>
         </div>
         <div class="modal-buttons">
             <button onclick="closeCreateModal()">Cancel</button>
-            <button id="btn-create-template" class="win-only" disabled onclick="onCreateTemplate()">Build Template</button>
-            <button id="btn-create" class="primary" disabled onclick="onCreateVm()">Create Sandbox</button>
+            <button id="btn-create-template" class="win-only" disabled onclick="onCreateTemplate()">Build template</button>
+            <button id="btn-create" class="primary" disabled onclick="onCreateVm()">Create sandbox</button>
         </div>
     </div>
 </div>
@@ -181,10 +224,11 @@
 <!-- VM identity editor -->
 <div class="modal-overlay" id="identity-overlay">
     <div class="modal wide">
-        <h3>VM identity &mdash; <span id="identity-vm-name"></span></h3>
-        <p>What the guest reports about the machine it runs on. DMI strings (sys_vendor, product_name, bios_vendor, chassis_vendor, ...), systemd-detect-virt and the chipset are overlaid inside the guest; CPUID and the clocksource cannot be changed this way. Saved to the VM, pushed to a running guest immediately, and re-applied at every boot.</p>
-        <p>Hypervisor-level keys are honoured by the nested VPS replica (<code>appsandbox-replica</code> in the guest) once it runs the identity-patched QEMU (<code>sudo appsandbox-replica qemu build</code>): <code>acpi_oem_id</code>, <code>acpi_oem_table_id</code>, <code>acpi_creator_id</code>, <code>smbios_manufacturer</code>, <code>drive_vendor</code>, <code>disk_model</code>, <code>cdrom_model</code>, <code>usb_vendor</code>, <code>smbios_vm_bit</code>, <code>CPUID 0x40000000</code> and <code>hypervisor CPU flag</code> ("not set"). The replica is redefined on every save and shows the new identity at its next boot.</p>
-        <textarea id="identity-text" rows="12" spellcheck="false" autocorrect="off" autocapitalize="off" style="width:100%; box-sizing:border-box; font-family: Consolas, monospace; font-size: 12px;" placeholder='[{"check":"sys_vendor","name":"OpenStack Foundation"},{"check":"product_name","name":"OpenStack Nova"},{"check":"systemd-detect-virt","name":"kvm"},{"check":"acpi_oem_id","name":"BOCHS"},{"check":"cdrom_model","name":"QEMU DVD-ROM"},{"check":"CPUID 0x40000000","name":"KVMKVMKVM"}]'></textarea>
+        <span class="eyebrow">vm identity</span>
+        <h3 id="identity-vm-name"></h3>
+        <p>What the guest reports about the machine it runs on. DMI strings, <code>systemd-detect-virt</code> and the chipset are overlaid inside the guest; CPUID and the clocksource cannot be changed this way. Saved to the VM, pushed to a running guest immediately, re-applied at every boot.</p>
+        <p>The nested replica honours the hypervisor-level keys once it runs the identity-patched QEMU (<code>sudo appsandbox-replica qemu build</code>): <code>acpi_oem_id</code>, <code>acpi_oem_table_id</code>, <code>acpi_creator_id</code>, <code>smbios_manufacturer</code>, <code>drive_vendor</code>, <code>disk_model</code>, <code>cdrom_model</code>, <code>usb_vendor</code>, <code>smbios_vm_bit</code>, <code>CPUID 0x40000000</code>, <code>hypervisor CPU flag</code>. It is redefined on every save and shows the new identity at its next boot.</p>
+        <textarea id="identity-text" rows="12" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder='[{"check":"sys_vendor","name":"OpenStack Foundation"},{"check":"product_name","name":"OpenStack Nova"},{"check":"systemd-detect-virt","name":"kvm"},{"check":"acpi_oem_id","name":"BOCHS"},{"check":"cdrom_model","name":"QEMU DVD-ROM"},{"check":"CPUID 0x40000000","name":"KVMKVMKVM"}]'></textarea>
         <div class="modal-buttons">
             <button onclick="closeIdentityModal()">Cancel</button>
             <button onclick="fillDefaultIdentity('identity-text')" title="Fill in the default bare-metal desktop profile (not saved until you press Save)">Default</button>
@@ -198,8 +242,9 @@
      nested replica's screen once it exists. Opened by the screen button. -->
 <div id="vnc-overlay">
     <div id="vnc-bar">
+        <svg class="ic"><use href="#i-nest"/></svg>
         <span id="vnc-title">Screen</span>
-        <span id="vnc-status"></span>
+        <span id="vnc-status" class="mono"></span>
         <span class="vnc-spacer"></span>
         <button onclick="vncSendCad()" title="Send Ctrl+Alt+Del to the guest">Ctrl+Alt+Del</button>
         <button onclick="vncToggleScale()" id="vnc-scale-btn" title="Fit the screen to this window or show it 1:1">Fit</button>
@@ -216,12 +261,12 @@
     <div class="modal">
         <h3 id="modal-title">Confirm</h3>
         <p id="modal-message"></p>
-        <label style="display:none; font-size:12px; color:var(--text-dim); cursor:pointer; margin-bottom:8px;">
+        <label class="check modal-check" style="display:none;">
             <input type="checkbox" id="modal-dont-show"> Don't show this again
         </label>
-        <div id="modal-input-row" style="display:none; margin-bottom:12px;">
-            <label style="font-size:12px; color:var(--text-dim);" id="modal-input-label">Name:</label>
-            <input type="text" id="modal-input" style="width:100%; margin-top:4px;" autocorrect="off" autocapitalize="off" spellcheck="false">
+        <div id="modal-input-row" style="display:none;">
+            <label class="field-label" id="modal-input-label">Name</label>
+            <input type="text" id="modal-input" autocorrect="off" autocapitalize="off" spellcheck="false">
         </div>
         <div class="modal-buttons">
             <button onclick="modalResolve(false)">Cancel</button>

@@ -14,6 +14,23 @@ let rowCache = {};          /* vm.name -> <tr> — persistent rows so the status
 let rowSigCache = {};       /* vm.name -> last render signature; skip rebuild when unchanged */
 
 /* ---- Collapsible sections ---- */
+/* ---- Theme: dark by default, remembered per machine ---- */
+function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme === 'light' ? 'light' : 'dark');
+    var use = document.querySelector('#theme-icon use');
+    if (use) use.setAttribute('href', theme === 'light' ? '#i-moon' : '#i-sun');
+}
+function toggleTheme() {
+    var next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+    applyTheme(next);
+    try { localStorage.setItem('asb-theme', next); } catch (e) {}
+}
+(function() {
+    var t = null;
+    try { t = localStorage.getItem('asb-theme'); } catch (e) {}
+    if (t) applyTheme(t);
+})();
+
 function toggleSection(id) {
     var section = document.getElementById(id);
     var collapsed = section.classList.toggle('collapsed');
@@ -214,6 +231,8 @@ function updateHostInfo(info) {
     if (el) el.textContent = 'Host: ' + info.hostRamMb + ' MB | VMs using: ' + info.vmRamMb + ' MB';
     el = document.getElementById('host-hdd');
     if (el) el.textContent = 'Free: ' + info.freeGb + ' GB | VMs allocated: ' + info.vmHddGb + ' GB';
+    el = document.getElementById('host-strip');
+    if (el) el.textContent = 'host  ' + info.hostCores + ' cores  ' + Math.round(info.hostRamMb / 1024) + ' GB ram  ' + info.freeGb + ' GB free';
 }
 
 /* ---- Adapters ---- */
@@ -982,6 +1001,8 @@ function buildRowCells(vm, i, statusTd) {
 
 function renderVmTable() {
     var tbody = document.getElementById('vm-tbody');
+    var vc = document.getElementById('vm-count');
+    if (vc) vc.textContent = vms.length ? vms.length + (vms.length === 1 ? ' sandbox' : ' sandboxes') : '';
 
     if (vms.length === 0) {
         rowCache = {};
@@ -1102,12 +1123,27 @@ function makeCell(text, row, col, title) {
     return td;
 }
 
+/* Which glyph an icon cell shows: by the cell's kind, or by the legacy emoji
+   the caller passes for state variants (start / clock / screen / check). */
+var ICON_BY_CLASS = {
+    start: 'i-play', 'connect-idd': 'i-monitor', vnc: 'i-nest', identity: 'i-id',
+    shutdown: 'i-power', stop: 'i-x', 'delete': 'i-trash', edit: 'i-pencil'
+};
+var ICON_BY_GLYPH = {
+    '\u25B6\uFE0F': 'i-play', '\u23F3': 'i-clock', '\uD83D\uDDA5\uFE0F': 'i-screen', '\u2714\uFE0F': 'i-check'
+};
+function iconMarkup(cls, icon) {
+    if (cls === 'ssh') return '<span class="mono">&gt;_</span>';
+    var id = ICON_BY_GLYPH[icon] || ICON_BY_CLASS[cls];
+    return id ? '<svg class="ic" aria-hidden="true"><use href="#' + id + '"/></svg>' : icon;
+}
+
 function makeIconCell(cls, icon, active, handler, extraClass, title) {
     var td = document.createElement('td');
     td.className = 'icon-col';
     var btn = document.createElement('button');
     btn.className = 'icon-btn ' + cls + (active ? '' : ' inactive') + (extraClass ? ' ' + extraClass : '');
-    btn.textContent = icon;
+    btn.innerHTML = iconMarkup(cls, icon);
     if (title) btn.title = title;
     if (active) btn.onclick = handler;
     else btn.disabled = true;
