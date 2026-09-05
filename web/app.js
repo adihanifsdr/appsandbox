@@ -1203,7 +1203,6 @@ function buildReplicaRows(grp, vm, idx) {
     while (grp.children.length > 1) grp.removeChild(grp.lastChild);
     if (vm.osType !== 'Linux' || !vm.running || !vm.agentOnline || vm.buildingVhdx) return;
     var reps = parseReplicas(vm.replicas);
-    var dataCols = hostBridge.noSnapshots ? 9 : 10;   /* Name .. Snapshot */
     /* every running console, for the grid window (one window, all of them tiled) */
     var live = reps.filter(function(r) { return r.state === 'running' && r.vnc; });
     var tiles = live.map(function(r) { return r.name + ':' + r.vnc; }).join(',');
@@ -1211,18 +1210,30 @@ function buildReplicaRows(grp, vm, idx) {
         var running = r.state === 'running';
         var tr = document.createElement('tr');
         tr.className = 'replica-row ' + (running ? 'running' : 'stopped');
-        var td = document.createElement('td');
-        td.colSpan = dataCols;
-        td.className = 'replica-cell';
-        td.innerHTML = '<span class="replica-arm"></span><svg class="ic"><use href="#i-nest"/></svg>' +
-                       '<span class="replica-name"></span><span class="lamp' + (running ? ' run' : '') + '"></span>' +
-                       '<span class="replica-state mono"></span>';
+        /* one cell per column, under the same headers as the VM row */
+        var rc = function(text, title) {
+            var c = document.createElement('td');
+            c.className = 'replica-cell';
+            c.textContent = text == null ? '' : text;
+            if (title) c.title = title;
+            return c;
+        };
+        var td = rc('');
+        td.innerHTML = '<span class="replica-arm"></span><svg class="ic"><use href="#i-nest"/></svg><span class="replica-name"></span>';
         td.querySelector('.replica-name').textContent = r.name;
-        td.querySelector('.replica-state').textContent =
-            (running ? 'running' : (r.state || 'stopped')) +
-            (r.cpus ? '   ' + r.cpus + ' cpu' : '') + (r.ram ? '   ' + r.ram + ' MB' : '') + (r.disk ? '   ' + r.disk + ' GB' : '') +
-            (r.vnc ? '   vnc :' + r.vnc : '') + (r.desktop ? '   xfce + steam' : '');
+        td.title = 'Nested replica: a KVM guest inside ' + vm.name + ' (appsandbox-replica)';
         tr.appendChild(td);
+        tr.appendChild(rc(r.desktop ? 'Ubuntu · xfce' : 'Ubuntu', r.desktop ? 'Ubuntu cloud image with XFCE + Steam (autologin)' : 'Ubuntu cloud image, no desktop yet'));
+        var st = rc(running ? 'running' : (r.state || 'stopped'));
+        st.className = 'replica-cell ' + (running ? 'status-running' : 'status-stopped');   /* same lamp as the VM row */
+        tr.appendChild(st);
+        tr.appendChild(rc(''));                                                   /* agent */
+        tr.appendChild(rc(r.cpus || '', 'Virtual CPU cores of the replica'));
+        tr.appendChild(rc(r.ram ? r.ram + ' MB' : '', 'Memory of the replica'));
+        tr.appendChild(rc(r.disk ? r.disk + ' GB' : '', 'Disk of the replica (grows only)'));
+        tr.appendChild(rc(r.vnc ? 'vnc :' + r.vnc : '', 'Console: VNC server on 127.0.0.1:' + (r.vnc || 5900) + ' inside ' + vm.name));
+        tr.appendChild(rc('NAT', 'libvirt NAT network (virbr0) inside ' + vm.name));
+        if (!hostBridge.noSnapshots) tr.appendChild(rc(''));                      /* snapshot */
         var name = r.name;
         var cells = [
             makeIconCell('start', '\u25B6\uFE0F', !running,

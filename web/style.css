@@ -222,6 +222,7 @@ td.replica-cell .replica-name { color: hsl(var(--ink)); font-weight: 600; margin
 td.replica-cell .lamp { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: hsl(var(--ink-dim)); margin-right: 6px; vertical-align: 1px; }
 td.replica-cell .lamp.run { background: hsl(var(--lamp-run)); box-shadow: 0 0 6px hsl(var(--lamp-run) / var(--glow-a)); }
 td.replica-cell .replica-state { font-size: 11px; white-space: pre; }
+td.replica-cell.status-running { color: hsl(var(--ink-muted)); }
 tr.replica-row .icon-btn.stop:not(.inactive) { color: hsl(var(--ink-muted)); }
 
 /* inline editing */
