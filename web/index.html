@@ -15,7 +15,10 @@
 <!-- Icon sheet: stroked 24-unit glyphs kept once here and referenced with
      <use>, so the page (which runs from file://) never fetches anything. -->
 <svg style="display:none" aria-hidden="true">
-  <symbol id="i-box" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8v8l9 5 9-5V8Z"/><path d="M3 8l9 5 9-5M12 13v8"/></symbol>
+  <!-- The Nestbox mark: an outer shell with the box, an isometric cube, nested
+       inside it. docs/brand/ holds the full three-shell drawing used for the
+       app icons; this is the two-shell form that survives 18px. -->
+  <symbol id="i-nestbox" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polygon points="12,1 2.47,6.5 2.47,17.5 12,23 21.53,17.5 21.53,6.5" stroke-width="1.6"/><polygon points="12,5.1 6.02,8.55 6.02,15.45 12,18.9 17.98,15.45 17.98,8.55" stroke-width="1.4"/><path d="M12 12L12 5.1M12 12L6.02 15.45M12 12L17.98 15.45" stroke-width="1.4"/></symbol>
   <symbol id="i-play" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M7 4.5v15l12-7.5-12-7.5Z"/></symbol>
   <symbol id="i-monitor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
   <symbol id="i-nest" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="13" height="13" rx="2"/><path d="M8 21h11a2 2 0 0 0 2-2V8"/></symbol>
@@ -40,7 +43,7 @@
 <header class="rack">
     <div class="rack-row">
         <div class="brand">
-            <svg class="ic brand-mark"><use href="#i-box"/></svg>
+            <svg class="ic brand-mark"><use href="#i-nestbox"/></svg>
             <span class="wordmark">Nestbox</span>
             <span class="hint mono" id="host-strip"></span>
         </div>
