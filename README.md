@@ -12,7 +12,7 @@ macOS support are his work and stay MIT-licensed under his copyright (see
   decides what the guest reports about its machine: DMI strings, `dmidecode`, `systemd-detect-virt`,
   `hostnamectl`, udev's vendor and model. Edited from the identity button, applied live and at every boot.
 - **Nested replicas on an identity-patched QEMU.** Any number of KVM guests inside a sandbox, each
-  with its own name, disk, console and desktop (XFCE + Steam, one click). Their ACPI, SMBIOS, drive,
+  with its own name, disk, console and desktop (XFCE, one click). Their ACPI, SMBIOS, drive,
   USB and CPUID identity follows the same profile through seven small patches against upstream
   QEMU 8.2.2 (the parameterised form of [kila58/qemu-patched](https://github.com/kila58/qemu-patched)).
   Inside a replica `systemd-detect-virt` answers `none`, even as root.

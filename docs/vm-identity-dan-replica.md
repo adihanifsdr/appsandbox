@@ -11,7 +11,7 @@ saat kamu mengisi **VM identity** di Nestbox dan apa itu **replica**
 Setiap komputer punya semacam KTP yang bisa dibaca oleh program di dalamnya:
 merek dan tipe motherboard, versi BIOS, nomor seri, merek prosesor, nama
 harddisk dan DVD, dan sebagainya. Sistem operasi dan aplikasi (termasuk
-Steam, anti-cheat, dan alat lisensi) membaca KTP ini.
+alat lisensi dan proteksi aplikasi) membaca KTP ini.
 
 Di mesin virtual, KTP itu diisi oleh hypervisor (di Windows: Hyper-V) dan
 isinya jujur: "Microsoft Corporation, Virtual Machine". Selain KTP, ada dua
@@ -31,7 +31,7 @@ Perintah `systemd-detect-virt` di Linux membaca semua itu dan menjawab
 Ada dua tempat berbeda di mana identitas bisa diubah, dan keduanya punya
 batas yang berbeda.
 
-### Lapisan 1: sandbox VM (tempat Steam-mu terinstall)
+### Lapisan 1: sandbox VM (tempat aplikasimu terinstall)
 
 Sandbox VM adalah VM Ubuntu yang berjalan di Hyper-V. Di sini Nestbox
 **tidak bisa mengganti KTP aslinya**, tapi bisa menaruh "stiker" di atasnya:
@@ -67,8 +67,8 @@ stiker:
 | Daftar PCI (`lspci`) | ❌ Hyper-V | ❌ masih ada virtio/Cirrus |
 
 Harga yang dibayar: replica **tidak punya GPU**. Grafisnya digambar oleh CPU
-(llvmpipe). Cukup untuk desktop, Steam client, dan game ringan; tidak untuk
-game berat.
+(llvmpipe). Cukup untuk desktop dan aplikasi ringan; tidak untuk aplikasi
+grafis berat.
 
 Analogi: sandbox VM itu rumah kontrakan yang kamu cat ulang; tetangga yang
 melihat dari luar masih tahu itu kontrakan. Replica itu rumah kecil yang kamu
@@ -139,7 +139,7 @@ Kolom di daftar sandbox, dari kiri ke kanan setelah Snapshot:
 | ▶️ | Start/stop sandbox VM |
 | 📺 | Layar **utama** sandbox VM (GPU penuh) |
 | `>_` | Terminal SSH ke sandbox VM |
-| 🪆 | **Replica**: tombol `+` membuat replica baru (boleh lebih dari satu per sandbox). Setiap replica tampil sebagai baris di bawah sandbox-nya dengan tombol start, layar, XFCE + Steam, stop, restart, hapus |
+| 🪆 | **Replica**: tombol `+` membuat replica baru (boleh lebih dari satu per sandbox). Setiap replica tampil sebagai baris di bawah sandbox-nya dengan tombol start, layar, desktop XFCE, stop, restart, hapus |
 | 🪪 | Editor VM identity (profil JSON) |
 
 Jendela layar replica punya tombol Ctrl+Alt+Del, Fit/1:1, External viewer
@@ -157,7 +157,7 @@ belakang; kemajuannya tampil di log. Cara manual lewat tombol `>_`:
 sudo appsandbox-replica install       # pasang QEMU + libvirt (sekali)
 sudo appsandbox-replica qemu build    # bangun QEMU yang dipatch (~10 menit)
 sudo appsandbox-replica create        # unduh Ubuntu, buat replica
-sudo appsandbox-replica desktop       # XFCE + Steam + autologin (10-20 menit)
+sudo appsandbox-replica desktop       # XFCE + autologin (10-20 menit)
 ```
 
 Setelah itu semuanya dari GUI. Perintah lain yang berguna:
@@ -172,10 +172,10 @@ sudo appsandbox-identity status              # apa yang dilihat sandbox VM saat 
 
 ## Pertanyaan yang sering muncul
 
-**Kenapa Steam di sandbox VM tidak dipindah saja ke replica?**
-Bisa (perintah `desktop` memasangnya), tapi replica tidak punya GPU. Kalau
-game-nya butuh GPU, tetap jalankan di sandbox VM; di sana yang berubah hanya
-lapisan stiker.
+**Kenapa aplikasi di sandbox VM tidak dipindah saja ke replica?**
+Bisa (perintah `desktop` menyiapkan desktopnya), tapi replica tidak punya
+GPU. Kalau aplikasinya butuh GPU, tetap jalankan di sandbox VM; di sana yang
+berubah hanya lapisan stiker.
 
 **Bisa tidak QEMU yang dipatch dipakai langsung untuk sandbox VM?**
 Tidak. Sandbox VM dijalankan oleh Hyper-V, bukan QEMU, dan Hyper-V tidak

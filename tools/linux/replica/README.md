@@ -35,7 +35,7 @@ domain, disk, ssh key and VNC port, under
 `/var/lib/appsandbox/replica/replicas/<name>/`; the base image and the
 patched QEMU are shared. `appsandbox-replica list` prints them as JSON, which
 the guest agent reports to Nestbox so each replica gets its own row (start,
-screen, XFCE + Steam, stop, restart, delete) under its sandbox, and the `+`
+screen, XFCE desktop, stop, restart, delete) under its sandbox, and the `+`
 in the nested column creates another one. `nestbox-replica` is an alias.
 
 ## Use
@@ -49,15 +49,14 @@ sudo appsandbox-replica checks                    # prints the checks as [{check
 sudo appsandbox-replica ssh                       # user / test123, key auth
 sudo appsandbox-replica qemu build                # once: identity-patched QEMU (ACPI / SMBIOS / drive / CPUID strings)
 sudo appsandbox-replica reidentify [--restart]    # re-read the profile into the domain (the agent does this on every change)
-sudo appsandbox-replica desktop [--no-steam]      # XFCE + autologin + Steam inside the replica, virtio video 1600x900
+sudo appsandbox-replica desktop                   # XFCE + autologin inside the replica, virtio video 1600x900
 ```
 
 `desktop` makes the replica usable from the App Sandbox **VNC button**: it
-installs xubuntu-core with LightDM autologin for `user`, Steam (`steam-installer`,
-i386 multiarch) and switches the video model from Cirrus to virtio (`--video`
-on `create` / `reidentify` does the same). There is no GPU in the replica, so
-rendering is llvmpipe: fine for the Steam client, the store and light games,
-not for GPU-heavy titles.
+installs xubuntu-core with LightDM autologin for `user` and switches the video
+model from Cirrus to virtio (`--video` on `create` / `reidentify` does the
+same). There is no GPU in the replica, so rendering is llvmpipe: fine for the
+desktop and light applications, not for GPU-heavy ones.
 
 Editing the VM identity in the App Sandbox GUI (🪪) or with `vmIdentity` in
 the headless API pushes the profile to the guest agent, which re-applies the

@@ -319,7 +319,7 @@ rather than forwarding bad input to the core.
 | `sshEnabled` | provision SSH + forward a loopback port |
 | `sshDeployKey` | deploy the AppSandbox public key for password-less login (**requires `sshEnabled`**; rejected `400` otherwise) |
 | `gaKernel` | Linux only: install the GA kernel (`linux-generic`, e.g. 6.8 on 24.04) from the archive at first boot and make GRUB boot it, instead of the ISO's HWE kernel. Matches what a stock server / VPS runs. |
-| `replicaAuto` | Linux only: after the install, build the identity-patched QEMU, create the nested replica `replica` and install XFCE + Steam in it (runs in the guest in the background; `status` shows `replicas`). |
+| `replicaAuto` | Linux only: after the install, build the identity-patched QEMU, create the nested replica `replica` and install the XFCE desktop in it (runs in the guest in the background; `status` shows `replicas`). |
 | `vmIdentity` | Linux only: JSON profile of what the guest reports about its machine (`[{"check":"sys_vendor","name":"OpenStack Foundation"}, ...]`): DMI strings, `systemd-detect-virt`, chipset. The GUI prefills the bare-metal desktop profile from `tools/linux/identity/README.md`; the API takes exactly what it is given (omit for the real identity). Applied in the guest at every boot; also settable later with `PUT /vms/{name}` (`""` clears). `status` reports `hasIdentity`. See `tools/linux/identity/README.md` for what can and cannot be overlaid. |
 | `isTemplate` | build a template (Windows only; can't be built from another template) |
 
