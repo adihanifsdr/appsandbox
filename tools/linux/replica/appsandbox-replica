@@ -587,8 +587,11 @@ if [ "$STEAM" = 1 ]; then
     echo steam steam/question select "I AGREE" | debconf-set-selections
     echo steam steam/license note '' | debconf-set-selections
     apt-get install -y -q steam-installer || apt-get install -y -q steam
-    # software GL: keep the Steam UI on the CPU renderer
-    install -d -o user -g user /home/user/.config/autostart
+    # software GL: keep the Steam UI on the CPU renderer. Every directory is
+    # named: install -d applies -o/-g to the last component only, and a
+    # root-owned ~/.config stops xfconfd ("Unable to create configuration
+    # directory") - XFCE then falls into its failsafe-session dialog.
+    install -d -o user -g user /home/user/.config /home/user/.config/autostart
 fi
 echo "desktop: OK"
 EOF
