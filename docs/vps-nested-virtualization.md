@@ -138,10 +138,21 @@ replica hanya menyimpan perubahannya sendiri (beberapa GB untuk Ubuntu
 headless). Enam replica headless butuh sekitar `3,5 + 6 x 3 + 10 GB OS
 host ≈ 32 GB`.
 
-Kesimpulan contoh ini: **6 core, 12 GB, 120 GB** — persis Onidel HF-4
-($38,70) atau OVHcloud VPS-3 (12 GB, tapi disk 100 GB dan CPU 3,5x lebih
-lambat). Yang mengikat adalah RAM, bukan CPU, di kedua pembacaan angka 5%
-itu. Tiap replica dibuat dengan `--cpus 2 --ram 1536 --disk 20G`; vCPU
+Kesimpulan contoh ini bergantung pada pembacaan tadi, dan bedanya besar:
+
+- Kalau 5% itu bacaan `top` (0,05 core per proses), semua plan 12 GB cukup
+  — termasuk **OVHcloud VPS-3 $12,32**, yang mengikat cuma RAM.
+- Kalau 5% itu bacaan Task Manager (0,8 thread per proses), kebutuhannya
+  jadi `4,8 thread 5800H`, dan itu berarti **4,2 core Ryzen 9950X** atau
+  **4,4 core EPYC Turin**, tetapi **11,3 core Haswell** — jauh di atas 6
+  atau 8 vCPU yang dijual OVHcloud, dan juga di atas 8 core EPYC Milan.
+  Dengan beban seberat itu hanya CPU cepat yang masuk akal: GreenCloud
+  Ryzen 9950X 8 core / 16 GB ($80) atau Onidel HF-4 kalau stoknya kembali.
+
+Cara memastikannya di mesin 5800H: jalankan `top` lalu lihat kolom %CPU
+proses itu (100% = satu core), atau di Task Manager buka tab Details dan
+bandingkan dengan tab Performance — kalau Task Manager menulis 5% untuk
+satu proses, itu 5% dari seluruh 16 thread. Tiap replica dibuat dengan `--cpus 2 --ram 1536 --disk 20G`; vCPU
 boleh dijual berlebih (6 x 2 = 12 vCPU di 6 core) karena bebannya
 sebentar-sebentar.
 
@@ -210,6 +221,26 @@ Dua hal lain yang tidak kelihatan di tabel:
   tahunan juga tidak masuk kebijakan refund 7 hari mereka. Sebaliknya
   DigitalOcean, GCE, AWS, dan OCI ditagih per jam/detik, jadi risikonya
   hampir nol untuk menguji.
+
+### Stok yang terverifikasi, 5 September 2026
+
+Stok berubah cepat dan itu yang paling sering menentukan pilihan, bukan
+harga. Hasil cek langsung ke halaman order:
+
+| Provider | Stok Singapura |
+|---|---|
+| **GreenCloud Ryzen KVM, Singapura DC2** | **Semua tier tersedia**: 1 GB $6, 2 GB $10, 4 GB / 2 core $20, 8 GB / 4 core $40, **16 GB / 8 core / 150 GB $80** |
+| GreenCloud Budget KVM (EPYC), Singapura DC1 & DC2 | Tersedia |
+| OVHcloud | Selalu tersedia |
+| ExtraVM | Tinggal 1 GB (8 unit) dan 2 GB (1 unit); 3 GB ke atas **habis semua** |
+| Advin Servers (Singapura dan Johor) | **Habis** |
+| Onidel High Frequency Turin | **Habis** — order ditolak dengan "Resources not available" |
+| Cloudzy, DigitalOcean, Contabo VDS, SSD Nodes, cloud besar | Tersedia (kapasitas besar, jarang kosong) |
+
+GreenCloud juga menjual tambahan satuan: $3 per GB RAM, $3 per core, $3
+per 10 GB disk. Jadi RyzenKVMSG2-4 ($40, 4 core, 8 GB) ditambah 4 GB RAM
+dan 2 core menjadi 6 core / 12 GB seharga $58 — lebih murah daripada naik
+ke tier 16 GB kalau yang dibutuhkan cuma 12 GB.
 
 ### Peringkat akhir
 
