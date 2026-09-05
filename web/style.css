@@ -404,6 +404,27 @@ body.vnc-page { display: flex; flex-direction: column; height: 100%; background:
 #vnc-bar button { height: 26px; padding: 0 10px; font-size: 11.5px; }
 #vnc-screen { flex: 1; min-height: 0; overflow: hidden; background: #000; }
 
+/* grid mode: every running replica of a sandbox as a tile */
+#vnc-grid {
+    flex: 1; min-height: 0; display: grid; gap: 6px; padding: 6px;
+    grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr);
+}
+.tile {
+    display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden;
+    border: 1px solid hsl(var(--line)); border-radius: var(--radius); background: #000;
+}
+.tile.focused { border-color: hsl(var(--accent)); }
+.tile-bar {
+    display: flex; align-items: center; gap: 8px; padding: 3px 8px; font-size: 11.5px;
+    background: hsl(var(--surface)); border-bottom: 1px solid hsl(var(--line));
+}
+.tile-bar > .ic { color: hsl(var(--accent)); }
+.tile-name { font-weight: 600; }
+.tile-status { font-size: 11px; color: hsl(var(--ink-muted)); }
+.tile-bar .vnc-spacer { flex: 1; }
+.tile-bar button { height: 22px; padding: 0 8px; font-size: 11px; }
+.tile-screen { flex: 1; min-height: 0; overflow: hidden; background: #000; }
+
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; }
 }

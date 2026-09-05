@@ -8,28 +8,33 @@
 <script src="novnc.js"></script>
 </head>
 <!-- One of these per opened screen, in its own window. The host points it at
-     viewer.html?ws=<port>&vm=<index>&port=<guest port>&name=<replica>&vmName=<vm>&nested=1
-     where ws is a loopback WebSocket bridge onto the VNC tunnel. -->
+       viewer.html?ws=<port>&vm=<index>&port=<guest port>&name=<replica>&vmName=<vm>&nested=1
+     (one console) or
+       viewer.html?grid=1&vm=<index>&vmName=<vm>&tiles=<name>:<ws>:<guest port>,...
+     (every running replica of a sandbox, tiled). ws is a loopback WebSocket
+     bridge onto the VNC tunnel. -->
 <body class="vnc-page" spellcheck="false" autocorrect="off" autocapitalize="off">
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
   <symbol id="i-nest" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="13" height="13" rx="2"/><path d="M8 21h11a2 2 0 0 0 2-2V8"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
 </defs></svg>
 
 <div id="vnc-bar">
-    <svg class="ic"><use href="#i-nest"/></svg>
+    <svg class="ic"><use id="vnc-icon" href="#i-nest"/></svg>
     <span id="vnc-title">Screen</span>
     <span id="vnc-status" class="mono"></span>
     <span class="vnc-spacer"></span>
-    <button onclick="vncSendCad()" title="Send Ctrl+Alt+Del to the guest">Ctrl+Alt+Del</button>
+    <button onclick="vncSendCad()" title="Send Ctrl+Alt+Del to the guest (in the grid: to the highlighted tile)">Ctrl+Alt+Del</button>
     <button onclick="vncToggleScale()" id="vnc-scale-btn" title="Fit the screen to this window or show it 1:1">Fit</button>
     <button onclick="vncReconnect()" title="Connect again (after the replica restarted, or when the connection was lost)">Reconnect</button>
-    <button onclick="vncExternal()" title="Open the same screen in an installed VNC viewer (TigerVNC, RealVNC, ...)">External viewer</button>
+    <button onclick="vncExternal()" id="vnc-external-btn" title="Open the same screen in an installed VNC viewer (TigerVNC, RealVNC, ...)">External viewer</button>
     <button onclick="vncReplica('replicaRestart')" id="vnc-restart-btn" title="Restart the nested replica (stop + start)">Restart replica</button>
     <button class="danger" onclick="vncReplica('replicaStop')" id="vnc-stop-btn" title="Shut the nested replica down">Stop replica</button>
     <button class="primary" onclick="vncClose()">Close</button>
 </div>
 <div id="vnc-screen"></div>
+<div id="vnc-grid" hidden></div>
 
 <script src="viewer.js"></script>
 </body>

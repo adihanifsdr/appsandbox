@@ -1016,10 +1016,15 @@ static void open_viewer_window(const wchar_t *title, const wchar_t *page)
         return;
     }
 
-    /* the replica's 1600x900 console plus the bar, capped to the work area */
+    /* the replica's 1600x900 console plus the bar, capped to the work area;
+       a grid of several consoles takes the whole work area */
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
-    w = wa.right - wa.left - 40;  if (w > 1640) w = 1640;
-    h = wa.bottom - wa.top - 40;  if (h > 990)  h = 990;
+    w = wa.right - wa.left - 40;
+    h = wa.bottom - wa.top - 40;
+    if (!wcsstr(page, L"grid=1")) {
+        if (w > 1640) w = 1640;
+        if (h > 990)  h = 990;
+    }
     x = wa.left + (wa.right - wa.left - w) / 2;
     y = wa.top  + (wa.bottom - wa.top - h) / 2;
 
@@ -1333,6 +1338,54 @@ static void on_webview2_message(const wchar_t *json)
                 ui_show_alert(L"The guest has no VNC server on port 5900 yet. For the nested replica, run "
                               L"'sudo appsandbox-replica create' (and 'desktop' for XFCE + Steam) inside the guest, "
                               L"or use the + button in the nested column.");
+            }
+        }
+    } else if (wcscmp(action, L"vncGrid") == 0) {
+        /* All of a sandbox's running replicas in one window, tiled. "tiles"
+           is "name:port,name:port,..." (guest VNC ports); each gets its own
+           tunnel + WebSocket bridge and the page lays them out as a grid. */
+        int idx;
+        static wchar_t tiles[1024];
+        if (json_get_int(json, L"vmIndex", &idx) && idx >= 0 && idx < asb_vm_count() &&
+            json_get_string(json, L"tiles", tiles, ARRAYSIZE(tiles)) && tiles[0]) {
+            VmInstance *inst = asb_vm_instance(asb_vm_get(idx));
+            static wchar_t page[2048], title[256], evm[256], ename[128];
+            wchar_t *ctx = NULL, *tok;
+            int count = 0;
+            size_t o;
+            if (!inst || !inst->running) {
+                ui_log(L"Replica grid: the sandbox is not running.");
+            } else {
+                UINT64 id = inst->unique_id;
+                url_encode(inst->name, evm, ARRAYSIZE(evm));
+                swprintf_s(page, ARRAYSIZE(page), L"viewer.html?grid=1&vm=%d&vmName=%s&tiles=", idx, evm);
+                o = wcslen(page);
+                for (tok = wcstok_s(tiles, L",", &ctx); tok; tok = wcstok_s(NULL, L",", &ctx)) {
+                    wchar_t *colon = wcschr(tok, L':');
+                    int port;
+                    DWORD hp, ws;
+                    if (!colon) continue;
+                    *colon = L'\0';
+                    port = _wtoi(colon + 1);
+                    if (port <= 0 || port > 65535 || !tok[0]) continue;
+                    inst = asb_find_vm_by_id(id);
+                    if (!inst) break;
+                    hp = vm_vnc_proxy_port(inst, (unsigned)port);
+                    if (!hp) { ui_log(L"Replica grid: no tunnel to port %d for \"%s\".", port, tok); continue; }
+                    ws = vm_vnc_ws_port(hp);
+                    if (!ws) { ui_log(L"Replica grid: no WebSocket bridge for port %d.", port); continue; }
+                    url_encode(tok, ename, ARRAYSIZE(ename));
+                    if (o + wcslen(ename) + 24 >= ARRAYSIZE(page)) break;
+                    o += (size_t)swprintf_s(page + o, ARRAYSIZE(page) - o, L"%s%s:%lu:%d", count ? L"," : L"", ename, ws, port);
+                    count++;
+                }
+                inst = asb_find_vm_by_id(id);
+                if (count && inst) {
+                    swprintf_s(title, ARRAYSIZE(title), L"%s - %d replica%s - Nestbox", inst->name, count, count == 1 ? L"" : L"s");
+                    open_viewer_window(title, page);
+                } else {
+                    ui_log(L"Replica grid: no replica console reachable.");
+                }
             }
         }
     } else if (wcscmp(action, L"deleteVm") == 0) {

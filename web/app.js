@@ -1083,7 +1083,10 @@ function buildReplicaRows(grp, vm, idx) {
     if (vm.osType !== 'Linux' || !vm.running || !vm.agentOnline || vm.buildingVhdx) return;
     var reps = parseReplicas(vm.replicas);
     var dataCols = hostBridge.isMac ? 9 : 10;   /* Name .. Snapshot */
-    reps.forEach(function(r) {
+    /* every running console, for the grid window (one window, all of them tiled) */
+    var live = reps.filter(function(r) { return r.state === 'running' && r.vnc; });
+    var tiles = live.map(function(r) { return r.name + ':' + r.vnc; }).join(',');
+    reps.forEach(function(r, ri) {
         var running = r.state === 'running';
         var tr = document.createElement('tr');
         tr.className = 'replica-row ' + (running ? 'running' : 'stopped');
@@ -1110,7 +1113,12 @@ function buildReplicaRows(grp, vm, idx) {
             makeIconCell('vnc', 'desktop', running && !r.desktop,
                 function() { confirmReplica(idx, name, 'replicaDesktop', 'Install XFCE + Steam in "' + name + '"? Takes 10-20 minutes and restarts the replica.', 'Install'); },
                 r.desktop ? 'hidden' : '', 'Install XFCE + Steam (autologin) in this replica'),
-            blankIconCell(),
+            ri === 0 && live.length
+                ? makeIconCell('vnc', 'grid', true,
+                    function() { sendCmd('vncGrid', {vmIndex: idx, tiles: tiles}); }, '',
+                    live.length === 1 ? 'Open the running replica in a grid window (more tiles appear as replicas start)'
+                                      : 'Open all ' + live.length + ' running replicas side by side in one window')
+                : blankIconCell(),
             makeIconCell('shutdown', '\u23FB', running,
                 function() { sendCmd('replicaStop', {vmIndex: idx, name: name}); }, '', 'Shut this replica down'),
             makeIconCell('stop', '\u21BB', running,
@@ -1216,7 +1224,7 @@ var ICON_BY_CLASS = {
 };
 var ICON_BY_GLYPH = {
     '\u25B6\uFE0F': 'i-play', '\u23F3': 'i-clock', '\uD83D\uDDA5\uFE0F': 'i-screen', '\u2714\uFE0F': 'i-check',
-    '+': 'i-plus', 'desktop': 'i-monitor', '\u21BB': 'i-restart'
+    '+': 'i-plus', 'desktop': 'i-monitor', '\u21BB': 'i-restart', 'grid': 'i-grid'
 };
 function iconMarkup(cls, icon) {
     if (cls === 'ssh') return '<span class="mono">&gt;_</span>';
