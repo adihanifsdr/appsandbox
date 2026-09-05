@@ -288,6 +288,7 @@ EOF
     gen_xml "$uuid" "$mac" > "$NAME.xml"
     save_conf "$uuid" "$mac"
     virsh define "$NAME.xml" >/dev/null
+    virsh autostart "$NAME" >/dev/null 2>&1 || true   # comes back with the sandbox VM, so the screen button is there
     virsh start "$NAME" >/dev/null
     echo "OK: replica '$NAME' defined and started (smbios=$SMBIOS, vnc 127.0.0.1:$VNC, qemu=$(qemu_patched_installed && echo identity-patched || echo stock))"
     echo "    XML: $DIR/$NAME.xml   (edit + 'virsh define' to tweak, e.g. <smbios mode='host'/>)"
@@ -445,6 +446,7 @@ EOF
         virsh define "$DIR/$NAME.xml" >/dev/null
     fi
     echo "==> restarting the replica into the desktop"
+    virsh autostart "$NAME" >/dev/null 2>&1 || true
     virsh destroy "$NAME" >/dev/null 2>&1 || true
     virsh start "$NAME" >/dev/null
     echo "OK: replica desktop ready in ~1 min. Open it with the App Sandbox VNC button"
