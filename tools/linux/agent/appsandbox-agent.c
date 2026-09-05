@@ -586,7 +586,7 @@ static void *heartbeat_thread(void *arg)
     int vnc_last = -1;  /* last reported VNC listener state; -1 = report on first beat */
     static char replica_last[2100];   /* last reported replica list (JSON); reset per connection so a
                                          reconnecting host gets the list again */
-    replica_last[0] = ' ';
+    replica_last[0] = '\0';
     while (!g_stop) {
         /* Sleep first so the very first heartbeat is at +5s, after hello. */
         for (int s = 0; s < HEARTBEAT_INTERVAL_SEC && !g_stop; s++)
@@ -990,28 +990,46 @@ static void *ssh_proxy_proc(void *arg)
 
         /* The VNC bridge serves several consoles (one replica each, on
          * 5900, 5901, ...): the host may open the connection with a
-         * "vnc <port>\n" line naming the one it wants. RFB is server-first,
+         * "vnc <port>
+" line naming the one it wants. RFB is server-first,
          * so a client never sends anything before that; a host without the
-         * preamble just gets the default port after a short wait. */
+         * preamble just gets the default port after a short wait.
+         *
+         * Read it with plain recv(), one byte at a time - not MSG_PEEK: the
+         * Hyper-V vsock transport (hv_sock) answers MSG_PEEK with
+         * EOPNOTSUPP, which left the preface in the stream and QEMU then
+         * saw "vnc 5900
+RFB" as the client's version string and dropped
+         * the connection. Anything read that is not a preface is carried
+         * over to the console once we are connected. */
         unsigned target = fw->tcp_port;
+        uint8_t carry[32];
+        size_t  carry_len = 0;
+        int     dead = 0;
         if (fw->vsock_port == VNC_VSOCK_PORT) {
+            char pre[32];
+            size_t pn = 0;
+            int is_pre = -1;   /* -1 unknown, 0 no, 1 "vnc " seen */
             struct pollfd cp = { .fd = c, .events = POLLIN };
-            if (poll(&cp, 1, 400) > 0) {
-                char pre[32];
-                ssize_t pn = recv(c, pre, sizeof(pre) - 1, MSG_PEEK);
-                if (pn > 4 && memcmp(pre, "vnc ", 4) == 0) {
-                    char *nl;
-                    pre[pn] = '\0';
-                    nl = strchr(pre, '\n');
-                    if (nl) {
-                        unsigned want = (unsigned)atoi(pre + 4);
-                        size_t consume = (size_t)(nl - pre) + 1;
-                        if (want >= 1024 && want <= 65535) target = want;
-                        if (recv(c, pre, consume, 0) != (ssize_t)consume) { close(c); continue; }
-                    }
-                }
+            while (pn < sizeof(pre) - 1 && poll(&cp, 1, 400) > 0) {
+                ssize_t m = recv(c, pre + pn, 1, 0);
+                if (m < 0 && errno == EINTR) continue;
+                if (m <= 0) { dead = 1; break; }
+                pn += (size_t)m;
+                if (is_pre < 0 && pn >= 4) is_pre = memcmp(pre, "vnc ", 4) == 0;
+                if (is_pre == 0) break;
+                if (pre[pn - 1] == '\n') break;
+            }
+            pre[pn] = '\0';
+            if (is_pre == 1 && pn > 4 && pre[pn - 1] == '\n') {
+                unsigned want = (unsigned)atoi(pre + 4);
+                if (want >= 1024 && want <= 65535) target = want;
+            } else if (pn > 0) {
+                memcpy(carry, pre, pn);
+                carry_len = pn;
             }
         }
+        if (dead) { close(c); continue; }
 
         /* Per-connection TCP socket → localhost:<port>. Done eagerly so we
          * surface refused/timeout immediately rather than after one
@@ -1025,6 +1043,10 @@ static void *ssh_proxy_proc(void *arg)
         if (connect(t, (struct sockaddr *)&ta, sizeof(ta)) < 0) {
             agent_log("%s: connect 127.0.0.1:%u failed: %s", fw->name,
                       target, strerror(errno));
+            close(t); close(c);
+            continue;
+        }
+        if (carry_len && ssh_send_all(t, carry, carry_len) < 0) {
             close(t); close(c);
             continue;
         }
