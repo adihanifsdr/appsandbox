@@ -29,7 +29,7 @@ dan kebijakan bisa berubah; cek ulang sebelum membeli.
 
 | Server | Provider | Spek | `/dev/kvm` | Replica? |
 |---|---|---|---|---|
-| Hoodium (di atas OVHcloud) | Hoodium | 6 vCPU Haswell, 11,6 GB RAM, 96 GB disk | **Ya**, 12 flag vmx | Ya, langsung |
+| OVHcloud VPS | OVHcloud | 6 vCPU Haswell, 11,6 GB RAM, 96 GB disk | **Ya**, 12 flag vmx | Ya, langsung |
 | Niagahoster VPS | Niagahoster | 2 vCPU EPYC, 8 GB RAM, 96 GB disk | Tidak | Tidak |
 | Hetzner Cloud CPX | Hetzner | 8 vCPU, 15,6 GB RAM, 75 GB disk | Tidak | Tidak (FAQ resmi Hetzner Cloud juga menolak nested) |
 | Contabo VPS | Contabo | tidak dicek | tidak dicek | VPS biasa: tidak. Hanya VDS dan dedicated Contabo |
@@ -64,7 +64,7 @@ kalau diminta, jadi menanyakan itu sering membuahkan hasil.
 
 ## Saran
 
-- Dari daftar di atas, ExtraVM Singapura paling murah untuk mencoba dan
+- Dari daftar di atas, OVHcloud VPS sudah terbukti bisa; di antara yang lain, ExtraVM Singapura paling murah untuk mencoba dan
   nested-nya sudah default; ada 5 hari untuk mengetes.
 - Untuk replica yang dipakai serius (desktop + Steam), Contabo Cloud VDS
   Singapura lebih bertenaga dan punya 14 hari refund.
