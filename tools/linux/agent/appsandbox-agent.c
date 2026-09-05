@@ -584,7 +584,9 @@ static void *heartbeat_thread(void *arg)
     (void)arg;
     int idd_last = 0;   /* last reported display-driver readiness (so we only send on change) */
     int vnc_last = -1;  /* last reported VNC listener state; -1 = report on first beat */
-    static char replica_last[2100];   /* last reported replica list (JSON) */
+    static char replica_last[2100];   /* last reported replica list (JSON); reset per connection so a
+                                         reconnecting host gets the list again */
+    replica_last[0] = ' ';
     while (!g_stop) {
         /* Sleep first so the very first heartbeat is at +5s, after hello. */
         for (int s = 0; s < HEARTBEAT_INTERVAL_SEC && !g_stop; s++)

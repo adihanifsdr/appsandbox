@@ -360,6 +360,7 @@ static int process_async_message(VmInstance *vm, SOCKET s, const char *buf)
         /* "replicas:[{name,state,vnc,desktop},...]" - every nested replica, on change. */
         if (strcmp(vm->replicas, buf + 9) != 0) {
             strncpy_s(vm->replicas, sizeof(vm->replicas), buf + 9, _TRUNCATE);
+            ui_log(L"[%s] Nested replicas: %S", vm->name, vm->replicas);
             if (g_agent_hwnd)
                 PostMessageW(g_agent_hwnd, WM_VM_VNC_CHANGED, 0, (LPARAM)vm->unique_id);
         }
@@ -465,7 +466,7 @@ static DWORD WINAPI agent_thread_proc(LPVOID param)
        cleanly. Pointer freshness is now guaranteed for the body of
        each iteration; we never stash a stale &g_vms[idx]. */
     while (!conn->stop && (vm = asb_find_vm_by_id(conn->vm_id)) != NULL) {
-        char buf[256];
+        char buf[2400];   /* "replicas:<json>" can run long */
         int n;
         SOCKET s;
 
