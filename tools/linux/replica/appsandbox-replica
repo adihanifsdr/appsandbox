@@ -3,6 +3,7 @@
 # that looks, from the inside, like a KVM / OpenStack Nova VPS:
 #
 #   i440FX + PIIX3 chipset, SeaBIOS, Cirrus VGA, virtio disk/net/balloon,
+#   USB tablet (absolute pointer, so the VNC cursor tracks the host's),
 #   SMBIOS strings from the VM identity profile (or the "host"'s, see
 #   --smbios), CPUID hypervisor leaf "KVMKVMKVM", hypervisor CPU flag,
 #   systemd-detect-virt = kvm, clocksource kvm-clock.
@@ -197,6 +198,7 @@ print("""<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1
     <console type='pty'><target type='serial' port='0'/></console>
     <graphics type='vnc' port='%s' autoport='no' listen='127.0.0.1'/>
     <video>%s</video>
+    <input type='tablet' bus='usb'/>
     <memballoon model='virtio'/>
     <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>
   </devices>
