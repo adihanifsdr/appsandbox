@@ -475,7 +475,10 @@ function openVncViewer(msg) {
     var screen = document.getElementById('vnc-screen');
     closeVncViewer();
     vncVmIndex = msg.vmIndex;
-    document.getElementById('vnc-title').textContent = 'Screen \u2014 ' + (msg.vmName || '') + ' (guest VNC :5900)';
+    var nested = vms[msg.vmIndex] && vms[msg.vmIndex].replica === 'running';
+    document.getElementById('vnc-title').textContent = (nested ? '\uD83E\uDE86 Nested replica \u2014 ' : 'Screen \u2014 ') + (msg.vmName || '') + (nested ? '' : ' (guest VNC :5900)');
+    document.getElementById('vnc-stop-btn').style.display = nested ? '' : 'none';
+    document.getElementById('vnc-restart-btn').style.display = nested ? '' : 'none';
     document.getElementById('vnc-status').textContent = 'connecting\u2026';
     overlay.classList.add('active');
     window.NoVNC.then(function(RFB) {
@@ -513,6 +516,12 @@ function vncToggleScale() {
     document.getElementById('vnc-scale-btn').textContent = vncScaled ? 'Fit' : '1:1';
 }
 function vncExternal() { if (vncVmIndex >= 0) sendCmd('vncConnect', { vmIndex: vncVmIndex }); }
+function vncReplica(action) {
+    if (vncVmIndex < 0) return;
+    var idx = vncVmIndex;
+    sendCmd(action, { vmIndex: idx });
+    closeVncViewer();
+}
 document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape' && document.getElementById('vnc-overlay').classList.contains('active') && !vncRfb) closeVncViewer();
 });
@@ -896,13 +905,28 @@ function buildRowCells(vm, i, statusTd) {
         else sshBtn.title = 'SSH: waiting for the in-VM agent to come online';
     }
 
-    /* VNC: shown only while the guest agent reports a VNC server on guest
-       port 5900 (x11vnc, a docker container publishing 127.0.0.1:5900, ...). */
-    var vncActive = !!vm.vncPort && vm.running && !bld;
-    var vncCell = makeIconCell('vnc', '\uD83D\uDDA5\uFE0F', vncActive,
-        (function(idx) { return function() { sendCmd('vncOpen', {vmIndex: idx}); }; })(i),
-        vm.vncPort ? '' : 'hidden',
-        vm.vncPort ? 'Open the guest\'s screen in App Sandbox (its VNC server on port ' + vm.vncPort + ' - the nested replica once created; tunneled over HvSocket)' : '');
+    /* Nested replica column. The agent reports the replica's state (none /
+       stopped / running) and whether a VNC server listens on guest port 5900
+       (the replica's console). stopped -> a start button; running -> the
+       in-app screen once the console is up; a foreign VNC server (x11vnc,
+       docker) shows as a plain screen too. */
+    var rep = vm.replica || '';
+    var vncCell;
+    if (rep === 'stopped' && vm.running && !bld) {
+        vncCell = makeIconCell('vnc', '\u25B6\uFE0F', vm.agentOnline,
+            (function(idx) { return function() { sendCmd('replicaStart', {vmIndex: idx}); }; })(i), '',
+            'Start the nested replica (sudo appsandbox-replica start); its screen opens here once it is up');
+    } else if (rep === 'running' && !vm.vncPort && vm.running && !bld) {
+        vncCell = makeIconCell('vnc', '\u23F3', false, null, '', 'Nested replica is starting - waiting for its console');
+    } else {
+        var vncActive = !!vm.vncPort && vm.running && !bld;
+        vncCell = makeIconCell('vnc', '\uD83D\uDDA5\uFE0F', vncActive,
+            (function(idx) { return function() { sendCmd('vncOpen', {vmIndex: idx}); }; })(i),
+            vm.vncPort ? '' : 'hidden',
+            vm.vncPort ? (rep === 'running'
+                ? 'Open the nested replica\'s screen in App Sandbox (VNC console on guest port ' + vm.vncPort + ', tunneled over HvSocket)'
+                : 'Open the guest\'s VNC server (port ' + vm.vncPort + ') in App Sandbox') : '');
+    }
 
     /* VM identity editor (Linux): what the guest reports about its machine. */
     var isLinux = vm.osType === 'Linux';

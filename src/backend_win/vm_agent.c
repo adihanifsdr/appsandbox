@@ -347,6 +347,17 @@ static int process_async_message(VmInstance *vm, SOCKET s, const char *buf)
             if (g_agent_hwnd)
                 PostMessageW(g_agent_hwnd, WM_VM_VNC_CHANGED, 0, (LPARAM)vm->unique_id);
         }
+    } else if (strncmp(buf, "replica:", 8) == 0) {
+        /* "replica:none|stopped|running" - the nested appsandbox-replica, on
+           change; drives the nested column in the GUI. */
+        if (strcmp(vm->replica_state, buf + 8) != 0) {
+            strncpy_s(vm->replica_state, sizeof(vm->replica_state), buf + 8, _TRUNCATE);
+            ui_log(L"[%s] Nested replica: %S.", vm->name, buf + 8);
+            if (g_agent_hwnd)
+                PostMessageW(g_agent_hwnd, WM_VM_VNC_CHANGED, 0, (LPARAM)vm->unique_id);
+        }
+    } else if (strncmp(buf, "replica_result:", 15) == 0) {
+        ui_log(L"[%s] Nested replica: %S.", vm->name, buf + 15);
     } else if (strncmp(buf, "displays:", 9) == 0) {
         ui_log(L"[%s] Displays: %S", vm->name, buf + 9);
     } else if (strncmp(buf, "log:", 4) == 0) {
@@ -657,6 +668,7 @@ static DWORD WINAPI agent_thread_proc(LPVOID param)
         }
         ui_log(L"Agent offline for \"%s\".", vm->name);
         vm->vnc_guest_port = 0;
+        vm->replica_state[0] = '\0';
         notify_agent_status(vm);
 
         /* Wake up any blocked command sender */

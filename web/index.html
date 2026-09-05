@@ -34,7 +34,7 @@
                 <th class="icon-col">&#x25B6;&#xFE0F;</th>
                 <th class="icon-col" title="IDD Display">&#x1F4FA;</th>
                 <th class="icon-col" title="SSH">&gt;_</th>
-                <th class="icon-col" title="VNC">&#x1F5A5;&#xFE0F;</th>
+                <th class="icon-col" title="Nested replica (appsandbox-replica inside the guest): start it, then open its screen here">&#x1FA86;</th>
                 <th class="icon-col" title="VM identity">&#x1FAAA;</th>
                 <th class="icon-col">&#x23FB;</th>
                 <th class="icon-col">&#x2715;&#xFE0F;</th>
@@ -204,6 +204,8 @@
         <button onclick="vncSendCad()" title="Send Ctrl+Alt+Del to the guest">Ctrl+Alt+Del</button>
         <button onclick="vncToggleScale()" id="vnc-scale-btn" title="Fit the screen to this window or show it 1:1">Fit</button>
         <button onclick="vncExternal()" title="Open the same screen in an installed VNC viewer (TigerVNC, RealVNC, ...)">External viewer</button>
+        <button onclick="vncReplica('replicaRestart')" id="vnc-restart-btn" title="Restart the nested replica (stop + start)">Restart replica</button>
+        <button class="danger" onclick="vncReplica('replicaStop')" id="vnc-stop-btn" title="Shut the nested replica down">Stop replica</button>
         <button class="primary" onclick="closeVncViewer()">Close</button>
     </div>
     <div id="vnc-screen"></div>

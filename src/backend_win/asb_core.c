@@ -878,6 +878,7 @@ static void asb_hcs_state_changed(VmInstance *instance, DWORD event)
                The guest-side write is idempotent. */
             instance->ssh_key_deployed = FALSE;
             instance->vnc_guest_port = 0;
+            instance->replica_state[0] = '\0';
             hcs_stop_monitor(instance);
             vm_ssh_proxy_stop(instance);
             vm_vnc_proxy_stop(instance);

@@ -225,6 +225,11 @@ static void build_vm_json(JsonBuilder *jb, int i)
     jb_bool(jb, L"sshDeployKey", v->ssh_deploy_key);
     jb_bool(jb, L"sshKeyDeployed", v->ssh_key_deployed);
     jb_int(jb, L"vncPort", (int)v->vnc_guest_port);     /* guest listener, 0 = none */
+    {   /* nested replica state from the agent: "" (unknown) / none / stopped / running */
+        wchar_t rs[16];
+        MultiByteToWideChar(CP_UTF8, 0, v->replica_state, -1, rs, 16);
+        jb_string(jb, L"replica", rs);
+    }
     jb_bool(jb, L"hasIdentity", v->identity[0] != L'\0');
     jb_int(jb, L"vncTunnelPort", (int)v->vnc_port);     /* host tunnel, 0 = not started */
 
@@ -1130,6 +1135,24 @@ static void on_webview2_message(const wchar_t *json)
                        inst->name, ident[0] ? L"updated" : L"cleared");
             }
             send_vm_list();
+        }
+    } else if (wcscmp(action, L"replicaStart") == 0 || wcscmp(action, L"replicaStop") == 0 ||
+               wcscmp(action, L"replicaRestart") == 0) {
+        /* Nested replica control: the agent runs appsandbox-replica and
+           reports replica_result / the new state (fire-and-forget). */
+        int idx;
+        if (json_get_int(json, L"vmIndex", &idx) && idx >= 0 && idx < asb_vm_count()) {
+            VmInstance *inst = asb_vm_instance(asb_vm_get(idx));
+            const char *sub = wcscmp(action, L"replicaStart") == 0 ? "start"
+                            : wcscmp(action, L"replicaStop") == 0 ? "stop" : "restart";
+            if (inst && inst->running && inst->agent_online) {
+                char line[32];
+                sprintf_s(line, sizeof(line), "replica %s", sub);
+                vm_agent_send(inst, line, NULL, 0, 0);
+                ui_log(L"Nested replica of \"%s\": %S requested.", inst->name, sub);
+            } else {
+                ui_log(L"Nested replica: the guest agent of \"%s\" is not online.", inst ? inst->name : L"?");
+            }
         }
     } else if (wcscmp(action, L"vncConnect") == 0 || wcscmp(action, L"vncOpen") == 0) {
         /* vncOpen: the in-app viewer (noVNC over a loopback WebSocket bridge

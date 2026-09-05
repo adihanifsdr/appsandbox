@@ -452,11 +452,59 @@ static int tcp_port_listening(unsigned port);
 
 /* ---- Heartbeat thread ---- */
 
+/* ---- Nested replica (appsandbox-replica) ----
+ *
+ * "none" (never created), "stopped" (defined, not running) or "running"
+ * (its qemu is up). pgrep's pattern uses a character class so the sh -c
+ * wrapper running pgrep does not match itself. Reported to the host as
+ * "replica:<state>" on change (heartbeat) and right after start / stop. */
+static const char *replica_state(void)
+{
+    if (access("/var/lib/appsandbox/replica/replica.conf", F_OK) != 0)
+        return "none";
+    return run_sync("pgrep -f 'guest=replic[a],' >/dev/null 2>&1") == 0 ? "running" : "stopped";
+}
+
+static void send_replica_state(int fd)
+{
+    char msg[48];
+    snprintf(msg, sizeof(msg), "replica:%s", replica_state());
+    send_line(fd, msg);
+}
+
+/* "replica start|stop|restart": run the tool, answer replica_result:<sub>:ok|failed,
+ * then the fresh state so the GUI updates without waiting for a heartbeat. */
+static void handle_replica(int fd, const char *sub)
+{
+    char cmd[160], msg[96];
+    int rc;
+    if (strcmp(sub, "start") != 0 && strcmp(sub, "stop") != 0 && strcmp(sub, "restart") != 0) {
+        send_line(fd, "replica_result:unknown:failed");
+        return;
+    }
+    if (access("/usr/local/sbin/appsandbox-replica", X_OK) != 0) {
+        send_line(fd, "replica_result:tool:failed");
+        return;
+    }
+    if (strcmp(sub, "restart") == 0)
+        snprintf(cmd, sizeof(cmd), "/usr/local/sbin/appsandbox-replica stop >/dev/null 2>&1; sleep 8; "
+                                   "/usr/local/sbin/appsandbox-replica start >/dev/null 2>&1");
+    else
+        snprintf(cmd, sizeof(cmd), "/usr/local/sbin/appsandbox-replica %s >/dev/null 2>&1", sub);
+    rc = run_sync(cmd);
+    agent_log("replica %s: rc=%d", sub, rc);
+    snprintf(msg, sizeof(msg), "replica_result:%s:%s", sub, rc == 0 ? "ok" : "failed");
+    send_line(fd, msg);
+    if (strcmp(sub, "stop") == 0) sleep(2);   /* virsh shutdown is asynchronous; give qemu a moment */
+    send_replica_state(fd);
+}
+
 static void *heartbeat_thread(void *arg)
 {
     (void)arg;
     int idd_last = 0;   /* last reported display-driver readiness (so we only send on change) */
     int vnc_last = -1;  /* last reported VNC listener state; -1 = report on first beat */
+    char replica_last[16] = "";   /* last reported nested-replica state */
     while (!g_stop) {
         /* Sleep first so the very first heartbeat is at +5s, after hello. */
         for (int s = 0; s < HEARTBEAT_INTERVAL_SEC && !g_stop; s++)
@@ -491,6 +539,14 @@ static void *heartbeat_thread(void *arg)
                 snprintf(msg, sizeof(msg), vnc ? "vnc:%u" : "vnc:none", VNC_TCP_PORT);
                 send_line(fd, msg);
                 vnc_last = vnc;
+            }
+        }
+        /* Nested replica state, same on-change rule. */
+        {
+            const char *st = replica_state();
+            if (strcmp(st, replica_last) != 0) {
+                send_replica_state(fd);
+                snprintf(replica_last, sizeof(replica_last), "%s", st);
             }
         }
     }
@@ -1275,6 +1331,9 @@ static void handle_client(int fd)
         }
         else if (strncmp(cmd, "identity ", 9) == 0) {
             handle_identity(fd, cmd + 9);
+        }
+        else if (strncmp(cmd, "replica ", 8) == 0) {
+            handle_replica(fd, cmd + 8);
         }
         else if (strncmp(cmd, "ssh_deploy_key ", 15) == 0) {
             send_reply(fd, tag, deploy_ssh_key(cmd + 15) ? "ssh_key_deployed" : "ssh_key_failed");
