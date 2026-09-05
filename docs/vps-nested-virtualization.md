@@ -83,33 +83,48 @@ disk**, jadi dua angka itulah yang menentukan berapa replica yang muat:
   (15 GB adalah pemakaian realistis satu replica dengan XFCE + Steam,
   di bawah batas 20 GB)
 
-| Plan | Harga/bulan | vCPU | RAM | Disk | Kuota traffic | Replica muat | Biaya per replica |
-|---|---|---|---|---|---|---|---|
-| OVHcloud VPS-1 | $4,54 | 2 | 4 GB | 40 GB NVMe | 500 GB | 1, tapi RAM replica harus diturunkan ke ~2,5 GB | $4,54 |
-| OVHcloud VPS-2 | $8,50 | 4 | 8 GB | 75 GB NVMe | 1 TB | 1 penuh (2 kalau masing-masing 3 GB) | $8,50 |
-| **OVHcloud VPS-3** | **$12,32** | 6 | 12 GB | 100 GB NVMe | 1 TB | **2** | **$6,16** |
-| OVHcloud VPS-4 | $23,37 | 8 | 24 GB | 200 GB NVMe | 3 TB | 5 | $4,67 |
-| GreenCloud SSDKVM-3 | $20 | 2 | 4 GB | 30 GB | 750 GB-6 TB (APAC) | 1 | $20 |
-| GreenCloud SSDKVM-5 | $80 | 8 | 16 GB | 120 GB | idem | 3 | $26,7 |
-| GreenCloud promo tahunan | ~$2,08 ($25/tahun) | 2 | 4 GB | 35 GB NVMe | 750 GB | 1 | $2,08 |
-| ExtraVM 8 GB | $32 | 4 | 8 GB | 120 GB NVMe | 8 TB | 1-2 | $16-32 |
-| ExtraVM 16 GB | $56 | 6 | 16 GB | 240 GB NVMe | 10 TB | 3 | $18,7 |
-| SSD Nodes KVM/2X-LARGE | ~$11,08 ($133/tahun) | 8 Intel Silver | 32 GB | 480 GB SSD | besar | 7 | $1,58 |
-| DigitalOcean 4 GB | $24 | 2 | 4 GB | 80 GB | 4 TB | 1 | $24 |
-| DigitalOcean 8 GB | $48 | 4 | 8 GB | 160 GB | 5 TB | 1-2 | $24-48 |
-| Contabo Cloud VDS S | €42,99 (€34,40 kontrak 12 bulan) | 3 core **fisik** EPYC | 24 GB | 180 GB NVMe | besar | 5 | sekitar €7-9 |
-| GCE Jakarta n2-standard-2 | $76,28 + disk | 2 | 8 GB | dibeli terpisah (~$0,13/GB) | keluar Google dibayar per GB | 1-2 | $40-83 |
-| AWS Jakarta m7i.large | sekitar $0,10-0,12/jam (≈$75-90 kalau 24/7) + EBS | 2 | 8 GB | EBS terpisah | egress dibayar per GB | 1-2 | $40-90 |
-| OCI Singapura VM.Standard3.Flex 1 OCPU / 8 GB | sekitar $38 + block volume | 2 thread | 8 GB | terpisah | 10 TB gratis/bulan | 1 | ~$38 |
+Kolom terakhir, **tenaga per replica**, adalah `(core ÷ jumlah replica) ×
+(skor Geekbench 6 satu core ÷ 1000)`. Angka itu yang paling dekat dengan
+"seberapa enak satu replica dipakai": desktop XFCE dan Steam menggambar
+lewat CPU, dan yang menentukan bukan jumlah core host, melainkan berapa
+core cepat yang tersisa untuk tiap replica. Nested sendiri sudah memotong
+sekitar 10% menurut Google, dan replica di dalam VPS berarti dua lapis
+virtualisasi.
 
-Tiga hal yang tidak kelihatan di tabel tapi menentukan rasa pakainya:
+| Plan | $/bulan | CPU (tahun) | GB6 1-core | Core | RAM / disk | Replica | $/replica | Tenaga per replica |
+|---|---|---|---|---|---|---|---|---|
+| OVHcloud VPS-1 | 4,54 | Haswell (2013) | ~848 | 2 | 4 GB / 40 GB | 1 (RAM diturunkan ~2,5 GB) | 4,54 | 1,7 |
+| OVHcloud VPS-2 | 8,50 | Haswell (2013) | ~848 | 4 | 8 GB / 75 GB | 1 | 8,50 | 3,4 |
+| OVHcloud VPS-3 | 12,32 | Haswell (2013) | ~848 | 6 | 12 GB / 100 GB | 2 | 6,16 | 2,5 |
+| OVHcloud VPS-4 | 23,37 | Haswell (2013) | ~848 | 8 | 24 GB / 200 GB | 5 | **4,67** | 1,4 |
+| GreenCloud SSDKVM-3 | 20 | EPYC Rome/Milan (2019-21) | ~1300 | 2 | 4 GB / 30 GB | 1 | 20 | 2,6 |
+| GreenCloud SSDKVM-5 | 80 | EPYC Rome/Milan (2019-21) | ~1300 | 8 | 16 GB / 120 GB | 3 | 26,7 | 3,5 |
+| GreenCloud promo tahunan | ~2,08 ($25/tahun) | EPYC Rome/Milan | ~1300 | 2 | 4 GB / 35 GB | 1 | **2,08** | 2,6 |
+| **ExtraVM 8 GB** | 32 | **Ryzen 9 / EPYC 4004-4005 (2024-25)** | **~2500** | 4 | 8 GB / 120 GB | 1-2 | 16-32 | **10,0** (1 replica) |
+| **ExtraVM 16 GB** | 56 | **Ryzen 9 / EPYC 4004-4005 (2024-25)** | **~2500** | 6 | 16 GB / 240 GB | **3** | 18,7 | **5,0** |
+| SSD Nodes KVM/2X-LARGE | ~11,08 ($133/tahun) | Xeon Silver Skylake/Cascade (2017-19) | ~850 | 8 | 32 GB / 480 GB | **7** | **1,58** | 1,0 |
+| DigitalOcean 8 GB | 48 | Intel/AMD campuran (2019-22) | ~1000-1300 | 4 | 8 GB / 160 GB | 1-2 | 24-48 | ~3,5 |
+| Contabo Cloud VDS S | €42,99 (€34,40 kontrak setahun) | EPYC 7282 Rome (2019), core **fisik** | 1133 (terukur) | 3 fisik | 24 GB / 180 GB | **5** | ~€8 | 0,7-1,1 (tapi core-nya tidak dibagi tetangga) |
+| GCE Jakarta n4-standard-2 | 89,03 + disk | **Emerald Rapids (2024)** | ~2000 | 2 | 8 GB / disk terpisah | 1-2 | 45-89 | 4,0 |
+| GCE Jakarta n2-standard-2 | 76,28 + disk | Cascade/Ice Lake (2019-21) | ~900-1300 | 2 | 8 GB / disk terpisah | 1-2 | 40-76 | ~2,2 |
+| AWS Jakarta m7i.large | ~75-90 + EBS | Sapphire Rapids (2023) | ~1050-1500 | 2 | 8 GB / EBS terpisah | 1-2 | 40-90 | ~2,5 |
+| OCI Singapura VM.Standard3.Flex 1 OCPU | ~38 + volume | Ice Lake (2021) | ~1100 | 2 thread | 8 GB / terpisah | 1 | 38 | 2,2 |
 
-- **Umur CPU.** VPS OVHcloud yang dicek memakai Haswell (2013-an).
-  Murah dan terbukti jalan, tetapi kecepatan satu core-nya jauh di bawah
-  EPYC 4004/Ryzen 9 di ExtraVM atau EPYC di GreenCloud dan Contabo.
-  Desktop XFCE dan Steam di dalam replica menggambar lewat CPU, jadi
-  bedanya terasa. Nested sendiri sudah memotong sekitar 10% menurut
-  Google, dan replica di dalam VPS berarti dua lapis virtualisasi.
+Angka Geekbench 6 satu core diambil dari uji nyata: OVHcloud VPS-1 2027
+terukur 848 dengan CPU yang dilaporkan sebagai "Intel Core Processor
+(Haswell, no TSX)" — jadi lini VPS 2027 yang baru pun masih memakai
+arsitektur 2013, sama seperti server yang sudah dicek. Contabo Cloud VDS M
+terukur 1133 dengan EPYC 7282. Sisanya memakai rentang model CPU yang
+sama di tabel Geekbench 6 VPSBenchmarks.
+
+Indeks tenaga per replica mengandaikan semua replica sibuk bersamaan.
+Kalau replica dipakai bergantian, plan dengan RAM besar dan core sedikit
+(Contabo VDS S, SSD Nodes) jauh lebih baik daripada yang terlihat, dan
+core fisik Contabo tidak pernah direbut tetangga — beda dengan vCore
+shared di semua plan lain.
+
+Dua hal lain yang tidak kelihatan di tabel:
+
 - **Kuota traffic.** Layar replica lewat browser memakan sekitar 2-5
   Mbps. Dipakai 8 jam sehari selama sebulan itu 216 GB (2 Mbps) sampai
   540 GB (5 Mbps). Jadi OVH VPS-1 dengan kuota 500 GB bisa mepet lalu
@@ -123,28 +138,43 @@ Tiga hal yang tidak kelihatan di tabel tapi menentukan rasa pakainya:
 
 ### Worth it-nya
 
-- **Paling masuk akal untuk dipakai sehari-hari: OVHcloud VPS-3, $12,32.**
-  Speknya (6 vCPU, 12 GB, 100 GB) praktis sama dengan server yang sudah
-  dicek dan terbukti menjalankan replica, muat 2 replica, kuota 1 TB, dan
-  bisa dibatalkan 14 hari. $6,16 per replica adalah harga terbaik yang
-  tidak menuntut bayar di muka bertahun-tahun.
-- **Paling murah kalau berani prabayar: SSD Nodes**, $1,58 per replica
-  per bulan untuk 7 replica sekaligus. CPU Intel Silver-nya lambat per
-  core dan uangnya terkunci 1-3 tahun, jadi ini pilihan kalau yang
-  dikejar jumlah replica, bukan kelincahan tiap replica.
-- **Paling murah untuk satu replica coba-coba: GreenCloud promo tahunan**
-  (~$2/bulan, sudah terbukti nested-nya di review dari Indonesia, 13,68 ms
-  dari Jakarta) — asal stoknya ada dan sadar plan promo tidak bisa refund.
-  Tanpa promo, GreenCloud $20 untuk 1 replica kalah telak dari OVH.
-- **Paling enak dipakai (desktop + Steam): Contabo Cloud VDS S.** Core-nya
-  fisik, bukan shared, jadi replica tidak ikut melambat saat tetangga
-  sibuk; 24 GB RAM cukup untuk 5 replica di sekitar €7-9 per replica.
-  Ini yang dipilih kalau replica dipakai serius, bukan sekadar dicoba.
-- **Cloud besar hanya untuk dua alasan:** butuh server benar-benar di
-  Jakarta, atau butuh hitungan per jam. GCE Jakarta n2-standard-2 dengan
-  spek setara OVH VPS-2 harganya sekitar sembilan kali lipat kalau
-  dinyalakan sebulan penuh. Untuk mengetes Nestbox setengah hari, itu
-  sekitar $1,3 dan tidak ada komitmen — di situ dia menang.
+Tiga pertanyaan itu jarang punya satu jawaban yang menang di semuanya.
+Yang murah per replica CPU-nya tua, yang CPU-nya baru mahal per replica.
+Jadi pilihannya tergantung mana yang lebih penting:
+
+- **Kalau tiap replica harus terasa cepat: ExtraVM.** CPU-nya paling
+  baru di seluruh daftar VPS murah (Ryzen 9 / EPYC 4004-4005, 2024-2025,
+  sekitar 3x kecepatan satu core Haswell OVHcloud). Plan 8 GB $32 untuk
+  satu replica memberi tenaga per replica 10,0 — tertinggi di tabel, dan
+  4x lipat OVHcloud VPS-3. Plan 16 GB $56 memberi 3 replica dengan tenaga
+  5,0 masing-masing, masih 2x OVHcloud, dengan harga $18,7 per replica.
+  Nested aktif default dan ada 5 hari untuk menguji.
+- **Kalau yang dikejar jumlah replica per dolar: OVHcloud VPS-4, $23,37.**
+  5 replica di $4,67 masing-masing, kuota 3 TB, sudah terbukti nested-nya
+  di server yang dicek, dan bisa dibatalkan 14 hari. Harganya dibayar
+  dengan CPU 2013: tenaga per replica cuma 1,4, jadi replica terasa
+  lamban kalau lima-limanya dipakai bersamaan.
+- **Titik tengah paling aman: OVHcloud VPS-3, $12,32** — 2 replica,
+  $6,16 masing-masing, tenaga 2,5. Speknya sama persis dengan server yang
+  sudah Anda pakai, jadi hasilnya sudah bisa dibayangkan tanpa menebak.
+- **Contabo Cloud VDS S** menang di satu hal yang tidak muncul di angka:
+  3 core-nya **fisik**, tidak dibagi tetangga, jadi kecepatannya konstan.
+  RAM 24 GB dan disk 180 GB cukup untuk 5 replica di sekitar €8 masing-
+  masing. Tapi CPU-nya EPYC Rome 2019 dan cuma 3 core untuk 5 replica,
+  jadi ini pilihan kalau replica dipakai bergantian, bukan serentak.
+- **SSD Nodes murah karena core-nya banyak dan lambat.** 7 replica di
+  $1,58 terlihat mustahil dikalahkan, tapi Xeon Silver 2017-2019 membuat
+  tenaga per replica cuma 1,0, yang terendah di tabel, dan uangnya
+  terkunci 1-3 tahun di muka. Bagus untuk replica yang kebanyakan diam.
+- **GreenCloud hanya menarik lewat promo tahunannya** (~$2/bulan, nested
+  terbukti di review dari Indonesia, 13,68 ms dari Jakarta). Harga
+  bulanan normalnya, $20 untuk satu replica, kalah telak dari OVHcloud
+  dan ExtraVM di semua sumbu.
+- **CPU paling baru yang ada di Jakarta: GCE n4-standard-2** (Emerald
+  Rapids 2024, sekitar 2000 GB6 satu core, $89 + disk). Satu-satunya cara
+  mendapat CPU 2024 dengan latensi Jakarta, tapi hanya 1-2 replica dan
+  harganya 7x OVHcloud VPS-3. Masuk akal kalau dinyalakan per jam saat
+  dipakai saja, bukan 24/7.
 - **Hindari untuk Nestbox:** semua plan dengan disk 15 GB (GreenCloud $6
   dan $10, ExtraVM $4,50). Base image 3,5 GB ditambah satu replica sudah
   melewatinya, jadi murahnya percuma.
@@ -186,9 +216,10 @@ lokal untuk layar replica lewat browser.
 
 - Ringkasan harga per replica dan pilihan terbaik ada di
   [Perbandingan spek](#perbandingan-spek-berapa-replica-yang-muat-dan-berapa-harganya)
-  di atas: OVHcloud VPS-3 untuk pemakaian harian, Contabo VDS S kalau
-  replica dipakai serius, cloud besar kalau butuh Jakarta atau tagihan
-  per jam.
+  di atas: ExtraVM kalau tiap replica harus cepat (CPU 2024-25),
+  OVHcloud VPS-4 kalau yang dikejar jumlah replica per dolar, OVHcloud
+  VPS-3 sebagai titik tengah, cloud besar kalau butuh Jakarta atau
+  tagihan per jam.
 - Latensi dari Indonesia ke Singapura sekitar 13-30 ms, cukup untuk
   layar replica lewat browser.
 - Sisakan disk: satu replica memakai 20 GB (thin, tumbuh sesuai isi)
@@ -207,6 +238,10 @@ lokal untuk layar replica lewat browser.
   [DigitalOcean droplets](https://www.digitalocean.com/pricing/droplets),
   [Contabo Cloud VDS](https://onedollarvps.com/pricing/contabo-pricing),
   [m7i.large](https://instances.vantage.sh/aws/ec2/m7i.large)
+- Angka CPU: [YABS OVHcloud VPS-1 2027 (Haswell, GB6 848)](https://www.vpsbenchmarks.com/yabs/ovhcloud-2c-4gb-20260831-fc8e52),
+  [YABS Contabo Cloud VDS M (EPYC 7282, GB6 1133)](https://www.vpsbenchmarks.com/yabs/contabo-8c-31gb-20260611-tg10226),
+  [daftar CPU menurut Geekbench 6 satu core](https://www.vpsbenchmarks.com/labs/cpus_by_geekbench6_perf),
+  [OVH memindah lini VPS 2027 ke Intel lama](https://lowendtalk.com/discussion/218138/ovh-launches-2027-vps-line)
 - ExtraVM: [Singapore VPS](https://www.extravm.com/singapore-vps),
   [nested virtualization](https://extravm.com/billing/knowledgebase/101/Is-nested-virtualization-enabled.html),
   [Terms of Service](https://extravm.com/tos.pdf)
