@@ -10,6 +10,7 @@
 #include "resource.h"
 #include "hcs_vm.h"
 #include "vm_ssh_proxy.h"
+#include "vm_vnc_ws.h"
 #include "hcn_network.h"
 #include "snapshot.h"
 #include "vm_display.h"
@@ -1130,8 +1131,11 @@ static void on_webview2_message(const wchar_t *json)
             }
             send_vm_list();
         }
-    } else if (wcscmp(action, L"vncConnect") == 0) {
+    } else if (wcscmp(action, L"vncConnect") == 0 || wcscmp(action, L"vncOpen") == 0) {
+        /* vncOpen: the in-app viewer (noVNC over a loopback WebSocket bridge
+           to the VNC tunnel); vncConnect: an external VNC viewer. */
         int idx;
+        BOOL in_app = (wcscmp(action, L"vncOpen") == 0);
         if (json_get_int(json, L"vmIndex", &idx) && idx >= 0 && idx < asb_vm_count()) {
             VmInstance *inst = asb_vm_instance(asb_vm_get(idx));
             if (inst && inst->running && inst->vnc_guest_port) {
@@ -1144,12 +1148,32 @@ static void on_webview2_message(const wchar_t *json)
                     if (!inst || inst->vnc_port) break;
                     Sleep(50);
                 }
-                if (inst && inst->vnc_port)
+                if (inst && inst->vnc_port && in_app) {
+                    DWORD ws = vm_vnc_ws_port(inst->vnc_port);
+                    if (ws) {
+                        static wchar_t out[1024];
+                        JsonBuilder jb;
+                        jb_init(&jb, out, 1024);
+                        jb_object_begin(&jb);
+                        jb_string(&jb, L"type", L"vncReady");
+                        jb_int(&jb, L"vmIndex", idx);
+                        jb_int(&jb, L"wsPort", (int)ws);
+                        jb_int(&jb, L"vncPort", (int)inst->vnc_port);
+                        jb_string(&jb, L"vmName", inst->name);
+                        jb_object_end(&jb);
+                        webview2_post(out);
+                    } else {
+                        ui_log(L"VNC: the WebSocket bridge could not start; opening an external viewer instead.");
+                        launch_vnc_viewer(inst->vnc_port);
+                    }
+                } else if (inst && inst->vnc_port) {
                     launch_vnc_viewer(inst->vnc_port);
-                else
+                } else {
                     ui_log(L"VNC: the tunnel did not come up.");
+                }
             } else {
-                ui_log(L"VNC: the guest agent has not reported a VNC server (port 5900) yet.");
+                ui_show_alert(L"The guest has no VNC server on port 5900 yet. For the nested replica, run "
+                              L"'sudo appsandbox-replica create' (and 'desktop' for XFCE + Steam) inside the guest.");
             }
         }
     } else if (wcscmp(action, L"deleteVm") == 0) {

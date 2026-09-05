@@ -97,6 +97,18 @@ governs that file.
   [kila58/qemu-patched](https://github.com/kila58/qemu-patched) (QEMU 8.1.3 with the
   same strings hardcoded), reworked as runtime `QEMU_IDENTITY_*` overrides.
 
+## web/novnc.js — noVNC (in-app VNC viewer)
+
+- **License:** Mozilla Public License 2.0 (`SPDX: MPL-2.0`) for the noVNC core
+  library; bundled third-party parts under their own permissive licenses as
+  listed in [`web/NOVNC-LICENSE.txt`](web/NOVNC-LICENSE.txt) (shipped next to it).
+- **Copyright:** The noVNC authors (https://github.com/novnc/noVNC), v1.7.0.
+- `web/novnc.js` is `core/rfb.js` of the unmodified 1.7.0 release bundled into one
+  file with esbuild and wrapped so that `window.NoVNC` resolves to the RFB class;
+  the source is the upstream release tarball. It renders the guest's VNC server
+  inside the App Sandbox window, over a loopback WebSocket bridge in
+  `src/backend_win/vm_vnc_ws.c`.
+
 ## vendor/virtio-win/ — NetKVM (Red Hat VirtIO Ethernet Adapter)
 
 - **License:** BSD 3-Clause (`SPDX: BSD-3-Clause`). License text:

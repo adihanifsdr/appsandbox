@@ -180,6 +180,7 @@
     <ClCompile Include="src\backend_win\vm_agent.c" />
     <ClCompile Include="src\backend_win\prereq.c" />
     <ClCompile Include="src\backend_win\vm_ssh_proxy.c" />
+    <ClCompile Include="src\backend_win\vm_vnc_ws.c" />
     <ClCompile Include="src\backend_win\vm_clipboard.c" />
   </ItemGroup>
   <ItemGroup>

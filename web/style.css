@@ -527,6 +527,15 @@ td.editing select {
     text-align: center;
 }
 
+/* In-app VNC viewer: full-window overlay above the modals */
+#vnc-overlay { display: none; position: fixed; inset: 0; z-index: 2000; background: #111; flex-direction: column; }
+#vnc-overlay.active { display: flex; }
+#vnc-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: #1e1e1e; border-bottom: 1px solid #333; color: #ddd; font-size: 13px; }
+#vnc-bar .vnc-spacer { flex: 1; }
+#vnc-bar button { padding: 4px 10px; }
+#vnc-status { opacity: 0.7; font-size: 12px; }
+#vnc-screen { flex: 1; min-height: 0; overflow: hidden; background: #000; }
+
 /* inline helper links next to a form label (VM identity: default / none) */
 .small-link { font-size: 11px; font-weight: normal; text-decoration: none; opacity: 0.8; }
 .small-link:hover { text-decoration: underline; opacity: 1; }

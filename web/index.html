@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>App Sandbox</title>
 <link rel="stylesheet" href="style.css">
+<script src="novnc.js"></script>
 </head>
 <!-- spellcheck="false" inherits to all descendants; the per-field
      autocorrect/autocapitalize attrs (WebKit/Safari extensions) stop macOS from
@@ -191,6 +192,21 @@
             <button class="primary" onclick="saveIdentity(false)">Save</button>
         </div>
     </div>
+</div>
+
+<!-- In-app VNC viewer (noVNC): the guest's VNC server on port 5900, i.e. the
+     nested replica's screen once it exists. Opened by the screen button. -->
+<div id="vnc-overlay">
+    <div id="vnc-bar">
+        <span id="vnc-title">Screen</span>
+        <span id="vnc-status"></span>
+        <span class="vnc-spacer"></span>
+        <button onclick="vncSendCad()" title="Send Ctrl+Alt+Del to the guest">Ctrl+Alt+Del</button>
+        <button onclick="vncToggleScale()" id="vnc-scale-btn" title="Fit the screen to this window or show it 1:1">Fit</button>
+        <button onclick="vncExternal()" title="Open the same screen in an installed VNC viewer (TigerVNC, RealVNC, ...)">External viewer</button>
+        <button class="primary" onclick="closeVncViewer()">Close</button>
+    </div>
+    <div id="vnc-screen"></div>
 </div>
 
 <!-- Confirm modal -->

@@ -149,6 +149,7 @@ window.onHostMessage = function(msg) {
         case 'adapters':      populateAdapters(msg.adapters, msg.defaultIndex); break;
         case 'templates':     populateTemplates(msg.templates); break;
         case 'identity':      openIdentityModal(msg.vmIndex, msg.vmIdentity); break;
+        case 'vncReady':      openVncViewer(msg); break;
         case 'alert':         showModal('Error', msg.message, 'OK'); break;
         case 'prereqRequired': onPrereqRequired(); break;
         case 'prereqReboot':   onPrereqReboot(); break;
@@ -461,6 +462,60 @@ function gatherConfig() {
         vmIdentity:  compactIdentity(document.getElementById('vm-identity').value)
     };
 }
+
+/* ---- In-app VNC viewer (noVNC) ----
+   The host answers vncOpen with vncReady {wsPort}: a loopback WebSocket
+   bridge onto the VNC tunnel (guest port 5900 - the nested replica's console
+   once appsandbox-replica created it). window.NoVNC is the RFB class,
+   bundled in novnc.js (loads asynchronously, hence the promise). */
+var vncRfb = null, vncVmIndex = -1, vncScaled = true;
+
+function openVncViewer(msg) {
+    var overlay = document.getElementById('vnc-overlay');
+    var screen = document.getElementById('vnc-screen');
+    closeVncViewer();
+    vncVmIndex = msg.vmIndex;
+    document.getElementById('vnc-title').textContent = 'Screen \u2014 ' + (msg.vmName || '') + ' (guest VNC :5900)';
+    document.getElementById('vnc-status').textContent = 'connecting\u2026';
+    overlay.classList.add('active');
+    window.NoVNC.then(function(RFB) {
+        if (vncVmIndex !== msg.vmIndex) return;   /* closed meanwhile */
+        var rfb = new RFB(screen, 'ws://127.0.0.1:' + msg.wsPort, { wsProtocols: ['binary'] });
+        rfb.scaleViewport = vncScaled;
+        rfb.resizeSession = false;
+        rfb.background = '#000';
+        rfb.addEventListener('connect', function() { document.getElementById('vnc-status').textContent = 'connected'; rfb.focus(); });
+        rfb.addEventListener('disconnect', function(e) {
+            var clean = e && e.detail && e.detail.clean;
+            document.getElementById('vnc-status').textContent = clean ? 'disconnected' : 'connection lost (is the replica running?)';
+        });
+        rfb.addEventListener('credentialsrequired', function() {
+            var pw = prompt('VNC password');
+            rfb.sendCredentials({ password: pw || '' });
+        });
+        vncRfb = rfb;
+    }).catch(function(e) {
+        document.getElementById('vnc-status').textContent = 'viewer failed to load: ' + e;
+    });
+}
+
+function closeVncViewer() {
+    if (vncRfb) { try { vncRfb.disconnect(); } catch (e) {} vncRfb = null; }
+    vncVmIndex = -1;
+    document.getElementById('vnc-overlay').classList.remove('active');
+    document.getElementById('vnc-screen').innerHTML = '';
+}
+
+function vncSendCad() { if (vncRfb) vncRfb.sendCtrlAltDel(); }
+function vncToggleScale() {
+    vncScaled = !vncScaled;
+    if (vncRfb) vncRfb.scaleViewport = vncScaled;
+    document.getElementById('vnc-scale-btn').textContent = vncScaled ? 'Fit' : '1:1';
+}
+function vncExternal() { if (vncVmIndex >= 0) sendCmd('vncConnect', { vmIndex: vncVmIndex }); }
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && document.getElementById('vnc-overlay').classList.contains('active') && !vncRfb) closeVncViewer();
+});
 
 /* ---- VM identity editor (per-VM modal) ---- */
 var identityVmIndex = -1;
@@ -845,9 +900,9 @@ function buildRowCells(vm, i, statusTd) {
        port 5900 (x11vnc, a docker container publishing 127.0.0.1:5900, ...). */
     var vncActive = !!vm.vncPort && vm.running && !bld;
     var vncCell = makeIconCell('vnc', '\uD83D\uDDA5\uFE0F', vncActive,
-        (function(idx) { return function() { sendCmd('vncConnect', {vmIndex: idx}); }; })(i),
+        (function(idx) { return function() { sendCmd('vncOpen', {vmIndex: idx}); }; })(i),
         vm.vncPort ? '' : 'hidden',
-        vm.vncPort ? 'Open a VNC viewer on the guest\'s VNC server (guest port ' + vm.vncPort + ', tunneled over HvSocket)' : '');
+        vm.vncPort ? 'Open the guest\'s screen in App Sandbox (its VNC server on port ' + vm.vncPort + ' - the nested replica once created; tunneled over HvSocket)' : '');
 
     /* VM identity editor (Linux): what the guest reports about its machine. */
     var isLinux = vm.osType === 'Linux';
