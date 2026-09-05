@@ -88,6 +88,63 @@ disk**, jadi dua angka itulah yang menentukan berapa replica yang muat:
   (15 GB adalah pemakaian realistis satu replica dengan XFCE + Steam,
   di bawah batas 20 GB)
 
+### Menerjemahkan beban yang mau dijalankan ke ukuran VPS
+
+Kalau sudah tahu apa yang akan berjalan di dalam replica, ukurannya bisa
+dihitung, tidak perlu ditebak. Ambil contoh nyata: **6 replica Ubuntu,
+masing-masing menjalankan satu proses yang memakai 300 MB RAM dan 5% CPU
+di Ryzen 7 5800H** (8 core / 16 thread, Geekbench 6 satu core sekitar
+2000).
+
+**RAM** — ini yang hampir selalu mengikat:
+
+```
+RAM per replica = proses + OS Ubuntu + ruang cache
+                = 300 MB + ~400 MB + sisanya  →  1024 MB minimum,
+                                                 1536 MB nyaman,
+                                                 2048 MB kalau pakai XFCE
+RAM host        = (RAM per replica + ~150 MB overhead QEMU) x jumlah replica
+                  + ~1 GB untuk OS host + Nestbox
+```
+
+Enam replica headless di 1536 MB berarti `6 x 1686 MB + 1 GB ≈ 11 GB`,
+jadi plan 12 GB pas dan plan 8 GB tidak cukup. Kalau keenamnya memakai
+desktop XFCE, angkanya naik ke sekitar 13,5 GB dan perlu plan 16 GB atau
+lebih.
+
+**CPU** — perhatikan dulu 5% itu diukur dari mana, karena bedanya 16 kali:
+
+- Task Manager Windows menghitung 5% dari **seluruh** chip: di 5800H itu
+  `0,05 x 16 thread = 0,8 thread` per proses, jadi 6 proses = 4,8 thread.
+- `top` di Linux menghitung 100% = **satu** core: 5% berarti 0,05 core per
+  proses, jadi 6 proses hanya 0,3 core.
+
+Setelah itu, konversikan ke CPU tujuan dengan perbandingan skor satu core,
+tambahkan idle OS tiap replica (~0,05 core), tambah 15% untuk nested, lalu
+tambah ~0,4 core untuk host dan thread I/O QEMU:
+
+```
+core = (beban x skor_asal/skor_tujuan + 0,05 x replica) x 1,15 + 0,4
+```
+
+Dengan pembacaan Task Manager dan tujuan EPYC Turin (skor 2976):
+`(4,8 x 2000/2976 + 0,3) x 1,15 + 0,4 ≈ 4,4 core` — jadi 6 core cukup dan
+4 core mepet. Dengan pembacaan `top`, hasilnya kurang dari 1 core dan
+CPU-nya tidak jadi soal sama sekali.
+
+**Disk** — tiap replica adalah qcow2 dengan base image sebagai backing
+file, jadi base 3,5 GB itu dibayar sekali untuk semua replica, dan tiap
+replica hanya menyimpan perubahannya sendiri (beberapa GB untuk Ubuntu
+headless). Enam replica headless butuh sekitar `3,5 + 6 x 3 + 10 GB OS
+host ≈ 32 GB`.
+
+Kesimpulan contoh ini: **6 core, 12 GB, 120 GB** — persis Onidel HF-4
+($38,70) atau OVHcloud VPS-3 (12 GB, tapi disk 100 GB dan CPU 3,5x lebih
+lambat). Yang mengikat adalah RAM, bukan CPU, di kedua pembacaan angka 5%
+itu. Tiap replica dibuat dengan `--cpus 2 --ram 1536 --disk 20G`; vCPU
+boleh dijual berlebih (6 x 2 = 12 vCPU di 6 core) karena bebannya
+sebentar-sebentar.
+
 Kolom terakhir, **tenaga per replica**, adalah `(core ÷ jumlah replica) ×
 (skor Geekbench 6 satu core ÷ 1000)`. Angka itu yang paling dekat dengan
 "seberapa enak satu replica dipakai": desktop XFCE dan Steam menggambar
