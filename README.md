@@ -1,24 +1,50 @@
-<img width="1028" height="446" alt="App Sandbox" src="https://github.com/user-attachments/assets/f66dcaff-201e-4cf5-8e23-bc480338f353" />
-
+![Nestbox](docs/screenshots/nestbox-main.png)
 
 # Nestbox
 
-Nestbox is an advanced fork of [App Sandbox](https://github.com/jamesstringer90/appsandbox) by
-James Stringer. The original is a virtual machine app for Windows and macOS focused
-on performance and ease of use; everything below in the feature lists is his work
-and stays MIT-licensed under his copyright. This fork adds what the original does not
-do, aimed at Linux guests that should not look like virtual machines:
+Nestbox runs Linux (and Windows) virtual machines on Windows 11 that do not have to look like
+virtual machines. It is an advanced fork of [App Sandbox](https://github.com/jamesstringer90/appsandbox)
+by James Stringer: the VM engine, GPU paravirtualisation, guest agent, snapshots, headless API and
+macOS support are his work and stay MIT-licensed under his copyright (see
+[The original App Sandbox](#the-original-app-sandbox) below). Nestbox adds:
 
-- **VM identity profiles**: a per-VM JSON profile (prefilled with a bare-metal ASUS/AMI desktop) that decides what the guest reports about its machine: DMI strings, `dmidecode`, `systemd-detect-virt`, `hostnamectl`, udev's vendor/model. Applied live from the GUI and at every boot.
-- **Nested replica on an identity-patched QEMU**: a KVM guest inside the sandbox VM whose ACPI, SMBIOS, drive, USB and CPUID identity all follow the same profile, built from seven small patches against upstream QEMU 8.2.2 (the parameterised form of [kila58/qemu-patched](https://github.com/kila58/qemu-patched)). Inside it `systemd-detect-virt` answers `none`, even as root. One command turns it into an XFCE + Steam desktop.
-- **In-app screens**: the nested replica's console opens inside the App Sandbox window (noVNC over a loopback WebSocket bridge), with start / stop / restart from the sandbox list; no external VNC viewer needed.
-- **A new interface**: the panel was redesigned around a warm "signal rack" look (mono labels, status lamps, one accent, light and dark themes) instead of emoji buttons and coloured text.
-- Fixes along the way: long identity profiles surviving a restart, rows re-rendering on agent state changes, a local deploy script for a shortcut install folder.
+- **VM identity profiles.** A per-VM JSON profile, prefilled with a bare-metal ASUS/AMI desktop,
+  decides what the guest reports about its machine: DMI strings, `dmidecode`, `systemd-detect-virt`,
+  `hostnamectl`, udev's vendor and model. Edited from the identity button, applied live and at every boot.
+- **Nested replicas on an identity-patched QEMU.** Any number of KVM guests inside a sandbox, each
+  with its own name, disk, console and desktop (XFCE + Steam, one click). Their ACPI, SMBIOS, drive,
+  USB and CPUID identity follows the same profile through seven small patches against upstream
+  QEMU 8.2.2 (the parameterised form of [kila58/qemu-patched](https://github.com/kila58/qemu-patched)).
+  Inside a replica `systemd-detect-virt` answers `none`, even as root.
+- **Screens inside the window.** Every replica console opens in-app (noVNC over a loopback WebSocket
+  bridge), with start / stop / restart / delete on the replica's row and a `+` to add another.
+- **A "Nested replica" option on New Sandbox** that builds the patched QEMU, creates the first
+  replica and installs its desktop in the background once the install finishes.
+- **A new interface** in a warm "signal rack" style: mono labels, status lamps, one accent, light
+  and dark themes, SVG glyphs instead of emoji.
 
-Read [docs/vm-identity-dan-replica.md](docs/vm-identity-dan-replica.md) (Bahasa Indonesia) for a plain-language tour, or the technical READMEs under `tools/linux/identity`, `tools/linux/replica` and `tools/linux/replica/qemu-identity`.
+| New sandbox | Light theme |
+|---|---|
+| ![New sandbox](docs/screenshots/nestbox-new-sandbox.png) | ![Light theme](docs/screenshots/nestbox-light.png) |
+
+## Get it
+
+Build `AppSandbox.sln` (Release, x64) with Visual Studio 2022 or newer. `tools\deploy-local.ps1`
+builds `Nestbox.exe` + `nestbox_core.dll` and copies them with the web UI and resources into an
+install folder (default `D:\Nestbox`); `tools\sign\make-release.ps1` packages a release zip.
+A Linux guest fetches its own tools (agent, `appsandbox-replica`, `appsandbox-identity`, the QEMU
+patches) at create time from the GitHub repo and branch compiled into the build, so point
+`deploy-local.ps1 -SourceRepo owner/name -SourceBranch branch` at a public repo that has your commits.
+
+Read [docs/vm-identity-dan-replica.md](docs/vm-identity-dan-replica.md) (Bahasa Indonesia) for a
+plain-language tour, or the technical READMEs under `tools/linux/identity`, `tools/linux/replica`
+and `tools/linux/replica/qemu-identity`.
+
+Names inherited from the original are kept where changing them would break existing installs: the
+data folders (`%ProgramData%\AppSandbox`, `AppSandboxData`), the drivers (`AppSandboxVDD/VAD/SHM`)
+and the guest tools (`appsandbox-*`, which also answer to `nestbox-*`).
 
 ---
-
 ## The original App Sandbox
 
 App Sandbox is a virtual machine app for Windows and macOS that's focused on performance and ease of use.
