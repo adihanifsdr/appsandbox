@@ -68,6 +68,87 @@ rupiah.
 | Oracle Cloud (OCI) | Pakai shape VM Intel, misalnya `VM.Standard3.Flex`; `/dev/kvm` tersedia di dalam VM | Shape AMD dan Ampere (Arm) tidak mendukung nested, jadi Always Free tier tidak bisa dipakai untuk ini | Singapura (ap-singapore-1 / -2); tidak ada Jakarta | sekitar $0.04 per OCPU-jam ditambah biaya memori |
 | Alibaba Cloud ECS | Nested aktif default, **tapi hanya di ECS Bare Metal** (keluarga `ebm`) | ECS VM biasa, termasuk tipe murah yang dijual di region Jakarta, tidak mengekspos vmx/svm | Jakarta (ap-southeast-5), Singapura | harga bare metal, jauh di atas VPS |
 
+## Perbandingan spek: berapa replica yang muat, dan berapa harganya
+
+Satu replica default memakai **4 vCPU, 4096 MB RAM, disk 20 GB thin**
+(lihat `DISK=20G; RAM=4096; CPUS=4` di
+[tools/linux/replica/appsandbox-replica](../tools/linux/replica/appsandbox-replica)),
+ditambah base image Ubuntu sekitar 3,5 GB yang dipakai bersama semua
+replica. vCPU boleh dijual berlebih — replica 4 vCPU tetap jalan di host
+2 vCPU, hanya lebih lambat. Yang tidak bisa dilebihkan adalah **RAM dan
+disk**, jadi dua angka itulah yang menentukan berapa replica yang muat:
+
+- RAM: `(RAM host − 1 GB untuk host) ÷ 4 GB`
+- Disk: `(disk host − 10 GB untuk OS host − 3,5 GB base image) ÷ 15 GB`
+  (15 GB adalah pemakaian realistis satu replica dengan XFCE + Steam,
+  di bawah batas 20 GB)
+
+| Plan | Harga/bulan | vCPU | RAM | Disk | Kuota traffic | Replica muat | Biaya per replica |
+|---|---|---|---|---|---|---|---|
+| OVHcloud VPS-1 | $4,54 | 2 | 4 GB | 40 GB NVMe | 500 GB | 1, tapi RAM replica harus diturunkan ke ~2,5 GB | $4,54 |
+| OVHcloud VPS-2 | $8,50 | 4 | 8 GB | 75 GB NVMe | 1 TB | 1 penuh (2 kalau masing-masing 3 GB) | $8,50 |
+| **OVHcloud VPS-3** | **$12,32** | 6 | 12 GB | 100 GB NVMe | 1 TB | **2** | **$6,16** |
+| OVHcloud VPS-4 | $23,37 | 8 | 24 GB | 200 GB NVMe | 3 TB | 5 | $4,67 |
+| GreenCloud SSDKVM-3 | $20 | 2 | 4 GB | 30 GB | 750 GB-6 TB (APAC) | 1 | $20 |
+| GreenCloud SSDKVM-5 | $80 | 8 | 16 GB | 120 GB | idem | 3 | $26,7 |
+| GreenCloud promo tahunan | ~$2,08 ($25/tahun) | 2 | 4 GB | 35 GB NVMe | 750 GB | 1 | $2,08 |
+| ExtraVM 8 GB | $32 | 4 | 8 GB | 120 GB NVMe | 8 TB | 1-2 | $16-32 |
+| ExtraVM 16 GB | $56 | 6 | 16 GB | 240 GB NVMe | 10 TB | 3 | $18,7 |
+| SSD Nodes KVM/2X-LARGE | ~$11,08 ($133/tahun) | 8 Intel Silver | 32 GB | 480 GB SSD | besar | 7 | $1,58 |
+| DigitalOcean 4 GB | $24 | 2 | 4 GB | 80 GB | 4 TB | 1 | $24 |
+| DigitalOcean 8 GB | $48 | 4 | 8 GB | 160 GB | 5 TB | 1-2 | $24-48 |
+| Contabo Cloud VDS S | €42,99 (€34,40 kontrak 12 bulan) | 3 core **fisik** EPYC | 24 GB | 180 GB NVMe | besar | 5 | sekitar €7-9 |
+| GCE Jakarta n2-standard-2 | $76,28 + disk | 2 | 8 GB | dibeli terpisah (~$0,13/GB) | keluar Google dibayar per GB | 1-2 | $40-83 |
+| AWS Jakarta m7i.large | sekitar $0,10-0,12/jam (≈$75-90 kalau 24/7) + EBS | 2 | 8 GB | EBS terpisah | egress dibayar per GB | 1-2 | $40-90 |
+| OCI Singapura VM.Standard3.Flex 1 OCPU / 8 GB | sekitar $38 + block volume | 2 thread | 8 GB | terpisah | 10 TB gratis/bulan | 1 | ~$38 |
+
+Tiga hal yang tidak kelihatan di tabel tapi menentukan rasa pakainya:
+
+- **Umur CPU.** VPS OVHcloud yang dicek memakai Haswell (2013-an).
+  Murah dan terbukti jalan, tetapi kecepatan satu core-nya jauh di bawah
+  EPYC 4004/Ryzen 9 di ExtraVM atau EPYC di GreenCloud dan Contabo.
+  Desktop XFCE dan Steam di dalam replica menggambar lewat CPU, jadi
+  bedanya terasa. Nested sendiri sudah memotong sekitar 10% menurut
+  Google, dan replica di dalam VPS berarti dua lapis virtualisasi.
+- **Kuota traffic.** Layar replica lewat browser memakan sekitar 2-5
+  Mbps. Dipakai 8 jam sehari selama sebulan itu 216 GB (2 Mbps) sampai
+  540 GB (5 Mbps). Jadi OVH VPS-1 dengan kuota 500 GB bisa mepet lalu
+  dicekik ke 10 Mbps; VPS-2/VPS-3 dengan 1 TB aman untuk pemakaian
+  sedang; ExtraVM (4-10 TB) dan DigitalOcean (4-6 TB) lega.
+- **Cara membayar.** SSD Nodes murah karena dibayar di muka untuk 1-3
+  tahun: uangnya hangus kalau ternyata tidak cocok. GreenCloud promo
+  tahunan juga tidak masuk kebijakan refund 7 hari mereka. Sebaliknya
+  DigitalOcean, GCE, AWS, dan OCI ditagih per jam/detik, jadi risikonya
+  hampir nol untuk menguji.
+
+### Worth it-nya
+
+- **Paling masuk akal untuk dipakai sehari-hari: OVHcloud VPS-3, $12,32.**
+  Speknya (6 vCPU, 12 GB, 100 GB) praktis sama dengan server yang sudah
+  dicek dan terbukti menjalankan replica, muat 2 replica, kuota 1 TB, dan
+  bisa dibatalkan 14 hari. $6,16 per replica adalah harga terbaik yang
+  tidak menuntut bayar di muka bertahun-tahun.
+- **Paling murah kalau berani prabayar: SSD Nodes**, $1,58 per replica
+  per bulan untuk 7 replica sekaligus. CPU Intel Silver-nya lambat per
+  core dan uangnya terkunci 1-3 tahun, jadi ini pilihan kalau yang
+  dikejar jumlah replica, bukan kelincahan tiap replica.
+- **Paling murah untuk satu replica coba-coba: GreenCloud promo tahunan**
+  (~$2/bulan, sudah terbukti nested-nya di review dari Indonesia, 13,68 ms
+  dari Jakarta) — asal stoknya ada dan sadar plan promo tidak bisa refund.
+  Tanpa promo, GreenCloud $20 untuk 1 replica kalah telak dari OVH.
+- **Paling enak dipakai (desktop + Steam): Contabo Cloud VDS S.** Core-nya
+  fisik, bukan shared, jadi replica tidak ikut melambat saat tetangga
+  sibuk; 24 GB RAM cukup untuk 5 replica di sekitar €7-9 per replica.
+  Ini yang dipilih kalau replica dipakai serius, bukan sekadar dicoba.
+- **Cloud besar hanya untuk dua alasan:** butuh server benar-benar di
+  Jakarta, atau butuh hitungan per jam. GCE Jakarta n2-standard-2 dengan
+  spek setara OVH VPS-2 harganya sekitar sembilan kali lipat kalau
+  dinyalakan sebulan penuh. Untuk mengetes Nestbox setengah hari, itu
+  sekitar $1,3 dan tidak ada komitmen — di situ dia menang.
+- **Hindari untuk Nestbox:** semua plan dengan disk 15 GB (GreenCloud $6
+  dan $10, ExtraVM $4,50). Base image 3,5 GB ditambah satu replica sudah
+  melewatinya, jadi murahnya percuma.
+
 ## VPS yang jelas tidak bisa
 
 | Provider | Alasan |
@@ -103,14 +184,11 @@ lokal untuk layar replica lewat browser.
 
 ## Saran
 
-- Paling murah untuk mencoba: GreenCloud VPS Singapura (nested terbukti di
-  review pihak ketiga, ada 7 hari refund untuk VPS pertama asal bukan plan
-  promo) atau ExtraVM Singapura yang nested-nya default dan punya 5 hari
-  uji. OVHcloud VPS sudah terbukti langsung di server yang dicek.
-- Kalau ingin tanpa komitmen sama sekali: Google Compute Engine Jakarta
-  atau AWS Jakarta, ditagih per jam/detik, hapus VM setelah selesai.
-- Untuk replica yang dipakai serius (desktop + Steam), Contabo Cloud VDS
-  Singapura lebih bertenaga dan punya 14 hari refund.
+- Ringkasan harga per replica dan pilihan terbaik ada di
+  [Perbandingan spek](#perbandingan-spek-berapa-replica-yang-muat-dan-berapa-harganya)
+  di atas: OVHcloud VPS-3 untuk pemakaian harian, Contabo VDS S kalau
+  replica dipakai serius, cloud besar kalau butuh Jakarta atau tagihan
+  per jam.
 - Latensi dari Indonesia ke Singapura sekitar 13-30 ms, cukup untuk
   layar replica lewat browser.
 - Sisakan disk: satu replica memakai 20 GB (thin, tumbuh sesuai isi)
@@ -121,6 +199,14 @@ lokal untuk layar replica lewat browser.
 
 ## Sumber
 
+- Spek dan harga yang dipakai di tabel perbandingan:
+  [OVHcloud VPS Singapore](https://www.ovhcloud.com/asia/vps/vps-singapore/),
+  [ExtraVM Singapore VPS](https://www.extravm.com/singapore-vps),
+  [GreenCloud Budget KVM](https://greencloudvps.com/budget-kvm-vps.php),
+  [SSD Nodes pricing](https://www.ssdnodes.com/pricing/),
+  [DigitalOcean droplets](https://www.digitalocean.com/pricing/droplets),
+  [Contabo Cloud VDS](https://onedollarvps.com/pricing/contabo-pricing),
+  [m7i.large](https://instances.vantage.sh/aws/ec2/m7i.large)
 - ExtraVM: [Singapore VPS](https://www.extravm.com/singapore-vps),
   [nested virtualization](https://extravm.com/billing/knowledgebase/101/Is-nested-virtualization-enabled.html),
   [Terms of Service](https://extravm.com/tos.pdf)
