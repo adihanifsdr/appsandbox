@@ -41,7 +41,7 @@ dan kebijakan bisa berubah; cek ulang sebelum membeli.
 | OVHcloud VPS | Ya, terbukti langsung di server yang dicek (`/dev/kvm` ada, flag vmx terekspos) | sekitar US$4.54/bulan (Starter) sampai US$23.37/bulan; di APAC ada kuota bandwidth bulanan (500 GB VPS-1, 1 TB VPS-2/3, 3 TB VPS-4), lewat itu dibatasi 10 Mbps | Singapura (region SGP, sejak 2016), Sydney | Hak pembatalan 14 hari untuk individu dan pesanan baru, dikembalikan pro-rata dikurangi hari terpakai, dalam 30 hari |
 | ExtraVM | Ya, aktif default di semua VPS. **Stok Singapura sering habis** (per 5 September 2026 kosong); Tokyo dan Sydney kadang masih ada | sekitar $4.50/bulan | Singapura (Equinix SG3), Tokyo, Sydney | 5 hari money-back untuk VPS, potongan 4% untuk refund di atas $25, pembayaran kripto tidak bisa refund |
 | **Advin Servers** | Ya, ditulis sendiri di halaman depan mereka: "KVM & Nested Virtualization" | EPYC Genoa 9654: 2 vCPU / 4 GB / 64 GB NVMe / 2 TB $6/bulan; 8 vCPU / 16 GB / 256 GB / 10 TB $20/bulan; di Singapura EPYC 9375F (3,8 GHz) 2 vCPU / 8 GB / 40 GB $19,90 | Singapura, **Johor** (Equinix JH1, backhaul ke Equinix SG1), Tokyo, Osaka | 14 hari money-back tanpa syarat dan tanpa alasan; setelah itu kredit akun pro-rata |
-| **Onidel Cloud** | Ya, aktif default di KVM mereka; benchmark pihak ketiga di VPS Singapura EPYC 7713P mencatat nested "Yes", dan mereka tetap membiarkannya menyala setelah isu keamanan (host dipatch, fiturnya tidak dimatikan) | Premium EPYC Milan, harga Singapura per bulan (juga bisa per jam): ONI-1 1 core / 2 GB / 20 GB / 1 TB $4,95; ONI-2 2 / 4 GB / 40 GB / 2 TB $9,90; ONI-3 4 / 8 GB / 80 GB / 4 TB $19,80; ONI-4 6 / 12 GB / 120 GB / 6 TB $29,70; ONI-5 8 / 32 GB / 240 GB / 8 TB $65,60; ONI-6 12 / 48 GB / 320 GB / 12 TB $95. Diskon 5-30% untuk kontrak 3 bulan sampai 3 tahun. **High Frequency EPYC Turin (Zen 5, 3,8+ GHz, Geekbench 6 satu core 2976 menurut Onidel)**, Singapura saja: HF-1 1 core / 2 GB / 20 GB / 1 TB $6,45; HF-2 2 / 4 GB / 40 GB / 2 TB $12,90; HF-3 4 / 8 GB / 80 GB / 4 TB $25,80; HF-4 6 / 12 GB / 120 GB / 6 TB $38,70; HF-5 8 / 32 GB / 240 GB / 8 TB $86,40; HF-6 12 / 48 GB / 320 GB / 12 TB $126,20. Tagihan per jam tersedia (HF-2 $0,0192/jam, HF-4 $0,0576/jam) | Singapura (Turin hanya di sini), Sydney, Melbourne, Ho Chi Minh, Amsterdam, New York | 7 hari money-back |
+| **Onidel Cloud** | **Ya, ada artikel KB resminya**: nested virtualization didukung di VPS High-Performance dan High-Frequency mereka, di semua lokasi, tanpa perlu minta diaktifkan. Diperkuat benchmark pihak ketiga di VPS Singapura EPYC 7713P yang mencatat nested "Yes" | Premium EPYC Milan, harga Singapura per bulan (juga bisa per jam): ONI-1 1 core / 2 GB / 20 GB / 1 TB $4,95; ONI-2 2 / 4 GB / 40 GB / 2 TB $9,90; ONI-3 4 / 8 GB / 80 GB / 4 TB $19,80; ONI-4 6 / 12 GB / 120 GB / 6 TB $29,70; ONI-5 8 / 32 GB / 240 GB / 8 TB $65,60; ONI-6 12 / 48 GB / 320 GB / 12 TB $95. Diskon 5-30% untuk kontrak 3 bulan sampai 3 tahun. **High Frequency EPYC Turin (Zen 5, 3,8+ GHz, Geekbench 6 satu core 2976 menurut Onidel)**, Singapura saja: HF-1 1 core / 2 GB / 20 GB / 1 TB $6,45; HF-2 2 / 4 GB / 40 GB / 2 TB $12,90; HF-3 4 / 8 GB / 80 GB / 4 TB $25,80; HF-4 6 / 12 GB / 120 GB / 6 TB $38,70; HF-5 8 / 32 GB / 240 GB / 8 TB $86,40; HF-6 12 / 48 GB / 320 GB / 12 TB $126,20. Tagihan per jam tersedia (HF-2 $0,0192/jam, HF-4 $0,0576/jam) | Singapura (Turin hanya di sini), Sydney, Melbourne, Ho Chi Minh, Amsterdam, New York | ToS: **14 hari money-back penuh**. Tapi FAQ di situsnya menyebut 7 hari dan hanya kalau layanannya rusak/tidak sesuai — ToS yang mengikat, siapkan tautannya kalau ditanya. Pengecualian: pemakaian CPU/bandwidth tinggi sebelum minta refund, pelanggaran AUP. **Plan promo (kode diskon atau sale) hanya di-refund jadi kredit akun**, dan **top-up saldo tidak bisa di-refund sama sekali** |
 | Cloudzy | Diklaim di halaman pemasaran dan blog mereka ("nested KVM"), tidak ada di halaman produk — konfirmasi dulu | EPYC 9554 Genoa: 512 MB $2,48; 2 GB / 60 GB $7,48; 4 GB / 120 GB / 2 vCPU $14,48 (harga diskon 50%) | Singapura (ap-sgp-1), 13 region | 14 hari money-back, batal sendiri lewat panel |
 | GreenCloud VPS | Ya. Review pihak ketiga dari Indonesia di plan Budget KVM Singapura DC2 menunjukkan "VM-x/AMD-V: Enabled" dan memakai nested. Selain lini EPYC, ada lini **Ryzen 9950X** (RyzenKVM, 3,5+ GHz) yang juga ada di Singapura DC2 | Budget/SSD KVM dari $6/bulan (1 core, 1 GB RAM, 15 GB SSD — terlalu kecil untuk replica, ambil minimal SSDKVM-3 $20/bulan dengan 30 GB); plan promo tahunan pernah $25/tahun untuk 2 core EPYC, 4 GB RAM, 35 GB NVMe | Singapura DC1 & DC2, Tokyo, Hong Kong, Hanoi, Ho Chi Minh | 7 hari untuk VPS pertama di akun baru; plan diskon/promo dan pembayaran kripto tidak termasuk |
 | SSD Nodes | Ya, aktif default di semua plan | sekitar $14.50/bulan untuk 32 GB RAM, tapi kontrak 3 tahun dibayar di muka | Singapura, Tokyo, Mumbai, Sydney | 14 hari full refund lewat tiket support; setelah itu hanya kredit akun |
@@ -209,6 +209,15 @@ ONI-3 untuk satu core 2,4x lebih cepat, jadi tidak ada alasan memilih
 Milan untuk replica desktop. GreenCloud Singapura DC2 juga terkonfirmasi
 masih ada stok, baik lini Budget EPYC maupun Ryzen 9950X.
 
+Cara memakai kebijakan Onidel tanpa terjebak: beli HF bulanan **tanpa
+kode promo** kalau ingin hak refund 14 hari yang bisa kembali ke kartu —
+memakai kode promo Turin (40% tahunan / 60% triennial) membuat refund
+hanya keluar sebagai kredit akun. Tagihan per jam dihitung dari harga
+bulanan dibagi 672 dan tidak pernah melebihi harga bulanan, tetapi
+diambil dari saldo yang di-top-up lebih dulu, dan **top-up tidak bisa
+di-refund**, jadi isi seperlunya saja. VM yang cuma di-stop tetap
+ditagih; harus di-terminate. Bandwidth di atas kuota $0,01 per GB.
+
 **Peringkat 6-11 — bagus untuk kebutuhan tertentu.** Cloudzy paling murah
 di antara yang CPU-nya Genoa, dengan refund 14 hari sebagai jaring
 pengaman karena nested-nya baru diklaim di halaman pemasaran. GreenCloud
@@ -295,6 +304,9 @@ lokal untuk layar replica lewat browser.
   [OVH memindah lini VPS 2027 ke Intel lama](https://lowendtalk.com/discussion/218138/ovh-launches-2027-vps-line)
 - Onidel: [Premium VPS](https://onidel.com/services/premium-vps),
   [High Frequency VPS EPYC Turin](https://onidel.com/services/high-frequency-vps),
+  [KB: nested virtualization](https://kb.onidel.com/hc/kb/articles/1770746220-nested-virtualization),
+  [Terms of Service (refund 14 hari, plan promo jadi kredit, top-up tidak refundable)](https://kb.onidel.com/hc/kb/articles/1756033443-terms-of-service),
+  [cara kerja tagihan per jam](https://kb.onidel.com/hc/kb/articles/1756043421-how-does-hourly-billing-work),
   [benchmark Singapura yang mencatat nested "Yes"](https://lowendtalk.com/discussion/208589/onidel-singapore-vps-benchmark-and-review)
 - Advin Servers: [Cloud VPS](https://advinservers.com/cloud),
   [halaman depan yang menyebut "KVM & Nested Virtualization"](https://advinservers.com/),
