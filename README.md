@@ -32,6 +32,10 @@ macOS support are his work and stay MIT-licensed under his copyright (see
 |---|---|
 | ![New sandbox](docs/screenshots/nestbox-new-sandbox.png) | ![Light theme](docs/screenshots/nestbox-light.png) |
 
+Every running replica of a sandbox in one window, from the grid button on the first replica's row:
+
+![Replica grid](docs/screenshots/nestbox-grid.png)
+
 ## Get it
 
 Build `AppSandbox.sln` (Release, x64) with Visual Studio 2022 or newer. `tools\deploy-local.ps1`
