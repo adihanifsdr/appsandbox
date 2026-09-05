@@ -17,9 +17,9 @@
 #         appsandbox-replica create [--smbios sysinfo|host] [--disk 20G]
 #                                   [--ram 4096] [--cpus 4] [--vnc 5900]
 #                                   [--profile /etc/appsandbox/identity.json]
-#                                   [--image URL] [--video cirrus|virtio]
+#                                   [--image URL] [--video cirrus|virtio] [--resolution 1600x900]
 #         appsandbox-replica reidentify [--restart] [--profile FILE] [--all]
-#         appsandbox-replica resize [--cpus 4] [--ram 4096] [--disk 30G] [--restart]
+#         appsandbox-replica resize [--cpus 4] [--ram 4096] [--disk 30G] [--resolution 1600x900] [--restart]
 #         appsandbox-replica qemu build|restore|status
 #         appsandbox-replica desktop [--no-steam]     # XFCE + Steam + autologin, virtio video
 #         appsandbox-replica list                     # every replica as JSON [{name,state,vnc,desktop,cpus,ram,disk}]
@@ -66,6 +66,7 @@ DEFAULT_IMAGE=https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubu
 PROFILE=/etc/appsandbox/identity.json
 SMBIOS=sysinfo; DISK=20G; RAM=4096; CPUS=4; VNC=5900; IMAGE=$DEFAULT_IMAGE
 VIDEO=cirrus      # cirrus = the classic QEMU/OpenStack look; virtio = 2D virtio-vga, larger modes (desktop)
+RES=1600x900      # the virtio head's preferred mode: what the desktop comes up in (--resolution)
 QEMU_SRC=${REPLICA_QEMU_SRC:-/opt/appsandbox/qemu-identity}   # patches + build.sh, shipped in the guest image
 QEMU_BIN=/usr/bin/qemu-system-x86_64
 QEMU_DISTRIB=/usr/bin/qemu-system-x86_64.distrib
@@ -100,12 +101,13 @@ gen_xml() {
     # $1 = uuid, $2 = MAC (fixed: cloud-init pins the guest's netplan config to
     # it, so a redefined domain must keep it or the replica loses its DHCP
     # lease); reads PROFILE (either [{check,name}] or {key:value}) via python3
-    python3 - "$NAME" "$RAM" "$CPUS" "$DIR" "$VNC" "$SMBIOS" "$PROFILE" "$1" "$2" "$VIDEO" <<'PY'
+    python3 - "$NAME" "$RAM" "$CPUS" "$DIR" "$VNC" "$SMBIOS" "$PROFILE" "$1" "$2" "$VIDEO" "$RES" <<'PY'
 import json, sys, html, os
-name, ram, cpus, d, vnc, mode, prof_path, uuid, mac, video = sys.argv[1:11]
+name, ram, cpus, d, vnc, mode, prof_path, uuid, mac, video, res = sys.argv[1:12]
 video_xml = "<model type='cirrus' vram='16384' heads='1'/>"
 if video == "virtio":
-    video_xml = "<model type='virtio' heads='1'><resolution x='1600' y='900'/></model>"
+    w, h = res.lower().split("x")
+    video_xml = "<model type='virtio' heads='1'><resolution x='%d' y='%d'/></model>" % (int(w), int(h))
 prof = {}
 if os.path.exists(prof_path):
     try:
@@ -241,9 +243,15 @@ hv_note() {
 }
 
 DESKTOP=0
+check_res() {
+    case "$RES" in
+        [0-9][0-9]*x[0-9][0-9]*) ;;
+        *) die "--resolution must be WIDTHxHEIGHT, e.g. 800x600" ;;
+    esac
+}
 save_conf() {
-    printf "RAM='%s'\nCPUS='%s'\nVNC='%s'\nSMBIOS='%s'\nPROFILE='%s'\nUUID='%s'\nMAC='%s'\nVIDEO='%s'\nDESKTOP='%s'\nDISK='%s'\n" \
-        "$RAM" "$CPUS" "$VNC" "$SMBIOS" "$PROFILE" "$1" "$2" "$VIDEO" "$DESKTOP" "$DISK" > "$DIR/replica.conf"
+    printf "RAM='%s'\nCPUS='%s'\nVNC='%s'\nSMBIOS='%s'\nPROFILE='%s'\nUUID='%s'\nMAC='%s'\nVIDEO='%s'\nDESKTOP='%s'\nDISK='%s'\nRES='%s'\n" \
+        "$RAM" "$CPUS" "$VNC" "$SMBIOS" "$PROFILE" "$1" "$2" "$VIDEO" "$DESKTOP" "$DISK" "$RES" > "$DIR/replica.conf"
 }
 
 # a size like 20G / 512M / 30 (bare = GiB) -> bytes
@@ -317,12 +325,14 @@ cmd_resize() {
             --cpus) CPUS=$2; changed="$changed cpus"; shift 2 ;;
             --ram) RAM=$2; changed="$changed ram"; shift 2 ;;
             --disk) new_disk=$2; shift 2 ;;
+            --resolution) RES=$2; changed="$changed resolution"; shift 2 ;;
             --restart) restart=1; shift ;;
             *) die "unknown option $1" ;;
         esac
     done
     case "$CPUS" in ''|*[!0-9]*) die "--cpus must be a number" ;; esac
     case "$RAM" in ''|*[!0-9]*) die "--ram must be a number (MiB)" ;; esac
+    check_res
     [ "$CPUS" -ge 1 ] || die "--cpus must be at least 1"
     [ "$RAM" -ge 256 ] || die "--ram must be at least 256 (MiB)"
     virsh dominfo "$NAME" >/dev/null 2>&1 || die "domain '$NAME' is not defined (appsandbox-replica create)"
@@ -383,11 +393,13 @@ cmd_create() {
             --profile) PROFILE=$2; shift 2 ;;
             --image) IMAGE=$2; shift 2 ;;
             --video) VIDEO=$2; shift 2 ;;
+            --resolution) RES=$2; shift 2 ;;
             *) die "unknown option $1" ;;
         esac
     done
     case "$SMBIOS" in sysinfo|host) ;; *) die "--smbios must be sysinfo or host" ;; esac
     case "$VIDEO" in cirrus|virtio) ;; *) die "--video must be cirrus or virtio" ;; esac
+    check_res
     command -v virsh >/dev/null || cmd_install
     # 5900 may already be taken by something the user runs in this VM (x11vnc,
     # a docker container publishing 127.0.0.1:5900 ...): pick the next free port.

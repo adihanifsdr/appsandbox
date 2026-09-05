@@ -72,10 +72,13 @@ Hyper-V's "Microsoft Corporation / Virtual Machine"), `--disk 20G`,
 The generated libvirt XML is at `/var/lib/appsandbox/replica/replica.xml`;
 edit it and `virsh define` it to tweak anything.
 
-`resize [--cpus N] [--ram MiB] [--disk 30G] [--restart]` changes an existing
-replica: cores and RAM are redefined and apply at its next boot (right away
-with `--restart`); the disk only grows (live when the replica runs), and the
-guest's cloud-init growpart extends the root filesystem at the next boot.
+`resize [--cpus N] [--ram MiB] [--disk 30G] [--resolution WxH] [--restart]`
+changes an existing replica: cores, RAM and the screen mode are redefined and
+apply at its next boot (right away with `--restart`); the disk only grows
+(live when the replica runs), and the guest's cloud-init growpart extends the
+root filesystem at the next boot. `--resolution` (default 1600x900, also on
+`create`) is the virtio head's preferred mode, i.e. what the desktop comes up
+in; a running desktop can switch live with `xrandr -s 800x600`.
 The pencil on a replica row in Nestbox does the same, and the "+" dialog
 takes the size of a new replica; `list` reports `cpus`, `ram` and `disk`.
 
