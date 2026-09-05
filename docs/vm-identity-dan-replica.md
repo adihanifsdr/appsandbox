@@ -1,7 +1,7 @@
-# Identitas VM dan Replica: penjelasan untuk orang awam
+# Identitas VM dan Replica di Nestbox: penjelasan untuk orang awam
 
 Dokumen ini menjelaskan, tanpa istilah teknis yang berat, apa yang terjadi
-saat kamu mengisi **VM identity** di App Sandbox dan apa itu **replica**
+saat kamu mengisi **VM identity** di Nestbox dan apa itu **replica**
 (kolom 🪆 di daftar sandbox). Kalau mau detail teknisnya, lihat
 `tools/linux/identity/README.md`, `tools/linux/replica/README.md`, dan
 `tools/linux/replica/qemu-identity/README.md`.
@@ -26,14 +26,14 @@ isinya jujur: "Microsoft Corporation, Virtual Machine". Selain KTP, ada dua
 Perintah `systemd-detect-virt` di Linux membaca semua itu dan menjawab
 `microsoft`, `kvm`, atau `none` (bare metal).
 
-## Dua lapisan yang dipakai App Sandbox
+## Dua lapisan yang dipakai Nestbox
 
 Ada dua tempat berbeda di mana identitas bisa diubah, dan keduanya punya
 batas yang berbeda.
 
 ### Lapisan 1: sandbox VM (tempat Steam-mu terinstall)
 
-Sandbox VM adalah VM Ubuntu yang berjalan di Hyper-V. Di sini App Sandbox
+Sandbox VM adalah VM Ubuntu yang berjalan di Hyper-V. Di sini Nestbox
 **tidak bisa mengganti KTP aslinya**, tapi bisa menaruh "stiker" di atasnya:
 
 - Setiap program yang membaca KTP lewat jalur normal Linux
@@ -103,7 +103,7 @@ QEMU asli menulis nama-namanya sendiri ke dalam KTP mesin: "QEMU HARDDISK",
 "BOCHS", "KVMKVMKVM". Proyek [kila58/qemu-patched](https://github.com/kila58/qemu-patched)
 mengganti semua itu dengan kata "TOSH" yang di-hardcode. Kami mengambil ide
 yang sama tapi membuatnya bisa diatur: setiap nama membaca variabel
-lingkungan `QEMU_IDENTITY_*`, dan App Sandbox mengisinya dari profil VM
+lingkungan `QEMU_IDENTITY_*`, dan Nestbox mengisinya dari profil VM
 identity-mu. Satu build QEMU cukup untuk profil apa pun, dan kalau tidak
 diisi, QEMU berperilaku persis seperti aslinya. Ada tujuh patch kecil di
 `tools/linux/replica/qemu-identity/patches/`.
@@ -139,7 +139,7 @@ Kolom di daftar sandbox, dari kiri ke kanan setelah Snapshot:
 | ▶️ | Start/stop sandbox VM |
 | 📺 | Layar **utama** sandbox VM (GPU penuh) |
 | `>_` | Terminal SSH ke sandbox VM |
-| 🪆 | **Replica**: ▶ untuk menyalakan; ⏳ saat sedang boot; 🖥️ membuka layarnya di dalam App Sandbox |
+| 🪆 | **Replica**: ▶ untuk menyalakan; ⏳ saat sedang boot; 🖥️ membuka layarnya di dalam Nestbox |
 | 🪪 | Editor VM identity (profil JSON) |
 
 Jendela layar replica punya tombol Ctrl+Alt+Del, Fit/1:1, External viewer
@@ -178,7 +178,7 @@ lapisan stiker.
 Tidak. Sandbox VM dijalankan oleh Hyper-V, bukan QEMU, dan Hyper-V tidak
 menyediakan cara menyembunyikan bit hypervisor. Kalau mau semuanya asli
 sekaligus GPU penuh, jalannya adalah host Linux dengan KVM dan GPU
-passthrough, di luar App Sandbox.
+passthrough, di luar Nestbox.
 
 **Kenapa nilai ACPI-ku terpotong?**
 Kolom ACPI punya lebar tetap: OEM ID 6 huruf, table ID 8 huruf, creator ID 4
@@ -195,9 +195,9 @@ baris "Virtualization: microsoft" di `hostnamectl`. Di replica: daftar PCI
 
 ## Kalau ada yang tidak jalan
 
-- Log App Sandbox (panel bawah) menampilkan baris seperti
+- Log Nestbox (panel bawah) menampilkan baris seperti
   `[myappsandbox] VM identity: applied: ...` atau `VM identity FAILED: ...`.
 - `[myappsandbox] Nested replica: running` berarti host tahu replica hidup;
-  kalau kolom 🪆 tetap kosong, tutup dan buka lagi App Sandbox.
+  kalau kolom 🪆 tetap kosong, tutup dan buka lagi Nestbox.
 - Di dalam sandbox VM, `sudo appsandbox-identity status` dan
   `sudo appsandbox-replica status` menunjukkan keadaan saat ini.

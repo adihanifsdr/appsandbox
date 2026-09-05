@@ -629,7 +629,7 @@ static void tray_add(HWND hwnd)
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
     g_nid.hIcon = LoadIconW(g_hInstance, MAKEINTRESOURCEW(IDI_APPSANDBOX));
-    wcscpy_s(g_nid.szTip, 128, L"App Sandbox");
+    wcscpy_s(g_nid.szTip, 128, L"Nestbox");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
 
@@ -812,7 +812,7 @@ static void tray_show_menu(HWND hwnd)
 
     g_tray_item_count = 0;
 
-    tray_append(menu, TRAY_CMD_SHOW, L"Show App Sandbox", FALSE, FALSE, FALSE);
+    tray_append(menu, TRAY_CMD_SHOW, L"Show Nestbox", FALSE, FALSE, FALSE);
     tray_append(menu, 0,             NULL,                TRUE,  FALSE, FALSE);
 
     for (i = 0; i < count; i++) {
@@ -1406,7 +1406,7 @@ HWND ui_create_main_window(HINSTANCE hInstance, int nCmdShow)
         return NULL;
 
     hwnd = CreateWindowExW(
-        0, L"AppSandbox_Main", L"App Sandbox",
+        0, L"AppSandbox_Main", L"Nestbox",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 1575, 900,
         NULL, NULL, hInstance, NULL);
@@ -1436,7 +1436,7 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         webview2_set_message_callback(on_webview2_message);
         if (!webview2_init(hwnd, g_hInstance)) {
             MessageBoxW(hwnd, L"WebView2 initialization failed.\nPlease install Microsoft Edge WebView2 Runtime.",
-                        L"App Sandbox", MB_ICONERROR);
+                        L"Nestbox", MB_ICONERROR);
         }
         tray_add(hwnd);
         return 0;
@@ -1722,10 +1722,10 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 ZeroMemory(&tdc, sizeof(tdc));
                 tdc.cbSize = sizeof(tdc);
                 tdc.hwndParent = hwnd;
-                tdc.pszWindowTitle = L"App Sandbox";
+                tdc.pszWindowTitle = L"Nestbox";
                 tdc.pszMainIcon = TD_INFORMATION_ICON;
                 tdc.pszMainInstruction = L"VMs are still running";
-                tdc.pszContent = L"App Sandbox will minimize to the system tray.\n"
+                tdc.pszContent = L"Nestbox will minimize to the system tray.\n"
                                  L"Your VMs will continue running in the background.\n\n"
                                  L"Click the tray icon to manage VMs or exit.";
                 tdc.pszVerificationText = L"Don't show this again";

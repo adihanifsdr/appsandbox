@@ -1,9 +1,9 @@
 <img width="1028" height="446" alt="App Sandbox" src="https://github.com/user-attachments/assets/f66dcaff-201e-4cf5-8e23-bc480338f353" />
 
 
-# App Sandbox Advanced
+# Nestbox
 
-An advanced fork of [App Sandbox](https://github.com/jamesstringer90/appsandbox) by
+Nestbox is an advanced fork of [App Sandbox](https://github.com/jamesstringer90/appsandbox) by
 James Stringer. The original is a virtual machine app for Windows and macOS focused
 on performance and ease of use; everything below in the feature lists is his work
 and stays MIT-licensed under his copyright. This fork adds what the original does not

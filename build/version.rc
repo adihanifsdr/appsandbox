@@ -49,7 +49,7 @@ BEGIN
             VALUE "FileVersion",      ASB_STR(ASB_VERSION_STR)
             VALUE "InternalName",     ASB_STR(ASB_INTERNAL_NAME)
             VALUE "OriginalFilename", ASB_STR(ASB_ORIG_FILENAME)
-            VALUE "ProductName",      "App Sandbox"
+            VALUE "ProductName",      "Nestbox"
             VALUE "ProductVersion",   ASB_STR(ASB_VERSION_STR)
         END
     END

@@ -1,4 +1,4 @@
-/* App Sandbox - WebView2 Frontend */
+/* Nestbox - WebView2 Frontend */
 'use strict';
 
 /* ---- State ---- */
@@ -943,8 +943,8 @@ function buildRowCells(vm, i, statusTd) {
             (function(idx) { return function() { sendCmd('vncOpen', {vmIndex: idx}); }; })(i),
             vm.vncPort ? '' : 'hidden',
             vm.vncPort ? (rep === 'running'
-                ? 'Open the nested replica\'s screen in App Sandbox (VNC console on guest port ' + vm.vncPort + ', tunneled over HvSocket)'
-                : 'Open the guest\'s VNC server (port ' + vm.vncPort + ') in App Sandbox') : '');
+                ? 'Open the nested replica\'s screen in Nestbox (VNC console on guest port ' + vm.vncPort + ', tunneled over HvSocket)'
+                : 'Open the guest\'s VNC server (port ' + vm.vncPort + ') in Nestbox') : '');
     }
 
     /* VM identity editor (Linux): what the guest reports about its machine. */
@@ -1579,7 +1579,7 @@ function appendLog(msg) {
 
 function onPrereqRequired() {
     document.getElementById('prereq-message').innerHTML =
-        'App Sandbox requires the <strong>Virtual Machine Platform</strong> Windows feature to create and run VMs. This feature is not currently enabled.';
+        'Nestbox requires the <strong>Virtual Machine Platform</strong> Windows feature to create and run VMs. This feature is not currently enabled.';
     document.getElementById('prereq-buttons').innerHTML =
         '<button onclick="document.getElementById(\'prereq-overlay\').classList.remove(\'active\')">Cancel</button>' +
         '<button class="primary" onclick="enableFeature()">Enable</button>';

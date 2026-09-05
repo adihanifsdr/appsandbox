@@ -39,7 +39,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
             MessageBoxW(NULL,
                 L"AppSandbox is already running (either the app window or the "
                 L"headless service). Only one can run at a time.",
-                L"App Sandbox", MB_ICONINFORMATION | MB_OK);
+                L"Nestbox", MB_ICONINFORMATION | MB_OK);
             OleUninitialize();
             return 0;
         }
@@ -48,7 +48,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     /* Create main window */
     hwnd = ui_create_main_window(hInstance, nCmdShow);
     if (!hwnd) {
-        MessageBoxW(NULL, L"Failed to create main window.", L"App Sandbox", MB_ICONERROR);
+        MessageBoxW(NULL, L"Failed to create main window.", L"Nestbox", MB_ICONERROR);
         OleUninitialize();
         return 1;
     }
