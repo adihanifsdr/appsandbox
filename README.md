@@ -16,8 +16,10 @@ macOS support are his work and stay MIT-licensed under his copyright (see
   USB and CPUID identity follows the same profile through seven small patches against upstream
   QEMU 8.2.2 (the parameterised form of [kila58/qemu-patched](https://github.com/kila58/qemu-patched)).
   Inside a replica `systemd-detect-virt` answers `none`, even as root.
-- **Screens inside the window.** Every replica console opens in-app (noVNC over a loopback WebSocket
-  bridge), with start / stop / restart / delete on the replica's row and a `+` to add another.
+- **A window per screen.** Every replica console opens in its own Nestbox window (noVNC over a
+  loopback WebSocket bridge), so the sandbox list stays usable and several screens fit side by side.
+  The replica's row has start / stop / restart / delete, a pencil for its cores, RAM and disk, and
+  a `+` to add another replica, sized as you like.
 - **A "Nested replica" option on New Sandbox** that builds the patched QEMU, creates the first
   replica and installs its desktop in the background once the install finishes.
 - **A new interface** in a warm "signal rack" style: mono labels, status lamps, one accent, light

@@ -72,6 +72,13 @@ Hyper-V's "Microsoft Corporation / Virtual Machine"), `--disk 20G`,
 The generated libvirt XML is at `/var/lib/appsandbox/replica/replica.xml`;
 edit it and `virsh define` it to tweak anything.
 
+`resize [--cpus N] [--ram MiB] [--disk 30G] [--restart]` changes an existing
+replica: cores and RAM are redefined and apply at its next boot (right away
+with `--restart`); the disk only grows (live when the replica runs), and the
+guest's cloud-init growpart extends the root filesystem at the next boot.
+The pencil on a replica row in Nestbox does the same, and the "+" dialog
+takes the size of a new replica; `list` reports `cpus`, `ram` and `disk`.
+
 The replica's console is a VNC server on `127.0.0.1:5900` inside the sandbox
 VM, which is what the App Sandbox **VNC button** tunnels to - so the button
 shows the replica's screen. `ssh` / `checks` reach it over libvirt's NAT

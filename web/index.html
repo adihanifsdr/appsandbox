@@ -239,23 +239,8 @@
     </div>
 </div>
 
-<!-- In-app VNC viewer (noVNC): the guest's VNC server on port 5900, i.e. the
-     nested replica's screen once it exists. Opened by the screen button. -->
-<div id="vnc-overlay">
-    <div id="vnc-bar">
-        <svg class="ic"><use href="#i-nest"/></svg>
-        <span id="vnc-title">Screen</span>
-        <span id="vnc-status" class="mono"></span>
-        <span class="vnc-spacer"></span>
-        <button onclick="vncSendCad()" title="Send Ctrl+Alt+Del to the guest">Ctrl+Alt+Del</button>
-        <button onclick="vncToggleScale()" id="vnc-scale-btn" title="Fit the screen to this window or show it 1:1">Fit</button>
-        <button onclick="vncExternal()" title="Open the same screen in an installed VNC viewer (TigerVNC, RealVNC, ...)">External viewer</button>
-        <button onclick="vncReplica('replicaRestart')" id="vnc-restart-btn" title="Restart the nested replica (stop + start)">Restart replica</button>
-        <button class="danger" onclick="vncReplica('replicaStop')" id="vnc-stop-btn" title="Shut the nested replica down">Stop replica</button>
-        <button class="primary" onclick="closeVncViewer()">Close</button>
-    </div>
-    <div id="vnc-screen"></div>
-</div>
+<!-- Screens (the nested replica's console, the guest's VNC server) open in
+     their own windows: web/viewer.html, one WebView2 each. -->
 
 <!-- Confirm modal -->
 <div class="modal-overlay" id="modal-overlay">
@@ -269,6 +254,8 @@
             <label class="field-label" id="modal-input-label">Name</label>
             <input type="text" id="modal-input" autocorrect="off" autocapitalize="off" spellcheck="false">
         </div>
+        <!-- small forms (a replica's name + size): filled by showModal({fields}) -->
+        <div id="modal-fields" style="display:none;"></div>
         <div class="modal-buttons">
             <button onclick="modalResolve(false)">Cancel</button>
             <button class="danger" onclick="modalResolve(true)" id="modal-confirm-btn">Delete</button>

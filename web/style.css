@@ -383,9 +383,16 @@ label.check { font-size: 12px; color: hsl(var(--ink)); cursor: pointer; display:
 .prereq-progress-bar { height: 100%; width: 0%; background: hsl(var(--accent)); transition: width 0.3s ease; }
 .prereq-pct { margin-top: 6px; font-size: 11px; color: hsl(var(--ink-muted)); text-align: center; }
 
+/* ------------------------------------------------------ modal field grid */
+#modal-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; margin: 2px 0 4px; }
+#modal-fields .modal-field { display: flex; flex-direction: column; min-width: 0; }
+#modal-fields .modal-field-text { grid-column: 1 / -1; }
+#modal-fields .modal-field input[type="text"], #modal-fields .modal-field input[type="number"] { width: 100%; box-sizing: border-box; }
+#modal-fields .modal-field-check { grid-column: 1 / -1; flex-direction: row; align-items: center; font-size: 12px; margin-top: 2px; }
+
 /* ------------------------------------------------------------ vnc viewer */
-#vnc-overlay { display: none; position: fixed; inset: 0; z-index: 2000; background: hsl(var(--chassis)); flex-direction: column; }
-#vnc-overlay.active { display: flex; }
+/* viewer.html: its own window, the bar on top and the console below */
+body.vnc-page { display: flex; flex-direction: column; height: 100%; background: hsl(var(--chassis)); }
 #vnc-bar {
     display: flex; align-items: center; gap: 8px; padding: 6px 10px;
     background: hsl(var(--surface)); border-bottom: 1px solid hsl(var(--line));

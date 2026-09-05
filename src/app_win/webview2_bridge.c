@@ -38,6 +38,7 @@ static HMODULE g_wv2_module;
 
 static ICoreWebView2 *g_webview;
 static ICoreWebView2Controller *g_controller;
+static ICoreWebView2Environment *g_env;   /* shared by the main view and the viewer windows */
 static HWND g_parent_hwnd;
 static HINSTANCE g_hInstance;
 static BOOL g_ready;
@@ -183,6 +184,9 @@ static HRESULT STDMETHODCALLTYPE EnvH_Invoke(
         return S_OK;
     }
 
+    g_env = env;
+    env->lpVtbl->AddRef(env);
+
     ch = (CtrlHandler *)calloc(1, sizeof(CtrlHandler));
     if (!ch) return E_OUTOFMEMORY;
     ch->lpVtbl = &g_ctrlVtbl;
@@ -201,10 +205,7 @@ static HRESULT STDMETHODCALLTYPE CtrlH_Invoke(
     ICoreWebView2Settings *settings = NULL;
     MsgHandler *mh;
     EventRegistrationToken token;
-    wchar_t html_path[MAX_PATH];
     wchar_t url[MAX_PATH + 16];
-    wchar_t exe_dir[MAX_PATH];
-    wchar_t *slash;
     (void)This;
 
     if (FAILED(errorCode) || !controller) {
@@ -244,36 +245,234 @@ static HRESULT STDMETHODCALLTYPE CtrlH_Invoke(
     webview2_resize(g_parent_hwnd);
 
     /* Navigate to local HTML */
-    GetModuleFileNameW(NULL, exe_dir, MAX_PATH);
-    slash = wcsrchr(exe_dir, L'\\');
-    if (slash) *slash = L'\0';
-    swprintf_s(html_path, MAX_PATH, L"%s\\web\\index.html", exe_dir);
-
-    /* Check if file exists, fall back to source tree path for dev */
-    if (GetFileAttributesW(html_path) == INVALID_FILE_ATTRIBUTES) {
-        /* Try project directory (for development) */
-        wchar_t proj_path[MAX_PATH];
-        swprintf_s(proj_path, MAX_PATH, L"%s\\..\\web\\index.html", exe_dir);
-        if (GetFileAttributesW(proj_path) != INVALID_FILE_ATTRIBUTES) {
-            wcscpy_s(html_path, MAX_PATH, proj_path);
-        }
-    }
-
-    swprintf_s(url, MAX_PATH + 16, L"file:///%s", html_path);
-    /* Convert backslashes to forward slashes for file URL */
-    {
-        wchar_t *p;
-        for (p = url + 8; *p; p++) {
-            if (*p == L'\\') *p = L'/';
-        }
-    }
-
+    if (!webview2_web_url(L"index.html", url, ARRAYSIZE(url)))
+        ui_log(L"WebView2: web\\index.html not found next to the app.");
     webview->lpVtbl->Navigate(webview, url);
 
     g_ready = TRUE;
 
     ui_log(L"WebView2: Ready");
     return S_OK;
+}
+
+BOOL webview2_web_url(const wchar_t *page, wchar_t *url, size_t cap)
+{
+    wchar_t exe_dir[MAX_PATH], path[MAX_PATH], file[MAX_PATH];
+    const wchar_t *query = L"";
+    wchar_t *slash, *q, *p;
+    int n;
+
+    if (!page || !url || cap < 16) return FALSE;
+    wcscpy_s(file, MAX_PATH, page);
+    q = wcschr(file, L'?');
+    if (q) { *q = L'\0'; query = page + (q - file); }
+
+    GetModuleFileNameW(NULL, exe_dir, MAX_PATH);
+    slash = wcsrchr(exe_dir, L'\\');
+    if (slash) *slash = L'\0';
+    swprintf_s(path, MAX_PATH, L"%s\\web\\%s", exe_dir, file);
+    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
+        /* dev tree: bin\Release\..\web */
+        swprintf_s(path, MAX_PATH, L"%s\\..\\web\\%s", exe_dir, file);
+        if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) return FALSE;
+    }
+    n = swprintf_s(url, cap, L"file:///%s%s", path, query);
+    if (n < 0) return FALSE;
+    /* forward slashes in the path part only; the query is left alone */
+    for (p = url + 8; *p && *p != L'?'; p++)
+        if (*p == L'\\') *p = L'/';
+    return TRUE;
+}
+
+/* ---- Secondary views: the viewer windows ----
+   Each has its own controller + WebView2 inside a window ui.c owns. The
+   handlers carry the view pointer; `closed` covers a window destroyed
+   before its (asynchronous) controller arrived. */
+
+typedef struct {
+    ICoreWebView2WebMessageReceivedEventHandlerVtbl *lpVtbl;
+    LONG ref;
+    WebView2View *view;
+} ViewMsgHandler;
+
+typedef struct {
+    ICoreWebView2CreateCoreWebView2ControllerCompletedHandlerVtbl *lpVtbl;
+    LONG ref;
+    WebView2View *view;
+} ViewCtrlHandler;
+
+struct WebView2View {
+    HWND                     host;
+    ICoreWebView2Controller *controller;
+    ICoreWebView2           *webview;
+    ViewMsgHandler          *mh;
+    wchar_t                 *url;
+    BOOL                     closed;
+};
+
+static void view_free(WebView2View *v)
+{
+    if (!v) return;
+    free(v->url);
+    free(v);
+}
+
+static HRESULT STDMETHODCALLTYPE ViewMsgH_QI(ICoreWebView2WebMessageReceivedEventHandler *This, REFIID riid, void **ppv) {
+    if (IsEqualIID(riid, &IID_IUnknown) ||
+        IsEqualIID(riid, &IID_ICoreWebView2WebMessageReceivedEventHandler)) {
+        *ppv = This;
+        This->lpVtbl->AddRef(This);
+        return S_OK;
+    }
+    *ppv = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE ViewMsgH_AddRef(ICoreWebView2WebMessageReceivedEventHandler *This) {
+    return InterlockedIncrement(&((ViewMsgHandler *)This)->ref);
+}
+static ULONG STDMETHODCALLTYPE ViewMsgH_Release(ICoreWebView2WebMessageReceivedEventHandler *This) {
+    LONG r = InterlockedDecrement(&((ViewMsgHandler *)This)->ref);
+    if (r == 0) free(This);
+    return r;
+}
+static HRESULT STDMETHODCALLTYPE ViewMsgH_Invoke(
+    ICoreWebView2WebMessageReceivedEventHandler *This,
+    ICoreWebView2 *sender, ICoreWebView2WebMessageReceivedEventArgs *args)
+{
+    WebView2View *v = ((ViewMsgHandler *)This)->view;
+    LPWSTR json = NULL;
+    (void)sender;
+
+    if (SUCCEEDED(args->lpVtbl->get_WebMessageAsJson(args, &json)) && json) {
+        wchar_t action[64] = { 0 };
+        if (json_get_string(json, L"action", action, 64) && wcscmp(action, L"viewerClose") == 0) {
+            if (v && v->host) PostMessageW(v->host, WM_CLOSE, 0, 0);
+        } else if (g_message_callback) {
+            g_message_callback(json);
+        }
+        CoTaskMemFree(json);
+    }
+    return S_OK;
+}
+static ICoreWebView2WebMessageReceivedEventHandlerVtbl g_viewMsgVtbl = {
+    ViewMsgH_QI, ViewMsgH_AddRef, ViewMsgH_Release, ViewMsgH_Invoke
+};
+
+static HRESULT STDMETHODCALLTYPE ViewCtrlH_QI(ICoreWebView2CreateCoreWebView2ControllerCompletedHandler *This, REFIID riid, void **ppv) {
+    if (IsEqualIID(riid, &IID_IUnknown) ||
+        IsEqualIID(riid, &IID_ICoreWebView2CreateCoreWebView2ControllerCompletedHandler)) {
+        *ppv = This;
+        This->lpVtbl->AddRef(This);
+        return S_OK;
+    }
+    *ppv = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE ViewCtrlH_AddRef(ICoreWebView2CreateCoreWebView2ControllerCompletedHandler *This) {
+    return InterlockedIncrement(&((ViewCtrlHandler *)This)->ref);
+}
+static ULONG STDMETHODCALLTYPE ViewCtrlH_Release(ICoreWebView2CreateCoreWebView2ControllerCompletedHandler *This) {
+    LONG r = InterlockedDecrement(&((ViewCtrlHandler *)This)->ref);
+    if (r == 0) free(This);
+    return r;
+}
+static HRESULT STDMETHODCALLTYPE ViewCtrlH_Invoke(
+    ICoreWebView2CreateCoreWebView2ControllerCompletedHandler *This,
+    HRESULT errorCode, ICoreWebView2Controller *controller)
+{
+    WebView2View *v = ((ViewCtrlHandler *)This)->view;
+    ICoreWebView2 *webview = NULL;
+    ICoreWebView2Settings *settings = NULL;
+    EventRegistrationToken token;
+
+    if (FAILED(errorCode) || !controller) {
+        ui_log(L"WebView2: viewer controller creation failed (0x%08X)", errorCode);
+        if (v && v->closed) view_free(v);
+        return S_OK;
+    }
+    if (!v || v->closed) {   /* the window went away while the controller was being created */
+        controller->lpVtbl->Close(controller);
+        view_free(v);
+        return S_OK;
+    }
+
+    v->controller = controller;
+    controller->lpVtbl->AddRef(controller);
+    controller->lpVtbl->get_CoreWebView2(controller, &webview);
+    if (!webview) {
+        ui_log(L"WebView2: viewer CoreWebView2 unavailable");
+        return S_OK;
+    }
+    v->webview = webview;
+
+    if (SUCCEEDED(webview->lpVtbl->get_Settings(webview, &settings)) && settings) {
+        settings->lpVtbl->put_AreDevToolsEnabled(settings, FALSE);
+        settings->lpVtbl->put_IsStatusBarEnabled(settings, FALSE);
+        settings->lpVtbl->put_AreDefaultContextMenusEnabled(settings, FALSE);
+        settings->lpVtbl->Release(settings);
+    }
+
+    v->mh = (ViewMsgHandler *)calloc(1, sizeof(ViewMsgHandler));
+    if (v->mh) {
+        v->mh->lpVtbl = &g_viewMsgVtbl;
+        v->mh->ref = 1;
+        v->mh->view = v;
+        webview->lpVtbl->add_WebMessageReceived(webview,
+            (ICoreWebView2WebMessageReceivedEventHandler *)v->mh, &token);
+    }
+
+    webview2_view_resize(v);
+    webview->lpVtbl->Navigate(webview, v->url);
+    return S_OK;
+}
+static ICoreWebView2CreateCoreWebView2ControllerCompletedHandlerVtbl g_viewCtrlVtbl = {
+    ViewCtrlH_QI, ViewCtrlH_AddRef, ViewCtrlH_Release, ViewCtrlH_Invoke
+};
+
+WebView2View *webview2_view_create(HWND host, const wchar_t *url)
+{
+    WebView2View *v;
+    ViewCtrlHandler *ch;
+
+    if (!g_env || !host || !url) return NULL;
+    v = (WebView2View *)calloc(1, sizeof(WebView2View));
+    if (!v) return NULL;
+    v->host = host;
+    v->url = _wcsdup(url);
+    ch = (ViewCtrlHandler *)calloc(1, sizeof(ViewCtrlHandler));
+    if (!v->url || !ch) { free(ch); view_free(v); return NULL; }
+    ch->lpVtbl = &g_viewCtrlVtbl;
+    ch->ref = 1;
+    ch->view = v;
+    if (FAILED(g_env->lpVtbl->CreateCoreWebView2Controller(g_env, host,
+            (ICoreWebView2CreateCoreWebView2ControllerCompletedHandler *)ch))) {
+        free(ch);
+        view_free(v);
+        return NULL;
+    }
+    return v;
+}
+
+void webview2_view_resize(WebView2View *v)
+{
+    RECT rc;
+    if (!v || !v->controller) return;
+    GetClientRect(v->host, &rc);
+    v->controller->lpVtbl->put_Bounds(v->controller, rc);
+}
+
+void webview2_view_destroy(WebView2View *v)
+{
+    if (!v) return;
+    if (!v->controller) {   /* still being created: the controller callback frees it */
+        v->closed = TRUE;
+        return;
+    }
+    if (v->mh) v->mh->view = NULL;
+    v->controller->lpVtbl->Close(v->controller);
+    v->controller->lpVtbl->Release(v->controller);
+    if (v->webview) v->webview->lpVtbl->Release(v->webview);
+    view_free(v);
 }
 
 /* ---- Public API ---- */

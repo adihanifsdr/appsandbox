@@ -166,7 +166,6 @@ window.onHostMessage = function(msg) {
         case 'adapters':      populateAdapters(msg.adapters, msg.defaultIndex); break;
         case 'templates':     populateTemplates(msg.templates); break;
         case 'identity':      openIdentityModal(msg.vmIndex, msg.vmIdentity); break;
-        case 'vncReady':      openVncViewer(msg); break;
         case 'alert':         showModal('Error', msg.message, 'OK'); break;
         case 'prereqRequired': onPrereqRequired(); break;
         case 'prereqReboot':   onPrereqReboot(); break;
@@ -483,71 +482,11 @@ function gatherConfig() {
     };
 }
 
-/* ---- In-app VNC viewer (noVNC) ----
-   The host answers vncOpen with vncReady {wsPort}: a loopback WebSocket
-   bridge onto the VNC tunnel (guest port 5900 - the nested replica's console
-   once appsandbox-replica created it). window.NoVNC is the RFB class,
-   bundled in novnc.js (loads asynchronously, hence the promise). */
-var vncRfb = null, vncVmIndex = -1, vncScaled = true, vncReplicaName = '';
-
-function openVncViewer(msg) {
-    var overlay = document.getElementById('vnc-overlay');
-    var screen = document.getElementById('vnc-screen');
-    closeVncViewer();
-    vncVmIndex = msg.vmIndex;
-    var nested = !!msg.name || (vms[msg.vmIndex] && vms[msg.vmIndex].replica === 'running');
-    vncReplicaName = msg.name || 'replica';
-    document.getElementById('vnc-title').textContent = nested
-        ? (msg.vmName || '') + ' / ' + vncReplicaName
-        : (msg.vmName || '') + ' (guest VNC :' + (msg.guestPort || 5900) + ')';
-    document.getElementById('vnc-stop-btn').style.display = nested ? '' : 'none';
-    document.getElementById('vnc-restart-btn').style.display = nested ? '' : 'none';
-    document.getElementById('vnc-status').textContent = 'connecting\u2026';
-    overlay.classList.add('active');
-    window.NoVNC.then(function(RFB) {
-        if (vncVmIndex !== msg.vmIndex) return;   /* closed meanwhile */
-        var rfb = new RFB(screen, 'ws://127.0.0.1:' + msg.wsPort, { wsProtocols: ['binary'] });
-        rfb.scaleViewport = vncScaled;
-        rfb.resizeSession = false;
-        rfb.background = '#000';
-        rfb.addEventListener('connect', function() { document.getElementById('vnc-status').textContent = 'connected'; rfb.focus(); });
-        rfb.addEventListener('disconnect', function(e) {
-            var clean = e && e.detail && e.detail.clean;
-            document.getElementById('vnc-status').textContent = clean ? 'disconnected' : 'connection lost (is the replica running?)';
-        });
-        rfb.addEventListener('credentialsrequired', function() {
-            var pw = prompt('VNC password');
-            rfb.sendCredentials({ password: pw || '' });
-        });
-        vncRfb = rfb;
-    }).catch(function(e) {
-        document.getElementById('vnc-status').textContent = 'viewer failed to load: ' + e;
-    });
-}
-
-function closeVncViewer() {
-    if (vncRfb) { try { vncRfb.disconnect(); } catch (e) {} vncRfb = null; }
-    vncVmIndex = -1;
-    document.getElementById('vnc-overlay').classList.remove('active');
-    document.getElementById('vnc-screen').innerHTML = '';
-}
-
-function vncSendCad() { if (vncRfb) vncRfb.sendCtrlAltDel(); }
-function vncToggleScale() {
-    vncScaled = !vncScaled;
-    if (vncRfb) vncRfb.scaleViewport = vncScaled;
-    document.getElementById('vnc-scale-btn').textContent = vncScaled ? 'Fit' : '1:1';
-}
-function vncExternal() { if (vncVmIndex >= 0) sendCmd('vncConnect', { vmIndex: vncVmIndex }); }
-function vncReplica(action) {
-    if (vncVmIndex < 0) return;
-    var idx = vncVmIndex;
-    sendCmd(action, { vmIndex: idx, name: vncReplicaName });
-    closeVncViewer();
-}
-document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape' && document.getElementById('vnc-overlay').classList.contains('active') && !vncRfb) closeVncViewer();
-});
+/* ---- Screens ----
+   vncOpen makes the host open a window of its own (web/viewer.html on a
+   separate WebView2) on a loopback WebSocket bridge onto the VNC tunnel -
+   the nested replica's console, or the guest's VNC server on port 5900.
+   Nothing comes back to this page. */
 
 /* ---- VM identity editor (per-VM modal) ---- */
 var identityVmIndex = -1;
@@ -931,9 +870,9 @@ function buildRowCells(vm, i, statusTd) {
 
     /* Nested replica column. The agent reports the replica's state (none /
        stopped / running) and whether a VNC server listens on guest port 5900
-       (the replica's console). stopped -> a start button; running -> the
-       in-app screen once the console is up; a foreign VNC server (x11vnc,
-       docker) shows as a plain screen too. */
+       (the replica's console). stopped -> a start button; running -> its
+       screen (a window of its own) once the console is up; a foreign VNC
+       server (x11vnc, docker) shows as a plain screen too. */
     var rep = vm.replica || '';
     var reps = parseReplicas(vm.replicas);
     var vncCell;
@@ -944,7 +883,7 @@ function buildRowCells(vm, i, statusTd) {
     } else if (rep === 'stopped' && vm.running && !bld) {
         vncCell = makeIconCell('vnc', '\u25B6\uFE0F', vm.agentOnline,
             (function(idx) { return function() { sendCmd('replicaStart', {vmIndex: idx}); }; })(i), '',
-            'Start the nested replica (sudo appsandbox-replica start); its screen opens here once it is up');
+            'Start the nested replica (sudo appsandbox-replica start); its screen can be opened once it is up');
     } else if (rep === 'running' && !vm.vncPort && vm.running && !bld) {
         vncCell = makeIconCell('vnc', '\u23F3', false, null, '', 'Nested replica is starting - waiting for its console');
     } else {
@@ -953,8 +892,8 @@ function buildRowCells(vm, i, statusTd) {
             (function(idx) { return function() { sendCmd('vncOpen', {vmIndex: idx}); }; })(i),
             vm.vncPort ? '' : 'hidden',
             vm.vncPort ? (rep === 'running'
-                ? 'Open the nested replica\'s screen in Nestbox (VNC console on guest port ' + vm.vncPort + ', tunneled over HvSocket)'
-                : 'Open the guest\'s VNC server (port ' + vm.vncPort + ') in Nestbox') : '');
+                ? 'Open the nested replica\'s screen in its own window (VNC console on guest port ' + vm.vncPort + ', tunneled over HvSocket)'
+                : 'Open the guest\'s VNC server (port ' + vm.vncPort + ') in its own window') : '');
     }
 
     /* VM identity editor (Linux): what the guest reports about its machine. */
@@ -1157,6 +1096,7 @@ function buildReplicaRows(grp, vm, idx) {
         td.querySelector('.replica-name').textContent = r.name;
         td.querySelector('.replica-state').textContent =
             (running ? 'running' : (r.state || 'stopped')) +
+            (r.cpus ? '   ' + r.cpus + ' cpu' : '') + (r.ram ? '   ' + r.ram + ' MB' : '') + (r.disk ? '   ' + r.disk + ' GB' : '') +
             (r.vnc ? '   vnc :' + r.vnc : '') + (r.desktop ? '   xfce + steam' : '');
         tr.appendChild(td);
         var name = r.name;
@@ -1164,8 +1104,9 @@ function buildReplicaRows(grp, vm, idx) {
             makeIconCell('start', '\u25B6\uFE0F', !running,
                 function() { sendCmd('replicaStart', {vmIndex: idx, name: name}); }, '', 'Start replica "' + name + '"'),
             makeIconCell('connect-idd', '\uD83D\uDDA5\uFE0F', running && !!r.vnc,
-                function() { sendCmd('vncOpen', {vmIndex: idx, port: r.vnc, name: name}); }, '', 'Open the screen of replica "' + name + '" in Nestbox'),
-            blankIconCell(),
+                function() { sendCmd('vncOpen', {vmIndex: idx, port: r.vnc, name: name}); }, '', 'Open the screen of replica "' + name + '" in its own window'),
+            makeIconCell('edit', 'edit', true,
+                function() { resizeReplica(idx, r); }, '', 'Cores, RAM and disk of replica "' + name + '"'),
             makeIconCell('vnc', 'desktop', running && !r.desktop,
                 function() { confirmReplica(idx, name, 'replicaDesktop', 'Install XFCE + Steam in "' + name + '"? Takes 10-20 minutes and restarts the replica.', 'Install'); },
                 r.desktop ? 'hidden' : '', 'Install XFCE + Steam (autologin) in this replica'),
@@ -1190,23 +1131,63 @@ function confirmReplica(idx, name, action, message, label) {
     });
 }
 
-/* "+" in the nested column: name a new replica; the agent then installs the
-   packages, builds the identity-patched QEMU (first time only), creates the
-   replica and installs XFCE + Steam, all in the background. */
+/* What a replica may be given: the sandbox's cores, and its RAM minus what
+   the sandbox itself needs to stay comfortable. */
+function replicaLimits(vm) {
+    var cores = (vm && vm.cpuCores) || 8;
+    var ram = (vm && vm.ramMb) || 8192;
+    return { cores: cores, ram: Math.max(1024, ram - 2048), vmRam: ram };
+}
+
+/* "+" in the nested column: name and size a new replica; the agent then
+   installs the packages, builds the identity-patched QEMU (first time only),
+   creates the replica and installs XFCE + Steam, all in the background. */
 function addReplica(idx) {
     var existing = parseReplicas(vms[idx] && vms[idx].replicas).map(function(r) { return r.name; });
     var def = existing.indexOf('replica') < 0 ? 'replica' : 'replica' + (existing.length + 1);
+    var lim = replicaLimits(vms[idx]);
     showModal('New nested replica',
         'A replica is a KVM guest inside this sandbox with the bare-metal identity from the profile. ' +
         'Nestbox builds the patched QEMU (first time, ~10 min), creates the replica and installs XFCE + Steam (10-20 min). ' +
-        'Progress shows in the log; the row appears once it boots.',
-        'Create', { confirmClass: 'primary', input: { label: 'Name (letters, digits, - _ .)', value: def } })
-    .then(function(name) {
-        if (!name) return;
-        name = String(name).trim().replace(/[^A-Za-z0-9._-]/g, '-');
+        'Progress shows in the log; the row appears once it boots. Its size can be changed later from the row.',
+        'Create', { confirmClass: 'primary', fields: [
+            { key: 'name', label: 'Name (letters, digits, - _ .)', type: 'text', value: def },
+            { key: 'cpus', label: 'Cores (sandbox: ' + lim.cores + ')', type: 'number', value: Math.min(4, lim.cores), min: 1, max: lim.cores },
+            { key: 'ram', label: 'RAM in MB (sandbox: ' + lim.vmRam + ')', type: 'number', value: Math.min(4096, lim.ram), min: 512, max: lim.ram, step: 256 },
+            { key: 'disk', label: 'Disk in GB', type: 'number', value: 20, min: 5, max: 2048 }
+        ] })
+    .then(function(f) {
+        if (!f) return;
+        var name = String(f.name || '').trim().replace(/[^A-Za-z0-9._-]/g, '-');
         if (!name) return;
         if (existing.indexOf(name) >= 0) { showModal('Nested replica', 'A replica named "' + name + '" already exists.', 'OK', { confirmClass: 'primary' }); return; }
-        sendCmd('replicaSetup', {vmIndex: idx, name: name});
+        var cpus = parseInt(f.cpus, 10) || 4, ram = parseInt(f.ram, 10) || 4096, disk = parseInt(f.disk, 10) || 20;
+        sendCmd('replicaSetup', {vmIndex: idx, name: name, cpus: cpus, ram: ram, disk: disk});
+    });
+}
+
+/* Pencil on a replica row: cores, RAM and disk. Cores and RAM are redefined
+   in libvirt and apply when the replica next boots (now, with the restart
+   box). The disk can only grow; cloud-init's growpart extends the root
+   filesystem at the next boot. */
+function resizeReplica(idx, r) {
+    var lim = replicaLimits(vms[idx]);
+    var running = r.state === 'running';
+    showModal('Replica "' + r.name + '": resources',
+        'Limited by the sandbox (' + lim.cores + ' cores, ' + lim.vmRam + ' MB). Cores and RAM apply when the replica next boots; ' +
+        'the disk can only grow, and the root filesystem extends itself at the next boot.',
+        'Apply', { confirmClass: 'primary', fields: [
+            { key: 'cpus', label: 'Cores', type: 'number', value: r.cpus || 4, min: 1, max: lim.cores },
+            { key: 'ram', label: 'RAM in MB', type: 'number', value: r.ram || 4096, min: 512, max: lim.ram, step: 256 },
+            { key: 'disk', label: 'Disk in GB', type: 'number', value: r.disk || 20, min: r.disk || 1, max: 2048 },
+            { key: 'restart', label: running ? 'Restart the replica now to apply' : 'Start the replica afterwards', type: 'checkbox', value: running }
+        ] })
+    .then(function(f) {
+        if (!f) return;
+        var cpus = parseInt(f.cpus, 10), ram = parseInt(f.ram, 10), disk = parseInt(f.disk, 10);
+        if (!(cpus >= 1) || !(ram >= 256) || !(disk >= 1)) return;
+        if (r.disk && disk < r.disk) { showModal('Nested replica', 'The disk can only grow (it is ' + r.disk + ' GB now).', 'OK', { confirmClass: 'primary' }); return; }
+        sendCmd('replicaResize', {vmIndex: idx, name: r.name, cpus: cpus, ram: ram, disk: disk, restart: !!f.restart});
     });
 }
 
@@ -1766,17 +1747,62 @@ function showModal(title, message, confirmText, opts) {
     } else {
         inputRow.style.display = 'none';
     }
+    /* fields: [{key, label, type: text|number|checkbox, value, min, max, step}]
+       - a small form; the promise then resolves to {key: value} (or false). */
+    var fieldsEl = document.getElementById('modal-fields');
+    fieldsEl.innerHTML = '';
+    if (opts && opts.fields) {
+        opts.fields.forEach(function(f) {
+            var row = document.createElement('label');
+            var input = document.createElement('input');
+            input.type = f.type || 'text';
+            input.dataset.key = f.key;
+            if (f.type === 'checkbox') {
+                row.className = 'check modal-field modal-field-check';
+                input.checked = !!f.value;
+                row.appendChild(input);
+                row.appendChild(document.createTextNode(' ' + f.label));
+            } else {
+                row.className = 'modal-field' + (f.type === 'text' || !f.type ? ' modal-field-text' : '');
+                var lab = document.createElement('span');
+                lab.className = 'field-label';
+                lab.textContent = f.label;
+                input.value = f.value == null ? '' : f.value;
+                if (f.min != null) input.min = f.min;
+                if (f.max != null) input.max = f.max;
+                if (f.step) input.step = f.step;
+                input.spellcheck = false;
+                input.onkeydown = function(e) { if (e.key === 'Enter') modalResolve(true); };
+                row.appendChild(lab);
+                row.appendChild(input);
+            }
+            fieldsEl.appendChild(row);
+        });
+        fieldsEl.style.display = '';
+        setTimeout(function() {
+            var first = fieldsEl.querySelector('input');
+            if (first) { first.focus(); if (first.type === 'text') first.select(); }
+        }, 50);
+    } else {
+        fieldsEl.style.display = 'none';
+    }
     document.getElementById('modal-overlay').classList.add('active');
 
     return new Promise(function(resolve) {
-        pendingConfirm = { resolve: resolve, hasInput: !!(opts && opts.input) };
+        pendingConfirm = { resolve: resolve, hasInput: !!(opts && opts.input), hasFields: !!(opts && opts.fields) };
     });
 }
 
 function modalResolve(result) {
     document.getElementById('modal-overlay').classList.remove('active');
     if (pendingConfirm) {
-        if (result && pendingConfirm.hasInput) {
+        if (result && pendingConfirm.hasFields) {
+            var values = {};
+            document.querySelectorAll('#modal-fields input').forEach(function(el) {
+                values[el.dataset.key] = el.type === 'checkbox' ? el.checked : el.value;
+            });
+            pendingConfirm.resolve(values);
+        } else if (result && pendingConfirm.hasInput) {
             pendingConfirm.resolve(document.getElementById('modal-input').value);
         } else {
             pendingConfirm.resolve(result);

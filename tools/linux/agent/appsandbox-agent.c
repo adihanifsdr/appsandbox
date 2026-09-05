@@ -506,25 +506,42 @@ static void send_replica_state(int fd)
     send_line(fd, buf);
 }
 
-/* "replica [<name>] <sub>": start | stop | restart | destroy run synchronously
- * and answer replica_result:<name>:<sub>:ok|failed followed by the fresh
- * list; create | desktop | setup take minutes, so they run detached with a
- * log in /var/log/appsandbox-replica-<name>.log and answer ...:started - the
- * heartbeat shows the replica appearing / booting. "setup" is the whole
- * first-time path (packages, patched QEMU, create, XFCE + Steam) and is a
- * no-op when that replica already exists. Without a name: "replica". */
+/* "replica [<name>] <sub> [key=value ...]": start | stop | restart | destroy
+ * run synchronously and answer replica_result:<name>:<sub>:ok|failed followed
+ * by the fresh list; create | desktop | setup take minutes, so they run
+ * detached with a log in /var/log/appsandbox-replica-<name>.log and answer
+ * ...:started - the heartbeat shows the replica appearing / booting. "setup"
+ * is the whole first-time path (packages, patched QEMU, create, XFCE + Steam)
+ * and is a no-op when that replica already exists. Without a name: "replica".
+ *
+ * Sizing words: cpus=N ram=<MB> disk=<GB> (create / setup take them as the
+ * new replica's size; "resize" changes an existing one, plus restart=1 to
+ * restart it right away so the size applies). Values are digits only - they
+ * end up on a command line. */
 static void handle_replica(int fd, const char *args)
 {
-    char name[64] = "replica", sub[16] = "", cmd[640], msg[160];
+    char name[64] = "replica", sub[16] = "", cmd[1024], msg[160], sizing[96] = "";
+    char opt_cpus[8] = "", opt_ram[8] = "", opt_disk[8] = "";
+    int restart = 0;
     const char *sp = strchr(args, ' ');
+    const char *rest = NULL;
     const char *tool = "/usr/local/sbin/appsandbox-replica";
     int rc, i;
 
     if (sp) {
         size_t nl = (size_t)(sp - args);
+        const char *sp2;
         if (nl == 0 || nl >= sizeof(name)) { send_line(fd, "replica_result:?:?:failed"); return; }
         memcpy(name, args, nl); name[nl] = '\0';
-        snprintf(sub, sizeof(sub), "%s", sp + 1);
+        sp2 = strchr(sp + 1, ' ');
+        if (sp2) {
+            size_t sl = (size_t)(sp2 - (sp + 1));
+            if (sl == 0 || sl >= sizeof(sub)) { send_line(fd, "replica_result:?:?:failed"); return; }
+            memcpy(sub, sp + 1, sl); sub[sl] = '\0';
+            rest = sp2 + 1;
+        } else {
+            snprintf(sub, sizeof(sub), "%s", sp + 1);
+        }
     } else {
         snprintf(sub, sizeof(sub), "%s", args);
     }
@@ -532,6 +549,32 @@ static void handle_replica(int fd, const char *args)
         if (!isalnum((unsigned char)name[i]) && name[i] != '-' && name[i] != '_' && name[i] != '.') {
             send_line(fd, "replica_result:?:?:failed"); return;
         }
+    for (i = 0; sub[i]; i++)
+        if (!islower((unsigned char)sub[i])) { send_line(fd, "replica_result:?:?:failed"); return; }
+    while (rest && *rest) {
+        const char *eq, *end;
+        while (*rest == ' ') rest++;
+        if (!*rest) break;
+        end = strchr(rest, ' ');
+        if (!end) end = rest + strlen(rest);
+        eq = memchr(rest, '=', (size_t)(end - rest));
+        if (eq) {
+            size_t kl = (size_t)(eq - rest), vl = (size_t)(end - eq - 1), k;
+            char *dst = NULL;
+            int digits = vl > 0 && vl < 8;
+            for (k = 0; digits && k < vl; k++)
+                if (!isdigit((unsigned char)eq[1 + k])) digits = 0;
+            if (kl == 4 && memcmp(rest, "cpus", 4) == 0) dst = opt_cpus;
+            else if (kl == 3 && memcmp(rest, "ram", 3) == 0) dst = opt_ram;
+            else if (kl == 4 && memcmp(rest, "disk", 4) == 0) dst = opt_disk;
+            else if (kl == 7 && memcmp(rest, "restart", 7) == 0 && digits) restart = atoi(eq + 1) != 0;
+            if (dst && digits) { memcpy(dst, eq + 1, vl); dst[vl] = '\0'; }
+        }
+        rest = end;
+    }
+    if (opt_cpus[0]) snprintf(sizing + strlen(sizing), sizeof(sizing) - strlen(sizing), " --cpus %s", opt_cpus);
+    if (opt_ram[0])  snprintf(sizing + strlen(sizing), sizeof(sizing) - strlen(sizing), " --ram %s", opt_ram);
+    if (opt_disk[0]) snprintf(sizing + strlen(sizing), sizeof(sizing) - strlen(sizing), " --disk %sG", opt_disk);
     if (!replica_tool_present()) {
         snprintf(msg, sizeof(msg), "replica_result:%s:%s:failed", name, sub);
         send_line(fd, msg);
@@ -544,20 +587,38 @@ static void handle_replica(int fd, const char *args)
                 "nohup sh -c '[ -f /var/lib/appsandbox/replica/replicas/%s/replica.conf ] && exit 0; "
                 "[ \"%s\" = replica ] && [ -f /var/lib/appsandbox/replica/replica.conf ] && exit 0; "
                 "%s install && { [ -f /opt/appsandbox/qemu-identity.installed ] || %s qemu build; } && "
-                "%s -n %s create && %s -n %s desktop' >/var/log/appsandbox-replica-%s.log 2>&1 </dev/null &",
-                name, name, tool, tool, tool, name, tool, name, name);
+                "%s -n %s create%s && %s -n %s desktop' >/var/log/appsandbox-replica-%s.log 2>&1 </dev/null &",
+                name, name, tool, tool, tool, name, sizing, tool, name, name);
         else if (strcmp(sub, "create") == 0)
             snprintf(cmd, sizeof(cmd),
-                "nohup sh -c '%s install && %s -n %s create' >/var/log/appsandbox-replica-%s.log 2>&1 </dev/null &",
-                tool, tool, name, name);
+                "nohup sh -c '%s install && %s -n %s create%s' >/var/log/appsandbox-replica-%s.log 2>&1 </dev/null &",
+                tool, tool, name, sizing, name);
         else
             snprintf(cmd, sizeof(cmd),
                 "nohup %s -n %s desktop >/var/log/appsandbox-replica-%s.log 2>&1 </dev/null &",
                 tool, name, name);
         rc = run_sync(cmd);
-        agent_log("replica %s %s: launched rc=%d", name, sub, rc);
+        agent_log("replica %s %s%s: launched rc=%d", name, sub, sizing, rc);
         snprintf(msg, sizeof(msg), "replica_result:%s:%s:%s", name, sub, rc == 0 ? "started" : "failed");
         send_line(fd, msg);
+        return;
+    }
+    if (strcmp(sub, "resize") == 0) {
+        /* cores / RAM redefine the domain (next boot, or now with restart=1);
+         * the disk grows in place. Quick, so it runs here; its output goes
+         * to the replica's log for the curious. */
+        if (!sizing[0]) {
+            snprintf(msg, sizeof(msg), "replica_result:%s:%s:failed", name, sub);
+            send_line(fd, msg);
+            return;
+        }
+        snprintf(cmd, sizeof(cmd), "%s -n %s resize%s%s >>/var/log/appsandbox-replica-%s.log 2>&1",
+                 tool, name, sizing, restart ? " --restart" : "", name);
+        rc = run_sync(cmd);
+        agent_log("replica %s resize%s%s: rc=%d", name, sizing, restart ? " --restart" : "", rc);
+        snprintf(msg, sizeof(msg), "replica_result:%s:%s:%s", name, sub, rc == 0 ? "ok" : "failed");
+        send_line(fd, msg);
+        send_replica_state(fd);
         return;
     }
     if (strcmp(sub, "start") != 0 && strcmp(sub, "stop") != 0 && strcmp(sub, "restart") != 0 &&

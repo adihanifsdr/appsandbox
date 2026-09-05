@@ -27,6 +27,21 @@ BOOL webview2_is_ready(void);
 typedef void (*WebView2MessageCallback)(const wchar_t *json);
 void webview2_set_message_callback(WebView2MessageCallback cb);
 
+/* ---- Secondary views: one WebView2 per viewer window ----
+   webview2_view_create() puts a WebView2 into `host` (any window) and
+   navigates it to `url`; the controller arrives asynchronously. What the
+   page posts reaches the same callback as the main view, except
+   {"action":"viewerClose"}, which closes `host`. Returns NULL until the
+   shared environment is up. */
+typedef struct WebView2View WebView2View;
+WebView2View *webview2_view_create(HWND host, const wchar_t *url);
+void webview2_view_resize(WebView2View *v);
+void webview2_view_destroy(WebView2View *v);
+
+/* file:/// URL of a page in web\ (next to the exe, or ..\web in a dev
+   tree); `page` may carry a query string. FALSE when the file is missing. */
+BOOL webview2_web_url(const wchar_t *page, wchar_t *url, size_t cap);
+
 /* ---- JSON builder helpers ---- */
 
 typedef struct {

@@ -19,9 +19,10 @@
 #                                   [--profile /etc/appsandbox/identity.json]
 #                                   [--image URL] [--video cirrus|virtio]
 #         appsandbox-replica reidentify [--restart] [--profile FILE] [--all]
+#         appsandbox-replica resize [--cpus 4] [--ram 4096] [--disk 30G] [--restart]
 #         appsandbox-replica qemu build|restore|status
 #         appsandbox-replica desktop [--no-steam]     # XFCE + Steam + autologin, virtio video
-#         appsandbox-replica list                     # every replica as JSON [{name,state,vnc,desktop}]
+#         appsandbox-replica list                     # every replica as JSON [{name,state,vnc,desktop,cpus,ram,disk}]
 #         appsandbox-replica start|stop|destroy|status|ip|ssh [cmd]|console|xml|checks
 #
 # One sandbox VM can hold several replicas: each has a name (-n), its own
@@ -241,26 +242,133 @@ hv_note() {
 
 DESKTOP=0
 save_conf() {
-    printf "RAM='%s'\nCPUS='%s'\nVNC='%s'\nSMBIOS='%s'\nPROFILE='%s'\nUUID='%s'\nMAC='%s'\nVIDEO='%s'\nDESKTOP='%s'\n" \
-        "$RAM" "$CPUS" "$VNC" "$SMBIOS" "$PROFILE" "$1" "$2" "$VIDEO" "$DESKTOP" > "$DIR/replica.conf"
+    printf "RAM='%s'\nCPUS='%s'\nVNC='%s'\nSMBIOS='%s'\nPROFILE='%s'\nUUID='%s'\nMAC='%s'\nVIDEO='%s'\nDESKTOP='%s'\nDISK='%s'\n" \
+        "$RAM" "$CPUS" "$VNC" "$SMBIOS" "$PROFILE" "$1" "$2" "$VIDEO" "$DESKTOP" "$DISK" > "$DIR/replica.conf"
 }
 
-# every replica on this VM, as JSON: [{"name","state","vnc","desktop"}, ...]
+# a size like 20G / 512M / 30 (bare = GiB) -> bytes
+size_bytes() {
+    case "$1" in
+        *[Gg]) echo $(( ${1%[Gg]} * 1073741824 )) ;;
+        *[Mm]) echo $(( ${1%[Mm]} * 1048576 )) ;;
+        *[!0-9]*|"") echo 0 ;;
+        *) echo $(( $1 * 1073741824 )) ;;
+    esac
+}
+
+# the virtual size of a replica's disk image, in bytes. The human-readable
+# qemu-img output is used on purpose: its JSON form carries several
+# "virtual-size" keys (the file node, the backing image) and the first one
+# is not the overlay's.
+image_bytes() {   # $1 = qcow2 path
+    qemu-img info -U "$1" 2>/dev/null | sed -n 's/^virtual size:.*(\([0-9]*\) bytes).*/\1/p' | head -1
+}
+
+# a replica's disk in GiB: DISK from replica.conf, else (older replicas) the
+# image's virtual size
+disk_gb() {   # $1 = replica dir, $2 = DISK from its conf (may be empty)
+    local b
+    case "$2" in
+        "") ;;
+        *[Gg]) echo "${2%[Gg]}"; return ;;
+        *[Mm]) echo $(( ${2%[Mm]} / 1024 )); return ;;
+        *[!0-9]*) ;;
+        *) echo "$2"; return ;;
+    esac
+    b=$(image_bytes "$1/disk.qcow2")
+    echo $(( ${b:-0} / 1073741824 ))
+}
+
+# every replica on this VM, as JSON: [{"name","state","vnc","desktop","cpus","ram","disk"}, ...]
+# (ram in MiB, disk in GiB)
 cmd_list() {
-    local d name state vnc desk
+    local d name state vnc desk ram cpus disk
     echo "["
     local first=1
     for d in "$ROOT" "$ROOT"/replicas/*; do
         [ -f "$d/replica.conf" ] || continue
         if [ "$d" = "$ROOT" ]; then name=replica; else name=$(basename "$d"); fi
         vnc=$(sed -n "s/^VNC='\(.*\)'/\1/p" "$d/replica.conf"); desk=$(sed -n "s/^DESKTOP='\(.*\)'/\1/p" "$d/replica.conf")
+        ram=$(sed -n "s/^RAM='\(.*\)'/\1/p" "$d/replica.conf"); cpus=$(sed -n "s/^CPUS='\(.*\)'/\1/p" "$d/replica.conf")
+        disk=$(disk_gb "$d" "$(sed -n "s/^DISK='\(.*\)'/\1/p" "$d/replica.conf")")
         state=$(virsh domstate "$name" 2>/dev/null | head -1)
         case "$state" in running) state=running ;; "") state=undefined ;; *) state=stopped ;; esac
         [ $first = 1 ] || echo ","
         first=0
-        printf '  {"name": "%s", "state": "%s", "vnc": %s, "desktop": %s}' "$name" "$state" "${vnc:-0}" "$([ "${desk:-0}" = 1 ] && echo true || echo false)"
+        printf '  {"name": "%s", "state": "%s", "vnc": %s, "desktop": %s, "cpus": %s, "ram": %s, "disk": %s}' \
+            "$name" "$state" "${vnc:-0}" "$([ "${desk:-0}" = 1 ] && echo true || echo false)" "${cpus:-0}" "${ram:-0}" "${disk:-0}"
     done
     echo; echo "]"
+}
+
+# Cores, RAM and disk of an existing replica. Cores / RAM go into the domain
+# XML (gen_xml reads RAM and CPUS) and apply at the next boot - or now, with
+# --restart. The disk grows in place (live through libvirt when the replica
+# runs, qemu-img otherwise); the guest's cloud-init growpart + resizefs then
+# extend the root filesystem at its next boot. Shrinking is refused.
+cmd_resize() {
+    need_root
+    [ -f "$DIR/replica.conf" ] || die "no replica '$NAME' here (appsandbox-replica -n $NAME create first)"
+    # shellcheck disable=SC1091
+    MAC=""; DESKTOP=0; DISK=""; . "$DIR/replica.conf"        # RAM CPUS VNC SMBIOS PROFILE UUID MAC VIDEO DESKTOP DISK
+    local restart=0 new_disk="" changed=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --cpus) CPUS=$2; changed="$changed cpus"; shift 2 ;;
+            --ram) RAM=$2; changed="$changed ram"; shift 2 ;;
+            --disk) new_disk=$2; shift 2 ;;
+            --restart) restart=1; shift ;;
+            *) die "unknown option $1" ;;
+        esac
+    done
+    case "$CPUS" in ''|*[!0-9]*) die "--cpus must be a number" ;; esac
+    case "$RAM" in ''|*[!0-9]*) die "--ram must be a number (MiB)" ;; esac
+    [ "$CPUS" -ge 1 ] || die "--cpus must be at least 1"
+    [ "$RAM" -ge 256 ] || die "--ram must be at least 256 (MiB)"
+    virsh dominfo "$NAME" >/dev/null 2>&1 || die "domain '$NAME' is not defined (appsandbox-replica create)"
+    local running=0
+    virsh domstate "$NAME" 2>/dev/null | grep -q running && running=1
+    [ -n "$DISK" ] || DISK="$(disk_gb "$DIR" "")G"
+    if [ -n "$new_disk" ]; then
+        case "$new_disk" in *[!0-9]*) ;; *) new_disk="${new_disk}G" ;; esac
+        local want cur
+        want=$(size_bytes "$new_disk")
+        [ "$want" -gt 0 ] || die "--disk must look like 30G"
+        cur=$(image_bytes "$DIR/disk.qcow2")
+        [ -n "$cur" ] && [ "$cur" -gt 0 ] || die "cannot read the size of $DIR/disk.qcow2"
+        # Never hand QEMU a smaller size: block_resize shrinks a qcow2 without
+        # asking and drops everything past the new end.
+        if [ "$want" -gt "$cur" ]; then
+            if [ $running = 1 ]; then
+                virsh blockresize "$NAME" vda "$new_disk" >/dev/null
+            else
+                qemu-img resize -q "$DIR/disk.qcow2" "$new_disk"
+            fi
+            DISK=$new_disk; changed="$changed disk"
+        elif [ "$want" -lt "$cur" ]; then
+            die "the disk can only grow (it is $(( cur / 1073741824 )) GiB now)"
+        fi
+    fi
+    if [ -z "$MAC" ]; then
+        MAC=$(virsh dumpxml "$NAME" | sed -n "s/.*<mac address='\([^']*\)'.*/\1/p" | head -1)
+    fi
+    gen_xml "$UUID" "$MAC" > "$DIR/$NAME.xml"
+    save_conf "$UUID" "$MAC"
+    virsh define "$DIR/$NAME.xml" >/dev/null
+    echo "OK: replica '$NAME' -> $CPUS cpus, $RAM MiB, disk $DISK (changed:${changed:- nothing})"
+    if [ $running = 1 ]; then
+        if [ $restart = 1 ]; then
+            virsh destroy "$NAME" >/dev/null; sleep 1; virsh start "$NAME" >/dev/null
+            echo "    restarted; the new size is in effect"
+        else
+            echo "    cores / RAM and the bigger root filesystem show after its next boot (appsandbox-replica -n $NAME stop + start)"
+        fi
+    elif [ $restart = 1 ]; then
+        virsh start "$NAME" >/dev/null
+        echo "    started"
+    else
+        echo "    applies when it starts"
+    fi
 }
 
 cmd_create() {
@@ -562,6 +670,7 @@ case "$cmd" in
     install) cmd_install ;;
     create)  cmd_create "$@" ;;
     reidentify) cmd_reidentify "$@" ;;
+    resize)  cmd_resize "$@" ;;
     qemu)    cmd_qemu "$@" ;;
     desktop) cmd_desktop "$@" ;;
     start)   need_root; virsh start "$NAME" ;;

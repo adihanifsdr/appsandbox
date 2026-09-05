@@ -23,6 +23,7 @@
 #include <commctrl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <shlobj.h>
 
 #pragma comment(lib, "dwmapi.lib")
@@ -936,6 +937,110 @@ static void launch_vnc_viewer(DWORD port)
     }
 }
 
+/* ---- Viewer windows ----
+   Every opened screen (a nested replica's console, or the guest's own VNC
+   server) gets a top-level window of its own with its own WebView2 running
+   web\viewer.html, so the sandbox list stays usable and several screens can
+   be open side by side. The page posts the usual actions (vncConnect,
+   replicaRestart, replicaStop) plus "viewerClose", which closes its window. */
+#define VIEWER_CLASS L"AppSandbox_Viewer"
+static BOOL g_viewer_class_registered = FALSE;
+
+static LRESULT CALLBACK viewer_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    WebView2View *view = (WebView2View *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    switch (msg) {
+    case WM_SIZE:
+        if (view) webview2_view_resize(view);
+        return 0;
+    case WM_DESTROY:
+        if (view) {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            webview2_view_destroy(view);
+        }
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+/* %XX-encode s (as UTF-8) for a URL query value. */
+static void url_encode(const wchar_t *s, wchar_t *out, size_t cap)
+{
+    char utf8[512];
+    size_t o = 0, i;
+    int n = WideCharToMultiByte(CP_UTF8, 0, s, -1, utf8, sizeof(utf8), NULL, NULL);
+
+    if (cap) out[0] = L'\0';
+    if (n <= 0 || cap < 4) return;
+    for (i = 0; utf8[i] && o + 4 < cap; i++) {
+        unsigned char c = (unsigned char)utf8[i];
+        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            c == '-' || c == '_' || c == '.') {
+            out[o++] = (wchar_t)c;
+        } else {
+            swprintf_s(out + o, cap - o, L"%%%02X", c);
+            o += 3;
+        }
+    }
+    out[o] = L'\0';
+}
+
+static void open_viewer_window(const wchar_t *title, const wchar_t *page)
+{
+    static wchar_t url[2048];
+    HWND hwnd;
+    WebView2View *view;
+    RECT wa = { 0, 0, 1920, 1080 };
+    int w, h, x, y;
+    BOOL dark = TRUE;
+
+    if (!g_viewer_class_registered) {
+        WNDCLASSEXW wc;
+        ZeroMemory(&wc, sizeof(wc));
+        wc.cbSize        = sizeof(wc);
+        wc.style         = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc   = viewer_wnd_proc;
+        wc.hInstance     = g_hInstance;
+        wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
+        wc.hbrBackground = CreateSolidBrush(RGB(0, 0, 0));
+        wc.lpszClassName = VIEWER_CLASS;
+        wc.hIcon         = LoadIconW(g_hInstance, MAKEINTRESOURCEW(IDI_APPSANDBOX));
+        if (!RegisterClassExW(&wc)) {
+            ui_log(L"Viewer: window class registration failed (err %lu).", GetLastError());
+            return;
+        }
+        g_viewer_class_registered = TRUE;
+    }
+    if (!webview2_web_url(page, url, ARRAYSIZE(url))) {
+        ui_log(L"Viewer: web\\viewer.html was not found next to the app.");
+        return;
+    }
+
+    /* the replica's 1600x900 console plus the bar, capped to the work area */
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    w = wa.right - wa.left - 40;  if (w > 1640) w = 1640;
+    h = wa.bottom - wa.top - 40;  if (h > 990)  h = 990;
+    x = wa.left + (wa.right - wa.left - w) / 2;
+    y = wa.top  + (wa.bottom - wa.top - h) / 2;
+
+    hwnd = CreateWindowExW(0, VIEWER_CLASS, title, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                           x, y, w, h, NULL, NULL, g_hInstance, NULL);
+    if (!hwnd) {
+        ui_log(L"Viewer: window creation failed (err %lu).", GetLastError());
+        return;
+    }
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    view = webview2_view_create(hwnd, url);
+    if (!view) {
+        ui_log(L"Viewer: WebView2 is not ready yet.");
+        DestroyWindow(hwnd);
+        return;
+    }
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)view);
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+}
+
 /* ---- WebView2 message dispatch ---- */
 
 static void on_webview2_message(const wchar_t *json)
@@ -1148,8 +1253,10 @@ static void on_webview2_message(const wchar_t *json)
         if (json_get_int(json, L"vmIndex", &idx) && idx >= 0 && idx < asb_vm_count()) {
             VmInstance *inst = asb_vm_instance(asb_vm_get(idx));
             static wchar_t wname[64];
-            char name[64], sub[16], line[128];
-            int i;
+            char name[64], sub[16], line[256], opts[128] = "";
+            int i, val;
+            BOOL restart = FALSE;
+            size_t o = 0;
             wname[0] = L'\0';
             json_get_string(json, L"name", wname, 64);
             if (!wname[0]) wcscpy_s(wname, 64, L"replica");
@@ -1160,8 +1267,19 @@ static void on_webview2_message(const wchar_t *json)
                     name[i] = '-';
             WideCharToMultiByte(CP_UTF8, 0, action + 7, -1, sub, sizeof(sub), NULL, NULL);
             for (i = 0; sub[i]; i++) if (sub[i] >= 'A' && sub[i] <= 'Z') sub[i] = (char)(sub[i] + 32);
+            /* Sizing (replicaSetup / replicaResize): cores, RAM in MB, disk in
+               GB, and whether to restart the replica so the new size applies
+               now. Passed as key=value words; the agent re-validates them. */
+            if (json_get_int(json, L"cpus", &val) && val >= 1 && val <= 256)
+                o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " cpus=%d", val);
+            if (json_get_int(json, L"ram", &val) && val >= 256 && val <= 1048576)
+                o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " ram=%d", val);
+            if (json_get_int(json, L"disk", &val) && val >= 1 && val <= 65536)
+                o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " disk=%d", val);
+            if (json_get_bool(json, L"restart", &restart) && restart)
+                o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " restart=1");
             if (inst && inst->running && inst->agent_online) {
-                sprintf_s(line, sizeof(line), "replica %s %s", name, sub);
+                sprintf_s(line, sizeof(line), "replica %s %s%s", name, sub, opts);
                 vm_agent_send(inst, line, NULL, 0, 0);
                 ui_log(L"Nested replica \"%S\" of \"%s\": %S requested.", name, inst->name, sub);
             } else {
@@ -1188,19 +1306,20 @@ static void on_webview2_message(const wchar_t *json)
                 if (inst && hp && in_app) {
                     DWORD ws = vm_vnc_ws_port(hp);
                     if (ws) {
-                        static wchar_t out[1024];
-                        JsonBuilder jb;
-                        jb_init(&jb, out, 1024);
-                        jb_object_begin(&jb);
-                        jb_string(&jb, L"type", L"vncReady");
-                        jb_int(&jb, L"vmIndex", idx);
-                        jb_int(&jb, L"wsPort", (int)ws);
-                        jb_int(&jb, L"vncPort", (int)hp);
-                        jb_int(&jb, L"guestPort", port);
-                        jb_string(&jb, L"name", wname);
-                        jb_string(&jb, L"vmName", inst->name);
-                        jb_object_end(&jb);
-                        webview2_post(out);
+                        /* Its own window: web\viewer.html on a fresh WebView2,
+                           so the sandbox list stays usable behind it. */
+                        static wchar_t page[1024], title[256], ename[256], evm[256];
+                        const wchar_t *rname = wname[0] ? wname : L"replica";
+                        BOOL nested = wname[0] || strcmp(inst->replica_state, "running") == 0;
+                        url_encode(rname, ename, ARRAYSIZE(ename));
+                        url_encode(inst->name, evm, ARRAYSIZE(evm));
+                        swprintf_s(page, ARRAYSIZE(page), L"viewer.html?ws=%lu&vm=%d&port=%d&name=%s&vmName=%s&nested=%d",
+                                   ws, idx, port, ename, evm, nested ? 1 : 0);
+                        if (nested)
+                            swprintf_s(title, ARRAYSIZE(title), L"%s / %s - Nestbox", inst->name, rname);
+                        else
+                            swprintf_s(title, ARRAYSIZE(title), L"%s (VNC :%d) - Nestbox", inst->name, port);
+                        open_viewer_window(title, page);
                     } else {
                         ui_log(L"VNC: the WebSocket bridge could not start; opening an external viewer instead.");
                         launch_vnc_viewer(hp);
