@@ -41,6 +41,11 @@ WEB_DIRS = [os.path.join(HERE, "web"),
 REPLICA_SRCS = [os.path.join(HERE, "appsandbox-replica"),
                 os.path.normpath(os.path.join(HERE, "..", "replica", "appsandbox-replica"))]
 REPLICA_TOOL = "/usr/local/sbin/appsandbox-replica"
+# the QEMU identity patches + build.sh: appsandbox-replica looks for them where
+# the App Sandbox guest image ships them, so a Linux host copies them there
+QEMU_SRC_DIRS = [os.path.join(HERE, "qemu-identity"),
+                 os.path.normpath(os.path.join(HERE, "..", "replica", "qemu-identity"))]
+QEMU_SRC = "/opt/appsandbox/qemu-identity"
 QEMU_STAMP = "/opt/appsandbox/qemu-identity.installed"
 PROFILE = "/etc/appsandbox/identity.json"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -632,6 +637,13 @@ def ensure_tool():
         shutil.copy2(src, REPLICA_TOOL)
         os.chmod(REPLICA_TOOL, 0o755)
         print("installed %s" % REPLICA_TOOL)
+    # the patches for `qemu build` (the Build patch button): copy alongside
+    qsrc = next((d for d in QEMU_SRC_DIRS if os.path.exists(os.path.join(d, "build.sh"))), None)
+    if qsrc:
+        dst_build = os.path.join(QEMU_SRC, "build.sh")
+        if not os.path.exists(dst_build) or os.path.getmtime(os.path.join(qsrc, "build.sh")) > os.path.getmtime(dst_build):
+            shutil.copytree(qsrc, QEMU_SRC, dirs_exist_ok=True)
+            print("installed %s" % QEMU_SRC)
     return True
 
 
