@@ -158,10 +158,13 @@ apps are native C / Objective-C with an HTML/JS UI (WebView2 on Windows, WKWebVi
 ## Documentation
 
 - [docs/vm-identity-dan-replica.md](docs/vm-identity-dan-replica.md) (Bahasa Indonesia, non-technical): what the VM identity profile and the nested replica do, what each can and cannot hide, and how to use them from the GUI.
+- [docs/vps-nested-virtualization.md](docs/vps-nested-virtualization.md) (Bahasa Indonesia): which VPS providers expose KVM to the guest (the one thing the Linux host needs to run replicas), with locations, prices and refund policies, plus the one-line test to run before buying.
+- [tools/linux/host/README.md](tools/linux/host/README.md): Nestbox on an Ubuntu host - this PC as the top row, replicas running on it, remote use over one SSH tunnel.
 
 ## License
 
 AppSandbox is licensed under the [MIT License](LICENSE) — Copyright (c) 2026 James Stringer.
+Nestbox's additions are under the same MIT License — Copyright (c) 2026 Adi Hanif.
 
 It bundles third-party components that are **not** covered by the MIT license and
 retain their own terms — most notably the Microsoft WSL2 `dxgkrnl` GPU driver
@@ -172,8 +175,19 @@ GPL-2.0 so it can resolve the kernel's GPL-only symbols.
 
 ## Acknowledgements
 
-Beyond my own experience building [Easy-GPU-PV](https://github.com/jamesstringerparsec/Easy-GPU-PV), I found [NanaBox](https://github.com/M2Team/NanaBox) to be a really helpful resource for understanding HCS.
+Nestbox is a fork of [App Sandbox](https://github.com/jamesstringer90/appsandbox) by
+[James Stringer](https://www.linkedin.com/in/jamesstringerphotography/), the author of
+[Easy-GPU-PV](https://github.com/jamesstringerparsec/Easy-GPU-PV): the HCS / GPU-PV host, the
+Windows and macOS apps and the guest drivers are his work, and this README keeps his notes on them
+above. In his words, beyond his own experience building Easy-GPU-PV he found
+[NanaBox](https://github.com/M2Team/NanaBox) a really helpful resource for understanding HCS.
+
+The nested replica is built on QEMU/KVM and libvirt, with the identity patches in the parameterised
+form of [kila58/qemu-patched](https://github.com/kila58/qemu-patched); the in-app screens use
+[noVNC](https://novnc.com/).
 
 ## Author
 
-[James Stringer](https://www.linkedin.com/in/jamesstringerphotography/) — author of [Easy-GPU-PV](https://github.com/jamesstringerparsec/Easy-GPU-PV).
+Nestbox (the VM identity profile, the nested replicas and their tooling, the screens and grid, the
+Linux host, and everything else added on top of App Sandbox) is by **Adi Hanif**
+([adihanifsdr](https://github.com/adihanifsdr)). App Sandbox itself is by James Stringer.
