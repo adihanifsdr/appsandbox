@@ -39,18 +39,22 @@ dan kebijakan bisa berubah; cek ulang sebelum membeli.
 | Provider | Nested KVM | Harga mulai | Lokasi Asia | Refund |
 |---|---|---|---|---|
 | OVHcloud VPS | Ya, terbukti langsung di server yang dicek (`/dev/kvm` ada, flag vmx terekspos) | sekitar US$4.54/bulan (Starter) sampai US$23.37/bulan; di APAC ada kuota bandwidth bulanan (500 GB VPS-1, 1 TB VPS-2/3, 3 TB VPS-4), lewat itu dibatasi 10 Mbps | Singapura (region SGP, sejak 2016), Sydney | Hak pembatalan 14 hari untuk individu dan pesanan baru, dikembalikan pro-rata dikurangi hari terpakai, dalam 30 hari |
-| ExtraVM | Ya, aktif default di semua VPS | sekitar $4.50/bulan | Singapura (Equinix SG3), Tokyo, Sydney | 5 hari money-back untuk VPS, potongan 4% untuk refund di atas $25, pembayaran kripto tidak bisa refund |
-| GreenCloud VPS | Ya. Review pihak ketiga dari Indonesia di plan Budget KVM Singapura DC2 menunjukkan "VM-x/AMD-V: Enabled" dan memakai nested | Budget/SSD KVM dari $6/bulan (1 core, 1 GB RAM, 15 GB SSD — terlalu kecil untuk replica, ambil minimal SSDKVM-3 $20/bulan dengan 30 GB); plan promo tahunan pernah $25/tahun untuk 2 core EPYC, 4 GB RAM, 35 GB NVMe | Singapura DC1 & DC2, Tokyo, Hong Kong, Hanoi, Ho Chi Minh | 7 hari untuk VPS pertama di akun baru; plan diskon/promo dan pembayaran kripto tidak termasuk |
+| ExtraVM | Ya, aktif default di semua VPS. **Stok Singapura sering habis** (per 5 September 2026 kosong); Tokyo dan Sydney kadang masih ada | sekitar $4.50/bulan | Singapura (Equinix SG3), Tokyo, Sydney | 5 hari money-back untuk VPS, potongan 4% untuk refund di atas $25, pembayaran kripto tidak bisa refund |
+| **Advin Servers** | Ya, ditulis sendiri di halaman depan mereka: "KVM & Nested Virtualization" | EPYC Genoa 9654: 2 vCPU / 4 GB / 64 GB NVMe / 2 TB $6/bulan; 8 vCPU / 16 GB / 256 GB / 10 TB $20/bulan; di Singapura EPYC 9375F (3,8 GHz) 2 vCPU / 8 GB / 40 GB $19,90 | Singapura, **Johor** (Equinix JH1, backhaul ke Equinix SG1), Tokyo, Osaka | 14 hari money-back tanpa syarat dan tanpa alasan; setelah itu kredit akun pro-rata |
+| Cloudzy | Diklaim di halaman pemasaran dan blog mereka ("nested KVM"), tidak ada di halaman produk — konfirmasi dulu | EPYC 9554 Genoa: 512 MB $2,48; 2 GB / 60 GB $7,48; 4 GB / 120 GB / 2 vCPU $14,48 (harga diskon 50%) | Singapura (ap-sgp-1), 13 region | 14 hari money-back, batal sendiri lewat panel |
+| GreenCloud VPS | Ya. Review pihak ketiga dari Indonesia di plan Budget KVM Singapura DC2 menunjukkan "VM-x/AMD-V: Enabled" dan memakai nested. Selain lini EPYC, ada lini **Ryzen 9950X** (RyzenKVM, 3,5+ GHz) yang juga ada di Singapura DC2 | Budget/SSD KVM dari $6/bulan (1 core, 1 GB RAM, 15 GB SSD — terlalu kecil untuk replica, ambil minimal SSDKVM-3 $20/bulan dengan 30 GB); plan promo tahunan pernah $25/tahun untuk 2 core EPYC, 4 GB RAM, 35 GB NVMe | Singapura DC1 & DC2, Tokyo, Hong Kong, Hanoi, Ho Chi Minh | 7 hari untuk VPS pertama di akun baru; plan diskon/promo dan pembayaran kripto tidak termasuk |
 | SSD Nodes | Ya, aktif default di semua plan | sekitar $14.50/bulan untuk 32 GB RAM, tapi kontrak 3 tahun dibayar di muka | Singapura, Tokyo, Mumbai, Sydney | 14 hari full refund lewat tiket support; setelah itu hanya kredit akun |
 | DigitalOcean Droplet | Ya di semua region; DigitalOcean sendiri tidak merekomendasikan karena performa nested sering buruk | $6/bulan, ditagih per jam | Singapura (SGP1) | Tidak ada refund, tapi tagihan per jam sehingga uji beberapa jam hanya berbiaya sen |
 | Contabo Cloud VDS | Ya. VDS adalah VM dengan core dan RAM dedicated, bukan bare metal | VDS S sekitar €49.40/bulan, VDS M €64.40, VDS L €91.60, sudah termasuk location fee Singapura | Singapura, Jepang, India, Australia | 14 hari money-back untuk akun pribadi, juga untuk perpanjangan otomatis dalam 72 jam terakhir; proses sampai 14 hari kerja |
 
-Dua kandidat yang belum bisa dipastikan dari sumber primer: **WebHorizon**
-(Singapura, Ryzen 9000 dan EPYC, sekitar $3-5/bulan) berulang kali menulis
-"nested virtualization enabled" di penawaran resminya di forum, tetapi
-situs mereka menolak diambil otomatis, jadi tanyakan dulu lewat tiket.
-**HostHatch** (Singapura, Tokyo, Hong Kong) disebut pengguna mendukung
-nested, tanpa pernyataan resmi di halaman produk.
+Kandidat yang belum bisa dipastikan dari sumber primer: **WebHorizon**
+(Singapura, Ryzen 9700X/9900X dan EPYC, dari $3/bulan) menulis "Nested
+Virtualization Supported" di penawaran resminya, tetapi situs mereka
+menolak diambil otomatis, jadi tanyakan dulu lewat tiket. **HostHatch**
+(Singapura, Tokyo, Hong Kong) disebut pengguna mendukung nested tanpa
+pernyataan resmi. **V.PS** (Singapura, Tokyo, Osaka, Qemu/KVM di atas
+Proxmox VE) tidak menyebut nested sama sekali di FAQ-nya. **Bloom.host**
+(Singapura, Ryzen 9 9950X, core dedicated) juga tidak menyebutnya.
 
 ## Cloud besar: nested resmi, dua di antaranya punya region Jakarta
 
@@ -100,6 +104,12 @@ virtualisasi.
 | GreenCloud SSDKVM-3 | 20 | EPYC Rome/Milan (2019-21) | ~1300 | 2 | 4 GB / 30 GB | 1 | 20 | 2,6 |
 | GreenCloud SSDKVM-5 | 80 | EPYC Rome/Milan (2019-21) | ~1300 | 8 | 16 GB / 120 GB | 3 | 26,7 | 3,5 |
 | GreenCloud promo tahunan | ~2,08 ($25/tahun) | EPYC Rome/Milan | ~1300 | 2 | 4 GB / 35 GB | 1 | **2,08** | 2,6 |
+| **Advin Servers EPYC Genoa 9654 (8 vCPU)** | 20 | **EPYC Genoa 9004 (2022-23)** | ~2400 | 8 | 16 GB / 256 GB | **3** | **6,67** | **6,4** |
+| Advin Servers EPYC Genoa 9654 (2 vCPU) | 6 | EPYC Genoa 9004 (2022-23) | ~2400 | 2 | 4 GB / 64 GB | 1 (RAM ~3 GB) | 6 | 4,8 |
+| Advin Singapura EPYC 9375F | 19,90 | EPYC Genoa 9004, 3,8 GHz (2023) | ~3000 | 2 | 8 GB / 40 GB | 1 | 19,90 | 6,0 |
+| GreenCloud RyzenKVM-5 | 80 | **Ryzen 9950X (2024)** | ~3200 | 8 | 16 GB / 150 GB | 3 | 26,7 | 8,5 |
+| GreenCloud RyzenKVM-4 | 40 | **Ryzen 9950X (2024)** | ~3200 | 4 | 8 GB / 80 GB | 1-2 | 20-40 | 6,4-12,8 |
+| Cloudzy 4 GB | 14,48 | EPYC 9554 Genoa (2022) | ~2400 | 2 | 4 GB / 120 GB | 1 | 14,48 | 4,8 |
 | **ExtraVM 8 GB** | 32 | **Ryzen 9 / EPYC 4004-4005 (2024-25)** | **~2500** | 4 | 8 GB / 120 GB | 1-2 | 16-32 | **10,0** (1 replica) |
 | **ExtraVM 16 GB** | 56 | **Ryzen 9 / EPYC 4004-4005 (2024-25)** | **~2500** | 6 | 16 GB / 240 GB | **3** | 18,7 | **5,0** |
 | SSD Nodes KVM/2X-LARGE | ~11,08 ($133/tahun) | Xeon Silver Skylake/Cascade (2017-19) | ~850 | 8 | 32 GB / 480 GB | **7** | **1,58** | 1,0 |
@@ -142,13 +152,26 @@ Tiga pertanyaan itu jarang punya satu jawaban yang menang di semuanya.
 Yang murah per replica CPU-nya tua, yang CPU-nya baru mahal per replica.
 Jadi pilihannya tergantung mana yang lebih penting:
 
-- **Kalau tiap replica harus terasa cepat: ExtraVM.** CPU-nya paling
-  baru di seluruh daftar VPS murah (Ryzen 9 / EPYC 4004-4005, 2024-2025,
-  sekitar 3x kecepatan satu core Haswell OVHcloud). Plan 8 GB $32 untuk
-  satu replica memberi tenaga per replica 10,0 — tertinggi di tabel, dan
-  4x lipat OVHcloud VPS-3. Plan 16 GB $56 memberi 3 replica dengan tenaga
-  5,0 masing-masing, masih 2x OVHcloud, dengan harga $18,7 per replica.
-  Nested aktif default dan ada 5 hari untuk menguji.
+- **Pilihan terbaik secara keseluruhan: Advin Servers, plan EPYC Genoa
+  9654 8 vCPU / 16 GB / 256 GB seharga $20.** Dia menang di ketiga sumbu
+  sekaligus: CPU Genoa 2022-23 (sekitar 2,8x kecepatan satu core Haswell
+  OVHcloud), 8 core, muat 3 replica, $6,67 per replica, dan tenaga per
+  replica 6,4 — lebih tinggi daripada ExtraVM 16 GB dengan harga per
+  replica sepertiganya. Nested ditulis sendiri di halaman depan mereka,
+  refund 14 hari tanpa syarat, dan ada lokasi **Johor** yang secara
+  jaringan di-backhaul ke Equinix Singapura. Kelemahannya sama dengan
+  ExtraVM: stok habis-habisan, tapi mereka punya tombol "Get Notified"
+  per plan dan stok dilepas ke publik siapa cepat dia dapat.
+- **Kalau satu replica saja tapi harus paling kencang: GreenCloud
+  RyzenKVM-4 $40** (Ryzen 9950X, satu core tercepat di seluruh daftar,
+  ~3200) atau **Advin Singapura EPYC 9375F $19,90** (3,8 GHz, 8 GB).
+  Keduanya di Singapura, dan yang Advin setengah harganya.
+- **Kalau tiap replica harus terasa cepat dan stok ExtraVM kembali ada:**
+  CPU-nya Ryzen 9 / EPYC 4004-4005 (2024-2025). Plan 8 GB $32 untuk satu
+  replica memberi tenaga 10,0 — tertinggi di tabel — dan plan 16 GB $56
+  memberi 3 replica dengan tenaga 5,0 masing-masing di $18,7 per replica.
+  Per 5 September 2026 stok Singapura kosong; Tokyo dan Sydney kadang
+  masih ada, tetapi latensi Tokyo dari Indonesia sekitar 70-90 ms.
 - **Kalau yang dikejar jumlah replica per dolar: OVHcloud VPS-4, $23,37.**
   5 replica di $4,67 masing-masing, kuota 3 TB, sudah terbukti nested-nya
   di server yang dicek, dan bisa dibatalkan 14 hari. Harganya dibayar
@@ -216,10 +239,10 @@ lokal untuk layar replica lewat browser.
 
 - Ringkasan harga per replica dan pilihan terbaik ada di
   [Perbandingan spek](#perbandingan-spek-berapa-replica-yang-muat-dan-berapa-harganya)
-  di atas: ExtraVM kalau tiap replica harus cepat (CPU 2024-25),
-  OVHcloud VPS-4 kalau yang dikejar jumlah replica per dolar, OVHcloud
-  VPS-3 sebagai titik tengah, cloud besar kalau butuh Jakarta atau
-  tagihan per jam.
+  di atas: Advin Servers EPYC Genoa $20 sebagai pilihan terbaik secara
+  keseluruhan, ExtraVM kalau stoknya kembali ada, OVHcloud VPS-4 kalau
+  yang dikejar jumlah replica per dolar, OVHcloud VPS-3 sebagai titik
+  tengah, cloud besar kalau butuh Jakarta atau tagihan per jam.
 - Latensi dari Indonesia ke Singapura sekitar 13-30 ms, cukup untuk
   layar replica lewat browser.
 - Sisakan disk: satu replica memakai 20 GB (thin, tumbuh sesuai isi)
@@ -242,6 +265,15 @@ lokal untuk layar replica lewat browser.
   [YABS Contabo Cloud VDS M (EPYC 7282, GB6 1133)](https://www.vpsbenchmarks.com/yabs/contabo-8c-31gb-20260611-tg10226),
   [daftar CPU menurut Geekbench 6 satu core](https://www.vpsbenchmarks.com/labs/cpus_by_geekbench6_perf),
   [OVH memindah lini VPS 2027 ke Intel lama](https://lowendtalk.com/discussion/218138/ovh-launches-2027-vps-line)
+- Advin Servers: [Cloud VPS](https://advinservers.com/cloud),
+  [halaman depan yang menyebut "KVM & Nested Virtualization"](https://advinservers.com/),
+  [kebijakan refund 14 hari](https://docs.advinservers.com/policies/refund.md),
+  [soal stok dan notifikasi restock](https://docs.advinservers.com/information/stock.md)
+- Cloudzy: [Singapore VPS](https://cloudzy.com/singapore-vps/),
+  [KVM VPS (EPYC 9554)](https://cloudzy.com/kvm-vps/),
+  [nested virtualization](https://cloudzy.com/blog/vps-with-nested-virtualization/)
+- GreenCloud lini Ryzen: [Ryzen KVM VPS](https://greencloudvps.com/ryzen-kvm-vps.php)
+- V.PS: [FAQ](https://v.ps/faq/); Bloom.host: [Singapore VPS](https://bloom.host/singapore-vps/)
 - ExtraVM: [Singapore VPS](https://www.extravm.com/singapore-vps),
   [nested virtualization](https://extravm.com/billing/knowledgebase/101/Is-nested-virtualization-enabled.html),
   [Terms of Service](https://extravm.com/tos.pdf)
