@@ -1,0 +1,21 @@
+# Nestbox on a Linux host as a service: the UI on 127.0.0.1:8765, no browser
+# started by the daemon (reach it over an SSH tunnel or open it locally).
+#
+#   sudo cp tools/linux/host/nestbox.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now nestbox
+#
+# Edit ExecStart if the checkout is not /opt/nestbox.
+[Unit]
+Description=Nestbox (replicas on this PC)
+After=network.target libvirtd.service
+Wants=libvirtd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/nestbox/tools/linux/host/nestbox --no-browser --port 8765
+WorkingDirectory=/opt/nestbox
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

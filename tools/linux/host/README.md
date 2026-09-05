@@ -34,6 +34,26 @@ Root is needed for libvirt and `/dev/kvm`; the browser and an external VNC
 viewer are started as the user who ran `sudo`. Check `ls -l /dev/kvm` first:
 without it (virtualization disabled in the firmware) replicas cannot run.
 
+## As a service, and from another machine
+
+```bash
+sudo git clone https://github.com/adihanifsdr/nestbox.git /opt/nestbox
+sudo cp /opt/nestbox/tools/linux/host/nestbox.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now nestbox
+sudo journalctl -u nestbox -f          # the same lines the UI's log panel shows
+```
+
+The UI listens on 127.0.0.1 only; the consoles ride on the same port
+(`/vnc/<port>` WebSockets), so a single SSH tunnel is all a remote machine
+needs:
+
+```
+ssh -N -L 8765:127.0.0.1:8765 root@<server>      # then open http://127.0.0.1:8765
+```
+
+Screens and the grid open as browser windows through that tunnel; nothing
+is exposed on the server's public address.
+
 ## What works
 
 - `+` on the PC row: name and size a new replica; the log shows the steps

@@ -16,8 +16,17 @@ var vmName = q.vmName || '';
 var grid = q.grid === '1';
 var scaled = true;
 
+/* Where a console's WebSocket is: a port (the Windows app's loopback bridge)
+   or a path on the page's own server (the Linux host: /vnc/<port>, so one
+   SSH tunnel carries the UI and every console). */
+function wsUrl(ws) {
+    ws = String(ws || '');
+    if (/^\d+$/.test(ws)) return 'ws://127.0.0.1:' + ws;
+    return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + ws;
+}
+
 /* single-console mode */
-var wsPort = parseInt(q.ws, 10) || 0;
+var wsPort = q.ws || '';
 var guestPort = parseInt(q.port, 10) || 5900;
 var replicaName = q.name || 'replica';
 var nested = q.nested === '1';
@@ -46,7 +55,7 @@ function makeRfb(container, port, onStatus, lostText) {
     container.innerHTML = '';
     onStatus('connecting…');
     return window.NoVNC.then(function(RFB) {
-        var r = new RFB(container, 'ws://127.0.0.1:' + port, { wsProtocols: ['binary'] });
+        var r = new RFB(container, wsUrl(port), { wsProtocols: ['binary'] });
         r.scaleViewport = scaled;
         r.resizeSession = false;
         r.background = '#000';
@@ -94,7 +103,7 @@ function buildGrid() {
     var spec = (q.tiles || '').split(',').filter(Boolean);
     spec.forEach(function(s) {
         var p = s.split(':');
-        var t = { name: p[0] || 'replica', ws: parseInt(p[1], 10) || 0, port: parseInt(p[2], 10) || 5900, rfb: null };
+        var t = { name: p[0] || 'replica', ws: p[1] || '', port: parseInt(p[2], 10) || 5900, rfb: null };
         var el = document.createElement('div');
         el.className = 'tile';
         el.innerHTML = '<div class="tile-bar"><svg class="ic"><use href="#i-nest"/></svg>' +

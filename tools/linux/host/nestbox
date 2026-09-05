@@ -150,10 +150,8 @@ def ws_handshake_raw(sock):
     return WebSocket(sock)
 
 # ------------------------------------------------------------ VNC bridges
-
-_bridges = {}          # guest VNC port -> (listen port)
-_bridges_lock = threading.Lock()
-
+# Served on the UI port itself as ws://<host>:<port>/vnc/<vnc port>, so one
+# SSH tunnel (-L 8765:127.0.0.1:8765) carries the UI and every console.
 
 def _pipe_ws_to_tcp(ws, tcp):
     try:
@@ -185,55 +183,27 @@ def _pipe_tcp_to_ws(ws, tcp):
         ws.close()
 
 
-def _bridge_accept_loop(listener, vnc_port):
-    while True:
-        try:
-            conn, _ = listener.accept()
-        except OSError:
-            return
-
-        def serve(conn=conn):
-            ws = None
-            tcp = None
-            try:
-                conn.settimeout(10)
-                ws = ws_handshake_raw(conn)
-                if not ws:
-                    conn.close()
-                    return
-                conn.settimeout(None)
-                tcp = socket.create_connection(("127.0.0.1", vnc_port), timeout=5)
-                tcp.settimeout(None)
-                t = threading.Thread(target=_pipe_tcp_to_ws, args=(ws, tcp), daemon=True)
-                t.start()
-                _pipe_ws_to_tcp(ws, tcp)
-                t.join()
-            except (OSError, ConnectionError) as e:
-                log("VNC bridge to 127.0.0.1:%d: %s" % (vnc_port, e))
-            finally:
-                if tcp:
-                    tcp.close()
-                if ws:
-                    ws.close()
-                else:
-                    conn.close()
-        threading.Thread(target=serve, daemon=True).start()
+def bridge_vnc(ws, vnc_port):
+    """Pipe an accepted WebSocket to 127.0.0.1:<vnc_port> until either side closes."""
+    tcp = None
+    try:
+        tcp = socket.create_connection(("127.0.0.1", vnc_port), timeout=5)
+        tcp.settimeout(None)
+        t = threading.Thread(target=_pipe_tcp_to_ws, args=(ws, tcp), daemon=True)
+        t.start()
+        _pipe_ws_to_tcp(ws, tcp)
+        t.join()
+    except (OSError, ConnectionError) as e:
+        log("VNC bridge to 127.0.0.1:%d: %s" % (vnc_port, e))
+    finally:
+        if tcp:
+            tcp.close()
+        ws.close()
 
 
 def vnc_bridge(vnc_port):
-    """127.0.0.1:<ws port> speaking WebSocket, piped to 127.0.0.1:<vnc_port>."""
-    with _bridges_lock:
-        if vnc_port in _bridges:
-            return _bridges[vnc_port]
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(8)
-        port = listener.getsockname()[1]
-        threading.Thread(target=_bridge_accept_loop, args=(listener, vnc_port), daemon=True).start()
-        _bridges[vnc_port] = port
-        log("VNC: WebSocket bridge 127.0.0.1:%d -> 127.0.0.1:%d." % (port, vnc_port))
-        return port
+    """The WebSocket path the viewer page uses for a console."""
+    return "/vnc/%d" % vnc_port
 
 # -------------------------------------------------------------- UI clients
 
@@ -525,9 +495,8 @@ def handle(msg, ws):
         run_replica_job(name, name, steps)
     elif action == "vncOpen":
         port = int(msg.get("port") or 5900)
-        wsp = vnc_bridge(port)
-        url = "viewer.html?ws=%d&vm=0&port=%d&name=%s&vmName=%s&nested=1" % (
-            wsp, port, urllib.parse.quote(name), urllib.parse.quote(HOSTNAME))
+        url = "viewer.html?ws=%s&vm=0&port=%d&name=%s&vmName=%s&nested=1" % (
+            urllib.parse.quote(vnc_bridge(port)), port, urllib.parse.quote(name), urllib.parse.quote(HOSTNAME))
         ws.send(json.dumps({"type": "openWindow", "url": url, "width": 1640, "height": 990}))
     elif action == "vncGrid":
         tiles = []
@@ -539,7 +508,7 @@ def handle(msg, ws):
                 p = int(p)
             except ValueError:
                 continue
-            tiles.append("%s:%d:%d" % (urllib.parse.quote(clean_name(n)), vnc_bridge(p), p))
+            tiles.append("%s:%s:%d" % (urllib.parse.quote(clean_name(n)), urllib.parse.quote(vnc_bridge(p)), p))
         if tiles:
             url = "viewer.html?grid=1&vm=0&vmName=%s&tiles=%s" % (urllib.parse.quote(HOSTNAME), ",".join(tiles))
             ws.send(json.dumps({"type": "openWindow", "url": url, "width": 0, "height": 0}))
@@ -588,20 +557,36 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):   # quiet
         pass
 
+    def _upgrade(self):
+        """Answer the WebSocket handshake on this request; returns the socket."""
+        key = self.headers.get("Sec-WebSocket-Key")
+        if not key:
+            self.send_error(400)
+            return None
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", WebSocket.accept_key(key))
+        proto = self.headers.get("Sec-WebSocket-Protocol")
+        if proto:
+            self.send_header("Sec-WebSocket-Protocol", proto.split(",")[0].strip())
+        self.end_headers()
+        self.wfile.flush()
+        self.close_connection = True
+        return WebSocket(self.connection)
+
     def do_GET(self):
-        if self.path == "/ws" and "upgrade" in self.headers.get("Connection", "").lower():
-            key = self.headers.get("Sec-WebSocket-Key")
-            if not key:
-                self.send_error(400)
+        upgrade = "upgrade" in self.headers.get("Connection", "").lower()
+        m = re.match(r"^/vnc/(\d{1,5})$", self.path)
+        if m and upgrade:
+            ws = self._upgrade()
+            if ws:
+                bridge_vnc(ws, int(m.group(1)))
+            return
+        if self.path == "/ws" and upgrade:
+            ws = self._upgrade()
+            if not ws:
                 return
-            self.send_response(101)
-            self.send_header("Upgrade", "websocket")
-            self.send_header("Connection", "Upgrade")
-            self.send_header("Sec-WebSocket-Accept", WebSocket.accept_key(key))
-            self.end_headers()
-            self.wfile.flush()
-            self.close_connection = True
-            ws = WebSocket(self.connection)
             with _clients_lock:
                 _clients.add(ws)
             try:
@@ -674,7 +659,11 @@ def main():
     url = "http://127.0.0.1:%d/" % ARGS.port
     print("Nestbox on %s (%s): %s" % (HOSTNAME, OS_NAME, url), flush=True)
     threading.Thread(target=refresh_loop, daemon=True).start()
-    if not have("virsh"):
+    if not os.path.exists("/dev/kvm"):
+        # no point installing libvirt: appsandbox-replica refuses without KVM
+        threading.Timer(2.0, log, args=("This PC has no /dev/kvm (virtualization not exposed to it): replicas cannot run here. "
+                                        "On a VPS ask the provider for nested virtualization; on bare metal enable VT-x / AMD-V in the firmware.",)).start()
+    elif not have("virsh"):
         run_replica_job("*install", "host", [(["install"], "installing qemu / libvirt (first run)")])
     if not ARGS.no_browser:
         if have("xdg-open"):
