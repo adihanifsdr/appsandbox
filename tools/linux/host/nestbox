@@ -1,0 +1,679 @@
+#!/usr/bin/env python3
+"""
+nestbox - Nestbox on a Linux host (Ubuntu): the replicas run on this PC.
+
+No sandbox VM in between: this PC is the top row of the table and every
+nested replica (appsandbox-replica, a libvirt/KVM guest) is a row under it.
+The web UI is the same one the Windows and macOS apps embed (../../../web),
+served to the browser on 127.0.0.1 with the same JSON message protocol over
+a WebSocket; the replica consoles reach the viewer page through WebSocket
+bridges onto their VNC ports, exactly like the WebView2 viewer windows.
+
+    sudo tools/linux/host/nestbox                # installs qemu/libvirt on first run, opens the browser
+    sudo tools/linux/host/nestbox --port 8765 --no-browser
+    sudo tools/linux/host/nestbox --qemu-patch   # build the identity-patched QEMU for new replicas
+
+Needs root for libvirt and /dev/kvm (the same as appsandbox-replica). Python
+3.8+ standard library only.
+"""
+import argparse
+import base64
+import hashlib
+import http.server
+import json
+import os
+import pwd
+import re
+import shutil
+import socket
+import socketserver
+import struct
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+WEB_DIRS = [os.path.join(HERE, "web"),
+            os.path.normpath(os.path.join(HERE, "..", "..", "..", "web")),
+            "/usr/local/share/nestbox/web"]
+REPLICA_SRCS = [os.path.join(HERE, "appsandbox-replica"),
+                os.path.normpath(os.path.join(HERE, "..", "replica", "appsandbox-replica"))]
+REPLICA_TOOL = "/usr/local/sbin/appsandbox-replica"
+QEMU_STAMP = "/opt/appsandbox/qemu-identity.installed"
+PROFILE = "/etc/appsandbox/identity.json"
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+HOSTNAME = socket.gethostname()
+
+# ---------------------------------------------------------------- WebSocket
+
+class WebSocket:
+    """A server-side RFC 6455 socket over an accepted TCP connection."""
+
+    def __init__(self, sock):
+        self.sock = sock
+        self.lock = threading.Lock()
+        self.open = True
+
+    @staticmethod
+    def accept_key(key):
+        return base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+
+    def _recv_exact(self, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = self.sock.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("closed")
+            buf += chunk
+        return buf
+
+    def recv(self):
+        """One complete message: (opcode, payload). Pings are answered here."""
+        msg = b""
+        opcode = None
+        while True:
+            h = self._recv_exact(2)
+            fin, op, masked, ln = h[0] & 0x80, h[0] & 0x0F, h[1] & 0x80, h[1] & 0x7F
+            if ln == 126:
+                ln = struct.unpack(">H", self._recv_exact(2))[0]
+            elif ln == 127:
+                ln = struct.unpack(">Q", self._recv_exact(8))[0]
+            mask = self._recv_exact(4) if masked else None
+            data = self._recv_exact(ln)
+            if mask:
+                m = (mask * (ln // 4 + 1))[:ln]
+                data = bytes(a ^ b for a, b in zip(data, m))
+            if op == 0x8:
+                self.open = False
+                return 0x8, data
+            if op == 0x9:
+                self.send(data, 0xA)
+                continue
+            if op == 0xA:
+                continue
+            if op:
+                opcode = op
+            msg += data
+            if fin:
+                return opcode, msg
+
+    def send(self, data, opcode=0x2):
+        if isinstance(data, str):
+            data, opcode = data.encode(), 0x1
+        n = len(data)
+        if n < 126:
+            hdr = bytes([0x80 | opcode, n])
+        elif n < 65536:
+            hdr = bytes([0x80 | opcode, 126]) + struct.pack(">H", n)
+        else:
+            hdr = bytes([0x80 | opcode, 127]) + struct.pack(">Q", n)
+        with self.lock:
+            self.sock.sendall(hdr + data)
+
+    def close(self):
+        self.open = False
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def ws_handshake_raw(sock):
+    """Read an HTTP upgrade request from a raw socket and answer it.
+    Returns the WebSocket, or None when it was not an upgrade."""
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            return None
+        buf += chunk
+        if len(buf) > 65536:
+            return None
+    head = buf.split(b"\r\n\r\n", 1)[0].decode(errors="replace")
+    headers = {}
+    for line in head.split("\r\n")[1:]:
+        if ":" in line:
+            k, v = line.split(":", 1)
+            headers[k.strip().lower()] = v.strip()
+    key = headers.get("sec-websocket-key")
+    if not key or "upgrade" not in headers.get("connection", "").lower():
+        sock.sendall(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+        return None
+    resp = ("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: %s\r\n" % WebSocket.accept_key(key))
+    proto = headers.get("sec-websocket-protocol")
+    if proto:
+        resp += "Sec-WebSocket-Protocol: %s\r\n" % proto.split(",")[0].strip()
+    sock.sendall((resp + "\r\n").encode())
+    return WebSocket(sock)
+
+# ------------------------------------------------------------ VNC bridges
+
+_bridges = {}          # guest VNC port -> (listen port)
+_bridges_lock = threading.Lock()
+
+
+def _pipe_ws_to_tcp(ws, tcp):
+    try:
+        while ws.open:
+            op, data = ws.recv()
+            if op == 0x8:
+                break
+            if data:
+                tcp.sendall(data)
+    except (OSError, ConnectionError):
+        pass
+    finally:
+        try:
+            tcp.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
+def _pipe_tcp_to_ws(ws, tcp):
+    try:
+        while True:
+            data = tcp.recv(65536)
+            if not data:
+                break
+            ws.send(data, 0x2)
+    except (OSError, ConnectionError):
+        pass
+    finally:
+        ws.close()
+
+
+def _bridge_accept_loop(listener, vnc_port):
+    while True:
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            return
+
+        def serve(conn=conn):
+            ws = None
+            tcp = None
+            try:
+                conn.settimeout(10)
+                ws = ws_handshake_raw(conn)
+                if not ws:
+                    conn.close()
+                    return
+                conn.settimeout(None)
+                tcp = socket.create_connection(("127.0.0.1", vnc_port), timeout=5)
+                tcp.settimeout(None)
+                t = threading.Thread(target=_pipe_tcp_to_ws, args=(ws, tcp), daemon=True)
+                t.start()
+                _pipe_ws_to_tcp(ws, tcp)
+                t.join()
+            except (OSError, ConnectionError) as e:
+                log("VNC bridge to 127.0.0.1:%d: %s" % (vnc_port, e))
+            finally:
+                if tcp:
+                    tcp.close()
+                if ws:
+                    ws.close()
+                else:
+                    conn.close()
+        threading.Thread(target=serve, daemon=True).start()
+
+
+def vnc_bridge(vnc_port):
+    """127.0.0.1:<ws port> speaking WebSocket, piped to 127.0.0.1:<vnc_port>."""
+    with _bridges_lock:
+        if vnc_port in _bridges:
+            return _bridges[vnc_port]
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        port = listener.getsockname()[1]
+        threading.Thread(target=_bridge_accept_loop, args=(listener, vnc_port), daemon=True).start()
+        _bridges[vnc_port] = port
+        log("VNC: WebSocket bridge 127.0.0.1:%d -> 127.0.0.1:%d." % (port, vnc_port))
+        return port
+
+# -------------------------------------------------------------- UI clients
+
+_clients = set()
+_clients_lock = threading.Lock()
+
+
+def broadcast(msg):
+    data = json.dumps(msg)
+    with _clients_lock:
+        clients = list(_clients)
+    for ws in clients:
+        try:
+            ws.send(data)
+        except (OSError, ConnectionError):
+            with _clients_lock:
+                _clients.discard(ws)
+
+
+def log(message):
+    line = str(message)
+    print(line, flush=True)
+    broadcast({"type": "log", "message": line})
+
+# ------------------------------------------------------------- host facts
+
+def _os_name():
+    try:
+        for line in open("/etc/os-release"):
+            if line.startswith("PRETTY_NAME="):
+                return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return "Linux"
+
+
+def _gpu_name():
+    try:
+        out = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5).stdout
+        for line in out.splitlines():
+            if re.search(r"VGA|3D controller|Display controller", line):
+                name = line.split(": ", 1)[1] if ": " in line else line
+                return re.sub(r"\s*\(rev [0-9a-f]+\)\s*$", "", name)[:60]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "host GPU"
+
+
+OS_NAME = _os_name()
+GPU_NAME = _gpu_name()
+CORES = os.cpu_count() or 1
+
+
+def _mem_mb():
+    try:
+        for line in open("/proc/meminfo"):
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    return 0
+
+
+RAM_MB = _mem_mb()
+
+
+def host_info(reps):
+    st = os.statvfs("/")
+    running = [r for r in reps if r.get("state") == "running"]
+    return {
+        "hostCores": CORES, "hostRamMb": RAM_MB,
+        "freeGb": st.f_bavail * st.f_frsize // 2 ** 30,
+        "vmCores": sum(int(r.get("cpus") or 0) for r in running),
+        "vmRamMb": sum(int(r.get("ram") or 0) for r in running),
+        "vmHddGb": sum(int(r.get("disk") or 0) for r in reps),
+    }
+
+# ---------------------------------------------------------------- replicas
+
+def have(cmd):
+    return shutil.which(cmd) is not None
+
+
+def run_tool(args, timeout=600):
+    """appsandbox-replica <args>; returns (rc, output)."""
+    try:
+        p = subprocess.run([REPLICA_TOOL] + args, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, (p.stdout + p.stderr)
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, str(e)
+
+
+def run_tool_streaming(args, tag):
+    """appsandbox-replica <args> with every output line in the UI log."""
+    try:
+        p = subprocess.Popen([REPLICA_TOOL] + args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             text=True, stdin=subprocess.DEVNULL)
+    except OSError as e:
+        log("[%s] %s" % (tag, e))
+        return 1
+    for line in p.stdout:
+        line = line.rstrip()
+        if line:
+            log("[%s] %s" % (tag, line))
+    return p.wait()
+
+
+def replica_list():
+    """[{name,state,vnc,desktop,cpus,ram,disk}, ...] from the tool; [] without libvirt."""
+    if not os.path.exists(REPLICA_TOOL) or not have("virsh"):
+        return []
+    rc, out = run_tool(["list"], timeout=60)
+    if rc != 0:
+        return []
+    try:
+        v = json.loads(out)
+        return v if isinstance(v, list) else []
+    except ValueError:
+        return []
+
+
+def host_entry(reps):
+    legacy = "running" if any(r.get("state") == "running" for r in reps) else ("stopped" if reps else "none")
+    st = os.statvfs("/")
+    return {
+        "name": HOSTNAME, "isHost": True, "osType": "Linux", "osName": OS_NAME,
+        "running": True, "agentOnline": True, "installComplete": True, "isTemplate": False,
+        "buildingVhdx": False, "shuttingDown": False, "progress": 100,
+        "cpuCores": CORES, "ramMb": RAM_MB, "hddGb": st.f_blocks * st.f_frsize // 2 ** 30,
+        "gpuMode": 1, "gpuName": GPU_NAME, "networkMode": 1,
+        "sshEnabled": False, "sshState": 0, "sshPort": 0, "vncPort": 0,
+        "replica": legacy, "replicas": json.dumps(reps, separators=(",", ":")),
+        "replicaAuto": False, "hasIdentity": os.path.exists(PROFILE),
+        "snapshots": [], "baseBranches": [], "hasSnapshots": False,
+        "qemuPatched": os.path.exists(QEMU_STAMP),
+    }
+
+
+_last_list = None
+_list_lock = threading.Lock()
+
+
+def state_message(kind="vmListChanged"):
+    reps = replica_list()
+    return {"type": kind, "vms": [host_entry(reps)], "hostInfo": host_info(reps)}
+
+
+def push_state(force=False):
+    global _last_list
+    msg = state_message()
+    with _list_lock:
+        changed = msg["vms"][0]["replicas"] != _last_list
+        _last_list = msg["vms"][0]["replicas"]
+    if changed or force:
+        broadcast(msg)
+
+
+def refresh_loop():
+    n = 0
+    while True:
+        time.sleep(5)
+        n += 1
+        try:
+            push_state(force=(n % 6 == 0))
+        except Exception as e:  # keep the loop alive
+            print("refresh:", e, file=sys.stderr)
+
+
+_busy = set()
+_busy_lock = threading.Lock()
+
+
+def run_replica_job(name, tag, steps):
+    """steps: [(args, description)]; stops at the first failure. Detached."""
+    with _busy_lock:
+        if name in _busy:
+            log("[%s] busy, try again when the current step is done." % name)
+            return
+        _busy.add(name)
+
+    def job():
+        try:
+            for args, desc in steps:
+                log("[%s] %s ..." % (tag, desc))
+                rc = run_tool_streaming(args, tag)
+                if rc != 0:
+                    log("[%s] %s failed (rc=%d)." % (tag, desc, rc))
+                    return
+            log("[%s] done." % tag)
+        finally:
+            with _busy_lock:
+                _busy.discard(name)
+            push_state(force=True)
+    threading.Thread(target=job, daemon=True).start()
+
+# ------------------------------------------------------------- desktop user
+
+def desktop_user():
+    name = os.environ.get("SUDO_USER") or os.environ.get("USER") or "root"
+    try:
+        return pwd.getpwnam(name)
+    except KeyError:
+        return pwd.getpwuid(os.getuid())
+
+
+def run_as_desktop_user(cmd):
+    """Start a desktop program (browser, VNC viewer) as the logged-in user."""
+    u = desktop_user()
+    env = dict(os.environ)
+    env.update({"HOME": u.pw_dir, "USER": u.pw_name, "LOGNAME": u.pw_name,
+                "XDG_RUNTIME_DIR": env.get("XDG_RUNTIME_DIR") or "/run/user/%d" % u.pw_uid})
+    if "DBUS_SESSION_BUS_ADDRESS" not in env:
+        env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=%s/bus" % env["XDG_RUNTIME_DIR"]
+    kw = {}
+    if os.getuid() == 0 and u.pw_uid != 0:
+        kw = {"user": u.pw_uid, "group": u.pw_gid}
+    try:
+        subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True, **kw)
+        return True
+    except (OSError, subprocess.SubprocessError, TypeError) as e:
+        log("could not start %s: %s" % (cmd[0], e))
+        return False
+
+# --------------------------------------------------------------- actions
+
+ARGS = None
+
+
+def sizing_args(msg):
+    out = []
+    for key, flag, lo, hi, suffix in (("cpus", "--cpus", 1, 256, ""), ("ram", "--ram", 256, 1048576, ""),
+                                      ("disk", "--disk", 1, 65536, "G")):
+        v = msg.get(key)
+        if isinstance(v, (int, float)) and lo <= int(v) <= hi:
+            out += [flag, "%d%s" % (int(v), suffix)]
+    return out
+
+
+def clean_name(name):
+    name = re.sub(r"[^A-Za-z0-9._-]", "-", str(name or "replica"))[:63]
+    return name or "replica"
+
+
+def handle(msg, ws):
+    action = msg.get("action")
+    if action == "uiReady":
+        ws.send(json.dumps(state_message("fullState")))
+        return
+    if action in ("selectVm", "reportMinSize", "browse", "getTemplates", "getAdapters"):
+        return
+
+    name = clean_name(msg.get("name"))
+    if action == "replicaStart":
+        run_replica_job(name, name, [(["-n", name, "start"], "starting")])
+    elif action == "replicaStop":
+        run_replica_job(name, name, [(["-n", name, "stop"], "shutting down")])
+    elif action == "replicaRestart":
+        run_replica_job(name, name, [(["-n", name, "stop"], "shutting down"), (["-n", name, "start"], "starting")])
+    elif action == "replicaDestroy":
+        run_replica_job(name, name, [(["-n", name, "destroy"], "deleting")])
+    elif action == "replicaDesktop":
+        run_replica_job(name, name, [(["-n", name, "desktop"], "installing XFCE + Steam (10-20 min)")])
+    elif action == "replicaResize":
+        args = sizing_args(msg) + (["--restart"] if msg.get("restart") else [])
+        run_replica_job(name, name, [(["-n", name, "resize"] + args, "resizing")])
+    elif action in ("replicaSetup", "replicaCreate"):
+        if any(r.get("name") == name for r in replica_list()):
+            log("[%s] already exists." % name)
+            return
+        steps = [(["install"], "installing qemu / libvirt")]
+        if ARGS.qemu_patch and not os.path.exists(QEMU_STAMP):
+            steps.append((["qemu", "build"], "building the identity-patched QEMU (~10 min)"))
+        steps.append((["-n", name, "create"] + sizing_args(msg), "creating the replica"))
+        if action == "replicaSetup":
+            steps.append((["-n", name, "desktop"], "installing XFCE + Steam (10-20 min)"))
+        run_replica_job(name, name, steps)
+    elif action == "vncOpen":
+        port = int(msg.get("port") or 5900)
+        wsp = vnc_bridge(port)
+        url = "viewer.html?ws=%d&vm=0&port=%d&name=%s&vmName=%s&nested=1" % (
+            wsp, port, urllib.parse.quote(name), urllib.parse.quote(HOSTNAME))
+        ws.send(json.dumps({"type": "openWindow", "url": url, "width": 1640, "height": 990}))
+    elif action == "vncGrid":
+        tiles = []
+        for tok in str(msg.get("tiles") or "").split(","):
+            if ":" not in tok:
+                continue
+            n, p = tok.rsplit(":", 1)
+            try:
+                p = int(p)
+            except ValueError:
+                continue
+            tiles.append("%s:%d:%d" % (urllib.parse.quote(clean_name(n)), vnc_bridge(p), p))
+        if tiles:
+            url = "viewer.html?grid=1&vm=0&vmName=%s&tiles=%s" % (urllib.parse.quote(HOSTNAME), ",".join(tiles))
+            ws.send(json.dumps({"type": "openWindow", "url": url, "width": 0, "height": 0}))
+    elif action == "vncConnect":
+        port = int(msg.get("port") or 5900)
+        for cmd in (["vncviewer", "127.0.0.1::%d" % port], ["remmina", "-c", "vnc://127.0.0.1:%d" % port],
+                    ["xdg-open", "vnc://127.0.0.1:%d" % port]):
+            if have(cmd[0]) and run_as_desktop_user(cmd):
+                log("VNC: %s" % " ".join(cmd))
+                return
+        log("VNC: no viewer found; connect one to 127.0.0.1:%d." % port)
+    elif action == "getIdentity":
+        text = ""
+        try:
+            text = json.dumps(json.load(open(PROFILE)), separators=(",", ":"))
+        except (OSError, ValueError):
+            pass
+        ws.send(json.dumps({"type": "identity", "vmIndex": 0, "vmIdentity": text}))
+    elif action == "setIdentity":
+        text = str(msg.get("vmIdentity") or "").strip()
+        try:
+            if text:
+                os.makedirs(os.path.dirname(PROFILE), exist_ok=True)
+                with open(PROFILE, "w") as f:
+                    f.write(text + "\n")
+                log("Identity profile written to %s." % PROFILE)
+            elif os.path.exists(PROFILE):
+                os.remove(PROFILE)
+                log("Identity profile cleared.")
+        except OSError as e:
+            log("Identity profile: %s" % e)
+            return
+        if have("virsh") and replica_list():
+            run_replica_job("*identity", "identity", [(["reidentify", "--all"], "redefining every replica from the profile")])
+        else:
+            push_state(force=True)
+    else:
+        log("(ignored on a Linux host: %s)" % action)
+
+# ------------------------------------------------------------------ HTTP
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, directory=ARGS.web, **kw)
+
+    def log_message(self, fmt, *args):   # quiet
+        pass
+
+    def do_GET(self):
+        if self.path == "/ws" and "upgrade" in self.headers.get("Connection", "").lower():
+            key = self.headers.get("Sec-WebSocket-Key")
+            if not key:
+                self.send_error(400)
+                return
+            self.send_response(101)
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            self.send_header("Sec-WebSocket-Accept", WebSocket.accept_key(key))
+            self.end_headers()
+            self.wfile.flush()
+            self.close_connection = True
+            ws = WebSocket(self.connection)
+            with _clients_lock:
+                _clients.add(ws)
+            try:
+                while ws.open:
+                    op, data = ws.recv()
+                    if op == 0x8:
+                        break
+                    if op == 0x1:
+                        try:
+                            msg = json.loads(data.decode())
+                        except ValueError:
+                            continue
+                        if isinstance(msg, dict):
+                            try:
+                                handle(msg, ws)
+                            except Exception as e:
+                                log("action %s: %s" % (msg.get("action"), e))
+            except (OSError, ConnectionError):
+                pass
+            finally:
+                with _clients_lock:
+                    _clients.discard(ws)
+                ws.close()
+            return
+        if self.path in ("/", ""):
+            self.path = "/index.html"
+        super().do_GET()
+
+
+class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+# ------------------------------------------------------------------ main
+
+def ensure_tool():
+    """Put appsandbox-replica from the checkout in /usr/local/sbin (newer wins)."""
+    src = next((p for p in REPLICA_SRCS if os.path.exists(p)), None)
+    if not src:
+        return os.path.exists(REPLICA_TOOL)
+    if not os.path.exists(REPLICA_TOOL) or os.path.getmtime(src) > os.path.getmtime(REPLICA_TOOL):
+        os.makedirs(os.path.dirname(REPLICA_TOOL), exist_ok=True)
+        shutil.copy2(src, REPLICA_TOOL)
+        os.chmod(REPLICA_TOOL, 0o755)
+        print("installed %s" % REPLICA_TOOL)
+    return True
+
+
+def main():
+    global ARGS
+    ap = argparse.ArgumentParser(description="Nestbox on a Linux host: replicas on this PC")
+    ap.add_argument("--port", type=int, default=8765, help="UI port on 127.0.0.1 (default 8765)")
+    ap.add_argument("--no-browser", action="store_true", help="do not open the browser")
+    ap.add_argument("--qemu-patch", action="store_true",
+                    help="build the identity-patched QEMU before creating a replica (hypervisor-level identity strings)")
+    ap.add_argument("--web", help="folder with the web UI (default: the checkout's web/)")
+    ARGS = ap.parse_args()
+    ARGS.web = ARGS.web or next((d for d in WEB_DIRS if os.path.exists(os.path.join(d, "index.html"))), None)
+    if not ARGS.web:
+        sys.exit("nestbox: web UI not found (looked in %s)" % ", ".join(WEB_DIRS))
+    if os.getuid() != 0:
+        sys.exit("nestbox: run with sudo (libvirt and /dev/kvm need root)")
+    if not os.path.exists("/dev/kvm"):
+        print("nestbox: /dev/kvm is missing - enable virtualization in the firmware; replicas cannot run without it",
+              file=sys.stderr)
+    if not ensure_tool():
+        sys.exit("nestbox: appsandbox-replica not found next to this script or in ../replica")
+
+    srv = Server(("127.0.0.1", ARGS.port), Handler)
+    url = "http://127.0.0.1:%d/" % ARGS.port
+    print("Nestbox on %s (%s): %s" % (HOSTNAME, OS_NAME, url), flush=True)
+    threading.Thread(target=refresh_loop, daemon=True).start()
+    if not have("virsh"):
+        run_replica_job("*install", "host", [(["install"], "installing qemu / libvirt (first run)")])
+    if not ARGS.no_browser:
+        if have("xdg-open"):
+            run_as_desktop_user(["xdg-open", url])
+        else:
+            print("open %s in a browser" % url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

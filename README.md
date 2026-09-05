@@ -22,6 +22,9 @@ macOS support are his work and stay MIT-licensed under his copyright (see
   a `+` to add another replica, sized as you like.
 - **A "Nested replica" option on New Sandbox** that builds the patched QEMU, creates the first
   replica and installs its desktop in the background once the install finishes.
+- **On Ubuntu, no sandbox at all:** `sudo tools/linux/host/nestbox` serves the same UI to your
+  browser with this PC as the top row and the replicas running on it directly (libvirt / KVM,
+  stock QEMU unless you ask for the patch). See [tools/linux/host/](tools/linux/host/).
 - **A new interface** in a warm "signal rack" style: mono labels, status lamps, one accent, light
   and dark themes, SVG glyphs instead of emoji.
 

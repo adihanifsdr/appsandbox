@@ -63,6 +63,28 @@ const netNames = ['None', 'NAT', 'External', 'Internal'];
 var hostBridge = (function() {
     var isWebView2 = !!(window.chrome && window.chrome.webview);
     var isWKWebView = !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.host);
+    /* Linux host: the page is served by tools/linux/host/nestbox over HTTP and
+     * talks to it on a WebSocket at /ws with the same JSON messages. */
+    var isWS = !isWebView2 && !isWKWebView && /^https?:/.test(location.protocol);
+    var ws = null, wsQueue = [];
+
+    function wsConnect() {
+        ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+        ws.onopen = function() {
+            var q = wsQueue; wsQueue = [];
+            q.forEach(function(s) { ws.send(s); });
+        };
+        ws.onmessage = function(ev) {
+            var m = null;
+            try { m = JSON.parse(ev.data); } catch (e) {}
+            if (m && window.onHostMessage) window.onHostMessage(m);
+        };
+        ws.onclose = function() {
+            ws = null;
+            if (window.appendLog) appendLog('Lost the connection to nestbox; reconnecting...');
+            setTimeout(function() { wsConnect(); send('uiReady'); }, 2000);
+        };
+    }
 
     function send(action, data) {
         var msg = Object.assign({ action: action }, data || {});
@@ -72,12 +94,18 @@ var hostBridge = (function() {
             /* WKWebView only accepts JSON-serializable values; strings round-trip
              * most reliably so we hand the native side the raw JSON text. */
             window.webkit.messageHandlers.host.postMessage(JSON.stringify(msg));
+        } else if (isWS) {
+            var s = JSON.stringify(msg);
+            if (ws && ws.readyState === 1) ws.send(s);
+            else wsQueue.push(s);
         } else {
             console.warn('[hostBridge] no native host available; dropping', msg);
         }
     }
 
-    return { send: send, isWebView2: isWebView2, isWKWebView: isWKWebView, isMac: isWKWebView };
+    if (isWS) wsConnect();
+    return { send: send, isWebView2: isWebView2, isWKWebView: isWKWebView, isMac: isWKWebView,
+             isLinux: isWS, noSnapshots: isWKWebView || isWS };
 })();
 
 function sendCmd(action, data) { hostBridge.send(action, data); }
@@ -91,6 +119,15 @@ function sendCmd(action, data) { hostBridge.send(action, data); }
 if (hostBridge.isMac) {
     var hide = document.querySelectorAll('.win-only, .needs-linux-version');
     for (var i = 0; i < hide.length; i++) hide[i].style.display = 'none';
+}
+
+/* On a Linux host there are no sandbox VMs at all: this PC is the top row and
+ * the replicas run on it directly, so New Sandbox and the Windows-host
+ * columns go away. */
+if (hostBridge.isLinux) {
+    var hideL = document.querySelectorAll('.win-only, .needs-linux-version, #btn-new-sandbox');
+    for (var li = 0; li < hideL.length; li++) hideL[li].style.display = 'none';
+    document.title = 'Nestbox';
 }
 
 /* OS Type dropdown: drop guest types that aren't available on this host.
@@ -167,6 +204,7 @@ window.onHostMessage = function(msg) {
         case 'templates':     populateTemplates(msg.templates); break;
         case 'identity':      openIdentityModal(msg.vmIndex, msg.vmIdentity); break;
         case 'alert':         showModal('Error', msg.message, 'OK'); break;
+        case 'openWindow':    openHostWindow(msg); break;
         case 'prereqRequired': onPrereqRequired(); break;
         case 'prereqReboot':   onPrereqReboot(); break;
         case 'prereqProgress': onPrereqProgress(msg); break;
@@ -486,7 +524,16 @@ function gatherConfig() {
    vncOpen makes the host open a window of its own (web/viewer.html on a
    separate WebView2) on a loopback WebSocket bridge onto the VNC tunnel -
    the nested replica's console, or the guest's VNC server on port 5900.
-   Nothing comes back to this page. */
+   Nothing comes back to this page on Windows; the Linux host cannot open
+   windows itself and answers with openWindow {url} instead, which the
+   browser turns into a popup. */
+function openHostWindow(msg) {
+    var feat = 'popup=yes';
+    if (msg.width && msg.height) feat += ',width=' + msg.width + ',height=' + msg.height;
+    else feat += ',width=' + Math.max(800, screen.availWidth - 80) + ',height=' + Math.max(600, screen.availHeight - 120);
+    var w = window.open(msg.url, '_blank', feat);
+    if (!w) appendLog('The browser blocked the screen window; allow popups for this page and try again.');
+}
 
 /* ---- VM identity editor (per-VM modal) ---- */
 var identityVmIndex = -1;
@@ -903,6 +950,34 @@ function buildRowCells(vm, i, statusTd) {
         isLinux ? '' : 'hidden',
         'Edit the VM identity profile - what the guest reports about its machine (DMI strings, systemd-detect-virt, chipset; ACPI / SMBIOS / drive / CPUID strings for the nested VPS replica). Applies immediately on a running VM; a replica picks it up at its next boot.');
 
+    /* This PC (Linux host): the replicas run right here, so the row is the
+       machine itself - no start / stop / display / SSH / delete, only the
+       nested "+" and the identity profile the replicas are built from. */
+    if (vm.isHost) {
+        var nameTd = makeCell(vm.name, i, 0, 'This PC: the replicas below run on it directly (libvirt / KVM)');
+        var tag = document.createElement('span');
+        tag.className = 'hint mono';
+        tag.style.marginLeft = '8px';
+        tag.textContent = 'this PC';
+        nameTd.appendChild(tag);
+        agentTd.title = 'nestbox is running on this PC';
+        var hostCells = [
+            nameTd,
+            makeCell(vm.osName || 'Linux', i, 1),
+            statusTd,
+            agentTd,
+            makeCell(vm.cpuCores, i, 4, 'CPU cores of this PC'),
+            makeCell(vm.ramMb + ' MB', i, 5, 'Memory of this PC'),
+            makeCell(vm.hddGb + ' GB', i, 6, 'Size of the root filesystem'),
+            makeCell(vm.gpuName || 'host GPU', i, 7, 'GPU of this PC'),
+            makeCell('host', i, 8, 'The replicas use libvirt\'s NAT network (virbr0)'),
+        ];
+        if (!hostBridge.noSnapshots) hostCells.push(makeCell('', i, 9));
+        hostCells.push(blankIconCell(), blankIconCell(), blankIconCell(), vncCell, identCell,
+                       blankIconCell(), blankIconCell(), blankIconCell(), blankIconCell());
+        return hostCells;
+    }
+
     var cells = [
         makeCell(vm.name, i, 0),
         makeCell(vm.osType, i, 1),
@@ -914,7 +989,7 @@ function buildRowCells(vm, i, statusTd) {
         makeCell(vm.gpuName || (vm.gpuMode === 2 ? 'Try all' : vm.gpuMode === 1 ? 'Default GPU' : 'None'), i, 7, 'GPU passed through to the VM via GPU-PV, or None'),
         makeCell(netNames[vm.networkMode] || 'None', i, 8, 'Networking mode: NAT (shared), External (bridged), Internal (host-only), or None'),
     ];
-    if (!hostBridge.isMac) cells.push(makeSnapCell(vm, i));
+    if (!hostBridge.noSnapshots) cells.push(makeSnapCell(vm, i));
     cells.push(
         makeIconCell('start', '\u25B6\uFE0F', !vm.running && !bld, (function(vmIdx, sv, vmObj) { return function() {
             var p = parseSnapValue(sv);
@@ -951,7 +1026,14 @@ function buildRowCells(vm, i, statusTd) {
 function renderVmTable() {
     var tbody = document.getElementById('vm-table');   /* one <tbody class="vm-group"> per VM (its row + replica rows) */
     var vc = document.getElementById('vm-count');
-    if (vc) vc.textContent = vms.length ? vms.length + (vms.length === 1 ? ' sandbox' : ' sandboxes') : '';
+    if (vc) {
+        if (hostBridge.isLinux) {
+            var nrep = vms.length ? parseReplicas(vms[0].replicas).length : 0;
+            vc.textContent = nrep ? nrep + (nrep === 1 ? ' replica' : ' replicas') + ' on this PC' : 'this PC';
+        } else {
+            vc.textContent = vms.length ? vms.length + (vms.length === 1 ? ' sandbox' : ' sandboxes') : '';
+        }
+    }
 
     if (vms.length === 0) {
         rowCache = {};
@@ -960,7 +1042,7 @@ function renderVmTable() {
         var grp0 = document.createElement('tbody');
         var tr = document.createElement('tr');
         var td = document.createElement('td');
-        td.colSpan = hostBridge.isMac ? 16 : 17;
+        td.colSpan = hostBridge.noSnapshots ? 16 : 17;
         td.className = 'empty-state';
         var btn = document.createElement('button');
         btn.className = 'primary empty-state-btn';
@@ -1016,7 +1098,7 @@ function renderVmTable() {
             vm.installComplete, vm.isTemplate,
             vm.sshEnabled, vm.sshState, vm.sshPort,
             vm.vncPort, vm.replica, vm.replicas, vm.hasIdentity,   /* nested / VNC / identity cells */
-            vm.osType, vm.ramMb, vm.hddGb, vm.cpuCores,
+            vm.osType, vm.ramMb, vm.hddGb, vm.cpuCores, vm.isHost, vm.osName,
             vm.gpuMode, vm.gpuName, vm.networkMode,
             selectedSnap[i] || 'current',
             /* Snapshot tree: take/delete/rename/branch must trigger a row rebuild
@@ -1082,7 +1164,7 @@ function buildReplicaRows(grp, vm, idx) {
     while (grp.children.length > 1) grp.removeChild(grp.lastChild);
     if (vm.osType !== 'Linux' || !vm.running || !vm.agentOnline || vm.buildingVhdx) return;
     var reps = parseReplicas(vm.replicas);
-    var dataCols = hostBridge.isMac ? 9 : 10;   /* Name .. Snapshot */
+    var dataCols = hostBridge.noSnapshots ? 9 : 10;   /* Name .. Snapshot */
     /* every running console, for the grid window (one window, all of them tiled) */
     var live = reps.filter(function(r) { return r.state === 'running' && r.vnc; });
     var tiles = live.map(function(r) { return r.name + ':' + r.vnc; }).join(',');
