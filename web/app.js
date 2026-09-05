@@ -1039,6 +1039,7 @@ function renderVmTable() {
             vm.running, vm.buildingVhdx, vm.shuttingDown, vm.agentOnline,
             vm.installComplete, vm.isTemplate,
             vm.sshEnabled, vm.sshState, vm.sshPort,
+            vm.vncPort, vm.replica, vm.hasIdentity,   /* nested / VNC / identity cells */
             vm.osType, vm.ramMb, vm.hddGb, vm.cpuCores,
             vm.gpuMode, vm.gpuName, vm.networkMode,
             selectedSnap[i] || 'current',
