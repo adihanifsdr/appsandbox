@@ -356,6 +356,13 @@ static int process_async_message(VmInstance *vm, SOCKET s, const char *buf)
             if (g_agent_hwnd)
                 PostMessageW(g_agent_hwnd, WM_VM_VNC_CHANGED, 0, (LPARAM)vm->unique_id);
         }
+    } else if (strncmp(buf, "replicas:", 9) == 0) {
+        /* "replicas:[{name,state,vnc,desktop},...]" - every nested replica, on change. */
+        if (strcmp(vm->replicas, buf + 9) != 0) {
+            strncpy_s(vm->replicas, sizeof(vm->replicas), buf + 9, _TRUNCATE);
+            if (g_agent_hwnd)
+                PostMessageW(g_agent_hwnd, WM_VM_VNC_CHANGED, 0, (LPARAM)vm->unique_id);
+        }
     } else if (strncmp(buf, "replica_result:", 15) == 0) {
         ui_log(L"[%s] Nested replica: %S.", vm->name, buf + 15);
     } else if (strncmp(buf, "displays:", 9) == 0) {
@@ -519,6 +526,10 @@ static DWORD WINAPI agent_thread_proc(LPVOID param)
                 strcpy_s(line, sizeof(line), "identity none");
             }
             send_line(s, line);
+            /* First-time replica: the agent runs the whole setup detached and
+               skips it when the replica already exists. */
+            if (vm->replica_auto && vm->install_complete)
+                send_line(s, "replica replica setup");
         }
 
         /* Send GPU share info to agent (if GPU-PV is assigned).
@@ -669,6 +680,7 @@ static DWORD WINAPI agent_thread_proc(LPVOID param)
         ui_log(L"Agent offline for \"%s\".", vm->name);
         vm->vnc_guest_port = 0;
         vm->replica_state[0] = '\0';
+        vm->replicas[0] = '\0';
         notify_agent_status(vm);
 
         /* Wake up any blocked command sender */

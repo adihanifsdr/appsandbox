@@ -18,7 +18,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     /* Initialize OLE/COM (required for WebView2) */
     OleInitialize(NULL);
 
-    /* Headless daemon mode: appsandbox.exe --headless
+    /* Headless daemon mode: Nestbox.exe --headless
        (normal launches pass no args, so the GUI path below is unaffected). */
     if (pCmdLine && wcsstr(pCmdLine, L"--headless")) {
         int rc = run_headless(hInstance, pCmdLine);

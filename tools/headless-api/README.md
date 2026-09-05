@@ -20,7 +20,7 @@ c.delete_vm("dev")
 
 ## How it works
 
-`appsandbox.exe --headless` (Windows) or
+`Nestbox.exe --headless` (Windows) or
 `sudo AppSandbox.app/Contents/MacOS/AppSandbox --headless` (macOS) starts a
 **single-owner daemon**. It hosts the AppSandbox core (`appsandbox_core.dll` /
 `AppSandboxCore.framework`) for the lifetime of the process and exposes the
@@ -118,7 +118,7 @@ clear message** and a non-zero exit — it never half-starts:
 1. **Start the daemon**:
    ```
    # Windows (elevated shell)
-   appsandbox.exe --headless
+   Nestbox.exe --headless
 
    # macOS
    sudo /Applications/AppSandbox.app/Contents/MacOS/AppSandbox --headless
@@ -190,7 +190,7 @@ methods return `(http_status, body)` so you can branch on the status code.
 | `snapshots_full(name)` | the above **plus** `current: {snapIndex, branchIndex}` |
 
 A **status object** has: `name, osType, state, running, agentOnline,
-installComplete, building, progress, sshState, sshPort, vncPort, replica (Linux: "" / none / stopped / running, the nested appsandbox-replica), ramMb, hddGb, cpuCores,
+installComplete, building, progress, sshState, sshPort, vncPort, replica (Linux: "" / none / stopped / running, the default nested replica), replicas (Linux: every nested replica as `[{name, state, vnc, desktop}]`), replicaAuto, ramMb, hddGb, cpuCores,
 gpuMode, networkMode, displayOpen, buildStep` (`buildStep` names the current
 build phase while `building`, e.g. `"Downloading packages 42/182"`).
 
@@ -319,6 +319,7 @@ rather than forwarding bad input to the core.
 | `sshEnabled` | provision SSH + forward a loopback port |
 | `sshDeployKey` | deploy the AppSandbox public key for password-less login (**requires `sshEnabled`**; rejected `400` otherwise) |
 | `gaKernel` | Linux only: install the GA kernel (`linux-generic`, e.g. 6.8 on 24.04) from the archive at first boot and make GRUB boot it, instead of the ISO's HWE kernel. Matches what a stock server / VPS runs. |
+| `replicaAuto` | Linux only: after the install, build the identity-patched QEMU, create the nested replica `replica` and install XFCE + Steam in it (runs in the guest in the background; `status` shows `replicas`). |
 | `vmIdentity` | Linux only: JSON profile of what the guest reports about its machine (`[{"check":"sys_vendor","name":"OpenStack Foundation"}, ...]`): DMI strings, `systemd-detect-virt`, chipset. The GUI prefills the bare-metal desktop profile from `tools/linux/identity/README.md`; the API takes exactly what it is given (omit for the real identity). Applied in the guest at every boot; also settable later with `PUT /vms/{name}` (`""` clears). `status` reports `hasIdentity`. See `tools/linux/identity/README.md` for what can and cannot be overlaid. |
 | `isTemplate` | build a template (Windows only; can't be built from another template) |
 

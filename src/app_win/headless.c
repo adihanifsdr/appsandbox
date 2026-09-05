@@ -1,5 +1,5 @@
 /*
- * headless.c -- AppSandbox headless daemon (appsandbox.exe --headless).
+ * headless.c -- AppSandbox headless daemon (Nestbox.exe --headless).
  *
  * Single-owner daemon: hosts the core for the process lifetime and serves a
  * Docker-style local HTTP/JSON API over http.sys (loopback). A discovery file
@@ -249,7 +249,7 @@ static int append_vm_json(char *out, int cap, int pos, VmInstance *v)
     pos  = append_wstr(out, cap, pos, v->os_type);
     pos += sprintf_s(out + pos, cap - pos,
         ",\"state\":\"%s\",\"running\":%s,\"agentOnline\":%s,\"installComplete\":%s,"
-        "\"building\":%s,\"progress\":%d,\"sshState\":%d,\"sshPort\":%lu,\"vncPort\":%lu,\"hasIdentity\":%s,\"replica\":\"%s\","
+        "\"building\":%s,\"progress\":%d,\"sshState\":%d,\"sshPort\":%lu,\"vncPort\":%lu,\"hasIdentity\":%s,\"replica\":\"%s\",\"replicas\":%s,\"replicaAuto\":%s,"
         "\"ramMb\":%lu,\"hddGb\":%lu,\"cpuCores\":%lu,\"gpuMode\":%d,\"networkMode\":%d,"
         "\"displayOpen\":%s,\"buildStep\":",
         derive_state(v),
@@ -259,6 +259,7 @@ static int append_vm_json(char *out, int cap, int pos, VmInstance *v)
         (v->ssh_key_deployed && v->ssh_state == 2) ? 4 : v->ssh_state,   /* 4 = ready + key deployed */
         (unsigned long)v->ssh_port, (unsigned long)v->vnc_guest_port,
         v->identity[0] ? "true" : "false", v->replica_state,
+        v->replicas[0] ? v->replicas : "[]", v->replica_auto ? "true" : "false",
         (unsigned long)v->ram_mb, (unsigned long)v->hdd_gb, (unsigned long)v->cpu_cores,
         v->gpu_mode, v->network_mode,
         display_is_open(v->unique_id) ? "true" : "false");
@@ -678,6 +679,7 @@ static int handle_request(PHTTP_REQUEST req)
             if (json_get_bool(body, L"sshEnabled", &bv)) cfg.ssh_enabled = bv;
             if (json_get_bool(body, L"sshDeployKey", &bv)) cfg.ssh_deploy_key = bv;
             if (json_get_bool(body, L"gaKernel", &bv)) cfg.linux_ga_kernel = bv;
+            if (json_get_bool(body, L"replicaAuto", &bv)) cfg.replica_auto = bv;
             if (json_get_bool(body, L"isTemplate", &bv)) cfg.is_template = bv;
             {
                 static wchar_t ident[4096];
@@ -1168,7 +1170,7 @@ static int http_start(int *out_port)
 
 /* ---- Startup prerequisite checks ----
  * The exe is GUI-subsystem, so to surface a failure to someone who ran
- * `appsandbox.exe --headless` from a terminal we attach to the launching
+ * `Nestbox.exe --headless` from a terminal we attach to the launching
  * console and print there; if there's no parent console (GUI launch) we fall
  * back to a message box. Either way the reason is also logged. */
 static void cli_fail(const wchar_t *msg)

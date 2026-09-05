@@ -511,6 +511,8 @@ static void save_vm_list(void)
             fwprintf(f, L"SshPubKey=%s\n", g_vms[i].ssh_pubkey);
         if (g_vms[i].identity[0])
             fwprintf(f, L"Identity=%s\n", g_vms[i].identity);
+        if (g_vms[i].replica_auto)
+            fwprintf(f, L"ReplicaAuto=1\n");
         if (g_vms[i].install_complete)
             fwprintf(f, L"InstallComplete=1\n");
         fwprintf(f, L"\n");
@@ -612,6 +614,8 @@ static void load_vm_list(void)
             wcsncpy_s(vm->ssh_pubkey, 512, line + 10, _TRUNCATE);
         else if (wcsncmp(line, L"Identity=", 9) == 0)
             wcsncpy_s(vm->identity, 4096, line + 9, _TRUNCATE);
+        else if (wcsncmp(line, L"ReplicaAuto=", 12) == 0)
+            vm->replica_auto = (_wtoi(line + 12) != 0);
         else if (wcsncmp(line, L"InstallComplete=", 16) == 0)
             vm->install_complete = (_wtoi(line + 16) != 0);
     }
@@ -879,6 +883,7 @@ static void asb_hcs_state_changed(VmInstance *instance, DWORD event)
             instance->ssh_key_deployed = FALSE;
             instance->vnc_guest_port = 0;
             instance->replica_state[0] = '\0';
+            instance->replicas[0] = '\0';
             hcs_stop_monitor(instance);
             vm_ssh_proxy_stop(instance);
             vm_vnc_proxy_stop(instance);
@@ -3177,6 +3182,7 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
             inst->ssh_enabled = cfg.ssh_enabled;
             inst->ssh_deploy_key = cfg.ssh_deploy_key;
             if (cfg.ssh_deploy_key) wcscpy_s(inst->ssh_pubkey, 512, ssh_pubkey);
+            inst->replica_auto = config->replica_auto;
             if (config->identity && config->identity[0])
                 wcsncpy_s(inst->identity, 4096, config->identity, _TRUNCATE);
             inst->building_vhdx = TRUE;
@@ -3248,6 +3254,7 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
             inst->ssh_enabled = cfg.ssh_enabled;
             inst->ssh_deploy_key = cfg.ssh_deploy_key;
             if (cfg.ssh_deploy_key) wcscpy_s(inst->ssh_pubkey, 512, ssh_pubkey);
+            inst->replica_auto = config->replica_auto;
             if (config->identity && config->identity[0])
                 wcsncpy_s(inst->identity, 4096, config->identity, _TRUNCATE);
             inst->building_vhdx = TRUE;
@@ -3417,6 +3424,7 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
        paths set them inline on their own instance copies). */
     inst->ssh_deploy_key = cfg.ssh_deploy_key;
     if (cfg.ssh_deploy_key) wcscpy_s(inst->ssh_pubkey, 512, ssh_pubkey);
+    inst->replica_auto = config->replica_auto;
     if (config->identity && config->identity[0])
         wcsncpy_s(inst->identity, 4096, config->identity, _TRUNCATE);
 

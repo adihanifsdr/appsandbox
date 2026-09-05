@@ -12,15 +12,23 @@
 # because it IS a KVM guest. Needs nested virtualization, which App Sandbox
 # enables for Linux VMs (/dev/kvm inside the guest).
 #
-# Usage:  appsandbox-replica install
+# Usage:  appsandbox-replica [-n NAME] <command> ...     (default name: replica)
+#         appsandbox-replica install
 #         appsandbox-replica create [--smbios sysinfo|host] [--disk 20G]
 #                                   [--ram 4096] [--cpus 4] [--vnc 5900]
 #                                   [--profile /etc/appsandbox/identity.json]
 #                                   [--image URL] [--video cirrus|virtio]
-#         appsandbox-replica reidentify [--restart] [--profile FILE]
+#         appsandbox-replica reidentify [--restart] [--profile FILE] [--all]
 #         appsandbox-replica qemu build|restore|status
 #         appsandbox-replica desktop [--no-steam]     # XFCE + Steam + autologin, virtio video
+#         appsandbox-replica list                     # every replica as JSON [{name,state,vnc,desktop}]
 #         appsandbox-replica start|stop|destroy|status|ip|ssh [cmd]|console|xml|checks
+#
+# One sandbox VM can hold several replicas: each has a name (-n), its own
+# libvirt domain, disk, ssh key, VNC port and files under
+# /var/lib/appsandbox/replica/replicas/<name>; the base image and the patched
+# QEMU are shared. The first replica of older installs lives directly in
+# /var/lib/appsandbox/replica and keeps working there.
 #
 # Hypervisor-level identity: the profile keys acpi_oem_id, acpi_oem_table_id,
 # acpi_creator_id, smbios_manufacturer, drive_vendor, disk_model, cdrom_model,
@@ -40,8 +48,19 @@
 # generated here (also password test123). Files live in /var/lib/appsandbox/replica.
 set -euo pipefail
 
+# -n NAME may precede the command (REPLICA_NAME works too)
+if [ "${1:-}" = "-n" ] || [ "${1:-}" = "--name" ]; then
+    [ -n "${2:-}" ] || { echo "appsandbox-replica: -n needs a name" >&2; exit 1; }
+    REPLICA_NAME=$2; shift 2
+fi
 NAME=${REPLICA_NAME:-replica}
-DIR=${REPLICA_DIR:-/var/lib/appsandbox/replica}
+case "$NAME" in *[!A-Za-z0-9._-]*|"") echo "appsandbox-replica: bad replica name '$NAME' (letters, digits, . _ - only)" >&2; exit 1 ;; esac
+ROOT=${REPLICA_ROOT:-/var/lib/appsandbox/replica}   # shared: base image, qemu build
+BASE_IMG=$ROOT/base.img
+# per-replica files: the legacy first replica sits in $ROOT itself
+if [ -n "${REPLICA_DIR:-}" ]; then DIR=$REPLICA_DIR
+elif [ "$NAME" = replica ] && [ -f "$ROOT/replica.conf" ]; then DIR=$ROOT
+else DIR=$ROOT/replicas/$NAME; fi
 DEFAULT_IMAGE=https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img
 PROFILE=/etc/appsandbox/identity.json
 SMBIOS=sysinfo; DISK=20G; RAM=4096; CPUS=4; VNC=5900; IMAGE=$DEFAULT_IMAGE
@@ -220,9 +239,28 @@ hv_note() {
     fi
 }
 
+DESKTOP=0
 save_conf() {
-    printf "RAM='%s'\nCPUS='%s'\nVNC='%s'\nSMBIOS='%s'\nPROFILE='%s'\nUUID='%s'\nMAC='%s'\nVIDEO='%s'\n" \
-        "$RAM" "$CPUS" "$VNC" "$SMBIOS" "$PROFILE" "$1" "$2" "$VIDEO" > "$DIR/replica.conf"
+    printf "RAM='%s'\nCPUS='%s'\nVNC='%s'\nSMBIOS='%s'\nPROFILE='%s'\nUUID='%s'\nMAC='%s'\nVIDEO='%s'\nDESKTOP='%s'\n" \
+        "$RAM" "$CPUS" "$VNC" "$SMBIOS" "$PROFILE" "$1" "$2" "$VIDEO" "$DESKTOP" > "$DIR/replica.conf"
+}
+
+# every replica on this VM, as JSON: [{"name","state","vnc","desktop"}, ...]
+cmd_list() {
+    local d name state vnc desk
+    echo "["
+    local first=1
+    for d in "$ROOT" "$ROOT"/replicas/*; do
+        [ -f "$d/replica.conf" ] || continue
+        if [ "$d" = "$ROOT" ]; then name=replica; else name=$(basename "$d"); fi
+        vnc=$(sed -n "s/^VNC='\(.*\)'/\1/p" "$d/replica.conf"); desk=$(sed -n "s/^DESKTOP='\(.*\)'/\1/p" "$d/replica.conf")
+        state=$(virsh domstate "$name" 2>/dev/null | head -1)
+        case "$state" in running) state=running ;; "") state=undefined ;; *) state=stopped ;; esac
+        [ $first = 1 ] || echo ","
+        first=0
+        printf '  {"name": "%s", "state": "%s", "vnc": %s, "desktop": %s}' "$name" "$state" "${vnc:-0}" "$([ "${desk:-0}" = 1 ] && echo true || echo false)"
+    done
+    echo; echo "]"
 }
 
 cmd_create() {
@@ -248,15 +286,15 @@ cmd_create() {
     local want=$VNC
     while ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$VNC\$"; do VNC=$((VNC + 1)); [ $VNC -gt $((want + 20)) ] && die "no free VNC port near $want"; done
     [ "$VNC" != "$want" ] && echo "note: 127.0.0.1:$want is in use, replica console on 127.0.0.1:$VNC instead"
-    mkdir -p "$DIR"; cd "$DIR"
+    mkdir -p "$DIR" "$ROOT"; cd "$DIR"
     if virsh dominfo "$NAME" >/dev/null 2>&1; then
-        die "domain '$NAME' already exists (appsandbox-replica destroy first)"
+        die "domain '$NAME' already exists (appsandbox-replica -n $NAME destroy first)"
     fi
-    if [ ! -s base.img ]; then
+    if [ ! -s "$BASE_IMG" ]; then
         echo "downloading $IMAGE ..."
-        curl -fL --retry 3 -o base.img.part "$IMAGE" && mv base.img.part base.img
+        curl -fL --retry 3 -o "$BASE_IMG.part" "$IMAGE" && mv "$BASE_IMG.part" "$BASE_IMG"
     fi
-    qemu-img create -q -f qcow2 -b "$DIR/base.img" -F qcow2 disk.qcow2 "$DISK"
+    qemu-img create -q -f qcow2 -b "$BASE_IMG" -F qcow2 disk.qcow2 "$DISK"
     # ssh keypair for `appsandbox-replica ssh`
     [ -f id_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -f id_ed25519 -C appsandbox-replica
     local pub; pub=$(cat id_ed25519.pub)
@@ -294,7 +332,7 @@ EOF
     virsh start "$NAME" >/dev/null
     echo "OK: replica '$NAME' defined and started (smbios=$SMBIOS, vnc 127.0.0.1:$VNC, qemu=$(qemu_patched_installed && echo identity-patched || echo stock))"
     echo "    XML: $DIR/$NAME.xml   (edit + 'virsh define' to tweak, e.g. <smbios mode='host'/>)"
-    echo "    first boot takes ~1 min (cloud-init); then: appsandbox-replica ssh"
+    echo "    first boot takes ~1 min (cloud-init); then: appsandbox-replica -n $NAME ssh"
     hv_note
 }
 
@@ -304,9 +342,18 @@ EOF
 # until it restarts (--restart does that now).
 cmd_reidentify() {
     need_root
-    [ -f "$DIR/replica.conf" ] || die "no replica created here (appsandbox-replica create first)"
+    if [ "${1:-}" = "--all" ]; then
+        # every replica on this VM (the agent runs this after a profile change)
+        shift
+        local n
+        for n in $(cmd_list | sed -n 's/.*"name": "\([^"]*\)".*/\1/p'); do
+            REPLICA_NAME=$n REPLICA_DIR= "$0" -n "$n" reidentify "$@" || true
+        done
+        return 0
+    fi
+    [ -f "$DIR/replica.conf" ] || die "no replica '$NAME' here (appsandbox-replica -n $NAME create first)"
     # shellcheck disable=SC1091
-    MAC=""; . "$DIR/replica.conf"        # RAM CPUS VNC SMBIOS PROFILE UUID MAC VIDEO
+    MAC=""; DESKTOP=0; . "$DIR/replica.conf"        # RAM CPUS VNC SMBIOS PROFILE UUID MAC VIDEO DESKTOP
     local restart=0
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -409,7 +456,7 @@ cmd_desktop() {
             *) die "unknown option $1" ;;
         esac
     done
-    [ -f "$DIR/replica.conf" ] || die "no replica created here (appsandbox-replica create first)"
+    [ -f "$DIR/replica.conf" ] || die "no replica '$NAME' here (appsandbox-replica -n $NAME create first)"
     virsh domstate "$NAME" 2>/dev/null | grep -q running || { virsh start "$NAME" >/dev/null 2>&1 || true; }
     local i
     for i in $(seq 1 36); do ssh_run true 2>/dev/null && break; sleep 5; done
@@ -438,15 +485,13 @@ fi
 echo "desktop: OK"
 EOF
     # virtio video for a real resolution (Cirrus tops out at 1024x768)
-    MAC=""; VIDEO=cirrus
+    MAC=""; VIDEO=cirrus; DESKTOP=0
     # shellcheck disable=SC1091
     . "$DIR/replica.conf"
-    if [ "$VIDEO" != virtio ]; then
-        VIDEO=virtio
-        gen_xml "$UUID" "$MAC" > "$DIR/$NAME.xml"
-        save_conf "$UUID" "$MAC"
-        virsh define "$DIR/$NAME.xml" >/dev/null
-    fi
+    VIDEO=virtio; DESKTOP=1
+    gen_xml "$UUID" "$MAC" > "$DIR/$NAME.xml"
+    save_conf "$UUID" "$MAC"
+    virsh define "$DIR/$NAME.xml" >/dev/null
     echo "==> restarting the replica into the desktop"
     virsh autostart "$NAME" >/dev/null 2>&1 || true
     virsh destroy "$NAME" >/dev/null 2>&1 || true
@@ -522,13 +567,16 @@ case "$cmd" in
     start)   need_root; virsh start "$NAME" ;;
     stop)    need_root; virsh shutdown "$NAME" ;;
     destroy) need_root; virsh destroy "$NAME" 2>/dev/null || true; virsh undefine "$NAME" 2>/dev/null || true
-             rm -f "$DIR/disk.qcow2" "$DIR/seed.iso" "$DIR/$NAME.xml" "$DIR/replica.conf"; echo "replica removed (base image kept in $DIR)" ;;
-    status)  virsh dominfo "$NAME" 2>/dev/null | grep -E "^(Name|State|CPU\(s\)|Max memory)" || echo "no replica defined"
-             ip=$(cmd_ip || true); [ -n "$ip" ] && echo "IP:              $ip" || true ;;
+             rm -f "$DIR/disk.qcow2" "$DIR/seed.iso" "$DIR/$NAME.xml" "$DIR/replica.conf" "$DIR/user-data" "$DIR/meta-data" "$DIR/id_ed25519" "$DIR/id_ed25519.pub"
+             [ "$DIR" != "$ROOT" ] && rmdir "$DIR" 2>/dev/null; echo "replica '$NAME' removed (base image kept in $ROOT)" ;;
+    list)    cmd_list ;;
+    status)  virsh dominfo "$NAME" 2>/dev/null | grep -E "^(Name|State|CPU\(s\)|Max memory)" || echo "no replica '$NAME' defined"
+             ip=$(cmd_ip || true); [ -n "$ip" ] && echo "IP:              $ip" || true
+             echo "replicas on this VM:"; cmd_list ;;
     ip)      cmd_ip ;;
     ssh)     cmd_ssh "$@" ;;
     console) exec virsh console "$NAME" ;;
     xml)     cat "$DIR/$NAME.xml" ;;
     checks)  cmd_checks ;;
-    *)       die "unknown command '$cmd' (install|create|reidentify|qemu|desktop|start|stop|destroy|status|ip|ssh|console|xml|checks)" ;;
+    *)       die "unknown command '$cmd' (install|create|reidentify|qemu|desktop|list|start|stop|destroy|status|ip|ssh|console|xml|checks)" ;;
 esac

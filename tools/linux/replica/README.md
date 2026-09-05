@@ -28,6 +28,16 @@ sandbox VM with `sudo appsandbox-replica qemu build` and installed over the
 distro binary with `dpkg-divert` (`qemu restore` undoes it). Until then the
 stock QEMU simply ignores those keys and `create` / `reidentify` say so.
 
+## Several replicas per sandbox
+
+Every replica has a name (`-n NAME`, default `replica`), its own libvirt
+domain, disk, ssh key and VNC port, under
+`/var/lib/appsandbox/replica/replicas/<name>/`; the base image and the
+patched QEMU are shared. `appsandbox-replica list` prints them as JSON, which
+the guest agent reports to Nestbox so each replica gets its own row (start,
+screen, XFCE + Steam, stop, restart, delete) under its sandbox, and the `+`
+in the nested column creates another one. `nestbox-replica` is an alias.
+
 ## Use
 
 Inside the sandbox VM (SSH in with the `>_` button):

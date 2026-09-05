@@ -64,6 +64,7 @@ typedef struct {
     BOOL   is_template;            /* TRUE = create as template VM */
     BOOL   linux_ga_kernel;        /* Linux: install + boot the GA kernel (linux-generic) instead of the ISO's HWE one */
     const wchar_t *identity;       /* Linux: VM identity profile (JSON, see tools/linux/identity), NULL/"" = none */
+    BOOL   replica_auto;           /* Linux: prepare the nested replica after install (appsandbox-replica setup) */
 } AsbVmConfig;
 
 /* ---- Snapshot/branch info (returned by query functions) ---- */

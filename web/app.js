@@ -478,6 +478,7 @@ function gatherConfig() {
         sshEnabled:  document.getElementById('ssh-enabled').checked,
         sshDeployKey: document.getElementById('ssh-deploy-key').checked,
         gaKernel:    document.getElementById('ga-kernel').checked,
+        replicaAuto: document.getElementById('replica-auto').checked,
         vmIdentity:  compactIdentity(document.getElementById('vm-identity').value)
     };
 }
@@ -487,15 +488,18 @@ function gatherConfig() {
    bridge onto the VNC tunnel (guest port 5900 - the nested replica's console
    once appsandbox-replica created it). window.NoVNC is the RFB class,
    bundled in novnc.js (loads asynchronously, hence the promise). */
-var vncRfb = null, vncVmIndex = -1, vncScaled = true;
+var vncRfb = null, vncVmIndex = -1, vncScaled = true, vncReplicaName = '';
 
 function openVncViewer(msg) {
     var overlay = document.getElementById('vnc-overlay');
     var screen = document.getElementById('vnc-screen');
     closeVncViewer();
     vncVmIndex = msg.vmIndex;
-    var nested = vms[msg.vmIndex] && vms[msg.vmIndex].replica === 'running';
-    document.getElementById('vnc-title').textContent = (nested ? '\uD83E\uDE86 Nested replica \u2014 ' : 'Screen \u2014 ') + (msg.vmName || '') + (nested ? '' : ' (guest VNC :5900)');
+    var nested = !!msg.name || (vms[msg.vmIndex] && vms[msg.vmIndex].replica === 'running');
+    vncReplicaName = msg.name || 'replica';
+    document.getElementById('vnc-title').textContent = nested
+        ? (msg.vmName || '') + ' / ' + vncReplicaName
+        : (msg.vmName || '') + ' (guest VNC :' + (msg.guestPort || 5900) + ')';
     document.getElementById('vnc-stop-btn').style.display = nested ? '' : 'none';
     document.getElementById('vnc-restart-btn').style.display = nested ? '' : 'none';
     document.getElementById('vnc-status').textContent = 'connecting\u2026';
@@ -538,7 +542,7 @@ function vncExternal() { if (vncVmIndex >= 0) sendCmd('vncConnect', { vmIndex: v
 function vncReplica(action) {
     if (vncVmIndex < 0) return;
     var idx = vncVmIndex;
-    sendCmd(action, { vmIndex: idx });
+    sendCmd(action, { vmIndex: idx, name: vncReplicaName });
     closeVncViewer();
 }
 document.addEventListener('keydown', function(e) {
@@ -776,6 +780,7 @@ function openCreateModal() {
     document.getElementById('ssh-deploy-key').checked = false;
     onSshToggle();   /* re-grey "Deploy SSH key" to match the cleared SSH checkbox */
     fillDefaultIdentity('vm-identity');   /* Linux guests report a bare-metal desktop unless cleared */
+    document.getElementById('replica-auto').checked = false;
     /* Reset OS type to Windows on each open. Valid on both hosts (a Mac host
        supports Windows via QEMU); the user can switch to macOS on a Mac. */
     document.getElementById('os-type').value = 'Windows';
@@ -930,8 +935,13 @@ function buildRowCells(vm, i, statusTd) {
        in-app screen once the console is up; a foreign VNC server (x11vnc,
        docker) shows as a plain screen too. */
     var rep = vm.replica || '';
+    var reps = parseReplicas(vm.replicas);
     var vncCell;
-    if (rep === 'stopped' && vm.running && !bld) {
+    if (vm.osType === 'Linux' && vm.running && vm.agentOnline && !bld && (reps.length || !vm.vncPort)) {
+        vncCell = makeIconCell('vnc', '+', true,
+            (function(idx) { return function() { addReplica(idx); }; })(i), '',
+            reps.length ? 'Add another nested replica' : 'Create a nested replica (KVM guest with the bare-metal identity; patched QEMU + XFCE + Steam)');
+    } else if (rep === 'stopped' && vm.running && !bld) {
         vncCell = makeIconCell('vnc', '\u25B6\uFE0F', vm.agentOnline,
             (function(idx) { return function() { sendCmd('replicaStart', {vmIndex: idx}); }; })(i), '',
             'Start the nested replica (sudo appsandbox-replica start); its screen opens here once it is up');
@@ -1000,14 +1010,15 @@ function buildRowCells(vm, i, statusTd) {
 }
 
 function renderVmTable() {
-    var tbody = document.getElementById('vm-tbody');
+    var tbody = document.getElementById('vm-table');   /* one <tbody class="vm-group"> per VM (its row + replica rows) */
     var vc = document.getElementById('vm-count');
     if (vc) vc.textContent = vms.length ? vms.length + (vms.length === 1 ? ' sandbox' : ' sandboxes') : '';
 
     if (vms.length === 0) {
         rowCache = {};
         rowSigCache = {};
-        tbody.innerHTML = '';
+        Array.prototype.slice.call(tbody.children).forEach(function(c) { if (c.tagName !== 'THEAD') tbody.removeChild(c); });
+        var grp0 = document.createElement('tbody');
         var tr = document.createElement('tr');
         var td = document.createElement('td');
         td.colSpan = hostBridge.isMac ? 16 : 17;
@@ -1018,7 +1029,8 @@ function renderVmTable() {
         btn.onclick = openCreateModal;
         td.appendChild(btn);
         tr.appendChild(td);
-        tbody.appendChild(tr);
+        grp0.appendChild(tr);
+        tbody.appendChild(grp0);
         return;
     }
 
@@ -1037,6 +1049,7 @@ function renderVmTable() {
     /* Remove any non-cached tbody children (e.g. leftover empty-state row). */
     var kids = Array.prototype.slice.call(tbody.children);
     kids.forEach(function(c) {
+        if (c.tagName === 'THEAD') return;
         var cached = false;
         for (var n in rowCache) { if (rowCache[n] === c) { cached = true; break; } }
         if (!cached) tbody.removeChild(c);
@@ -1045,12 +1058,15 @@ function renderVmTable() {
     /* Skip the cell rebuild when button-relevant fields are unchanged; the
      * install progress tick would otherwise destroy the button DOM mid-click. */
     vms.forEach(function(vm, i) {
-        var tr = rowCache[vm.name];
-        var firstBuild = !tr;
-        if (!tr) {
-            tr = document.createElement('tr');
-            rowCache[vm.name] = tr;
+        var grp = rowCache[vm.name];
+        var firstBuild = !grp;
+        if (!grp) {
+            grp = document.createElement('tbody');
+            grp.className = 'vm-group';
+            grp.appendChild(document.createElement('tr'));
+            rowCache[vm.name] = grp;
         }
+        var tr = grp.firstChild;
 
         var statusTd = tr.children[2] || document.createElement('td');
         updateStatusCell(statusTd, vm);
@@ -1060,7 +1076,7 @@ function renderVmTable() {
             vm.running, vm.buildingVhdx, vm.shuttingDown, vm.agentOnline,
             vm.installComplete, vm.isTemplate,
             vm.sshEnabled, vm.sshState, vm.sshPort,
-            vm.vncPort, vm.replica, vm.hasIdentity,   /* nested / VNC / identity cells */
+            vm.vncPort, vm.replica, vm.replicas, vm.hasIdentity,   /* nested / VNC / identity cells */
             vm.osType, vm.ramMb, vm.hddGb, vm.cpuCores,
             vm.gpuMode, vm.gpuName, vm.networkMode,
             selectedSnap[i] || 'current',
@@ -1073,8 +1089,8 @@ function renderVmTable() {
         ].join('|');
 
         if (!firstBuild && rowSigCache[vm.name] === sig) {
-            if (tbody.children[i] !== tr) {
-                tbody.insertBefore(tr, tbody.children[i] || null);
+            if (tbody.children[i + 1] !== grp) {            /* children[0] is the <thead> */
+                tbody.insertBefore(grp, tbody.children[i + 1] || null);
             }
             return;
         }
@@ -1100,9 +1116,97 @@ function renderVmTable() {
         }
         while (tr.children.length > cells.length) tr.removeChild(tr.lastChild);
 
-        if (tbody.children[i] !== tr) {
-            tbody.insertBefore(tr, tbody.children[i] || null);
+        buildReplicaRows(grp, vm, i);
+
+        if (tbody.children[i + 1] !== grp) {
+            tbody.insertBefore(grp, tbody.children[i + 1] || null);
         }
+    });
+}
+
+/* ---- Nested replicas: rows under their VM ----
+   vm.replicas is the agent's JSON list [{name, state, vnc, desktop}]. Each
+   replica gets a row with its own start / screen / desktop / stop / destroy
+   buttons in the same columns as the VM's. */
+function parseReplicas(str) {
+    if (!str) return [];
+    try { var v = JSON.parse(str); return Array.isArray(v) ? v : []; } catch (e) { return []; }
+}
+
+function blankIconCell() {
+    var td = document.createElement('td');
+    td.className = 'icon-col';
+    return td;
+}
+
+function buildReplicaRows(grp, vm, idx) {
+    while (grp.children.length > 1) grp.removeChild(grp.lastChild);
+    if (vm.osType !== 'Linux' || !vm.running || !vm.agentOnline || vm.buildingVhdx) return;
+    var reps = parseReplicas(vm.replicas);
+    var dataCols = hostBridge.isMac ? 9 : 10;   /* Name .. Snapshot */
+    reps.forEach(function(r) {
+        var running = r.state === 'running';
+        var tr = document.createElement('tr');
+        tr.className = 'replica-row ' + (running ? 'running' : 'stopped');
+        var td = document.createElement('td');
+        td.colSpan = dataCols;
+        td.className = 'replica-cell';
+        td.innerHTML = '<span class="replica-arm"></span><svg class="ic"><use href="#i-nest"/></svg>' +
+                       '<span class="replica-name"></span><span class="lamp' + (running ? ' run' : '') + '"></span>' +
+                       '<span class="replica-state mono"></span>';
+        td.querySelector('.replica-name').textContent = r.name;
+        td.querySelector('.replica-state').textContent =
+            (running ? 'running' : (r.state || 'stopped')) +
+            (r.vnc ? '   vnc :' + r.vnc : '') + (r.desktop ? '   xfce + steam' : '');
+        tr.appendChild(td);
+        var name = r.name;
+        var cells = [
+            makeIconCell('start', '\u25B6\uFE0F', !running,
+                function() { sendCmd('replicaStart', {vmIndex: idx, name: name}); }, '', 'Start replica "' + name + '"'),
+            makeIconCell('connect-idd', '\uD83D\uDDA5\uFE0F', running && !!r.vnc,
+                function() { sendCmd('vncOpen', {vmIndex: idx, port: r.vnc, name: name}); }, '', 'Open the screen of replica "' + name + '" in Nestbox'),
+            blankIconCell(),
+            makeIconCell('vnc', 'desktop', running && !r.desktop,
+                function() { confirmReplica(idx, name, 'replicaDesktop', 'Install XFCE + Steam in "' + name + '"? Takes 10-20 minutes and restarts the replica.', 'Install'); },
+                r.desktop ? 'hidden' : '', 'Install XFCE + Steam (autologin) in this replica'),
+            blankIconCell(),
+            makeIconCell('shutdown', '\u23FB', running,
+                function() { sendCmd('replicaStop', {vmIndex: idx, name: name}); }, '', 'Shut this replica down'),
+            makeIconCell('stop', '\u21BB', running,
+                function() { sendCmd('replicaRestart', {vmIndex: idx, name: name}); }, '', 'Restart this replica (picks up a changed identity)'),
+            makeIconCell('delete', '\uD83D\uDDD1\uFE0F', true,
+                function() { confirmReplica(idx, name, 'replicaDestroy', 'Delete replica "' + name + '" and its disk? This cannot be undone.', 'Delete'); },
+                running ? 'running' : '', 'Delete this replica'),
+            blankIconCell()
+        ];
+        cells.forEach(function(c) { tr.appendChild(c); });
+        grp.appendChild(tr);
+    });
+}
+
+function confirmReplica(idx, name, action, message, label) {
+    showModal('Nested replica', message, label, { confirmClass: action === 'replicaDestroy' ? 'danger' : 'primary' }).then(function(ok) {
+        if (ok) sendCmd(action, {vmIndex: idx, name: name});
+    });
+}
+
+/* "+" in the nested column: name a new replica; the agent then installs the
+   packages, builds the identity-patched QEMU (first time only), creates the
+   replica and installs XFCE + Steam, all in the background. */
+function addReplica(idx) {
+    var existing = parseReplicas(vms[idx] && vms[idx].replicas).map(function(r) { return r.name; });
+    var def = existing.indexOf('replica') < 0 ? 'replica' : 'replica' + (existing.length + 1);
+    showModal('New nested replica',
+        'A replica is a KVM guest inside this sandbox with the bare-metal identity from the profile. ' +
+        'Nestbox builds the patched QEMU (first time, ~10 min), creates the replica and installs XFCE + Steam (10-20 min). ' +
+        'Progress shows in the log; the row appears once it boots.',
+        'Create', { confirmClass: 'primary', input: { label: 'Name (letters, digits, - _ .)', value: def } })
+    .then(function(name) {
+        if (!name) return;
+        name = String(name).trim().replace(/[^A-Za-z0-9._-]/g, '-');
+        if (!name) return;
+        if (existing.indexOf(name) >= 0) { showModal('Nested replica', 'A replica named "' + name + '" already exists.', 'OK', { confirmClass: 'primary' }); return; }
+        sendCmd('replicaSetup', {vmIndex: idx, name: name});
     });
 }
 
@@ -1130,7 +1234,8 @@ var ICON_BY_CLASS = {
     shutdown: 'i-power', stop: 'i-x', 'delete': 'i-trash', edit: 'i-pencil'
 };
 var ICON_BY_GLYPH = {
-    '\u25B6\uFE0F': 'i-play', '\u23F3': 'i-clock', '\uD83D\uDDA5\uFE0F': 'i-screen', '\u2714\uFE0F': 'i-check'
+    '\u25B6\uFE0F': 'i-play', '\u23F3': 'i-clock', '\uD83D\uDDA5\uFE0F': 'i-screen', '\u2714\uFE0F': 'i-check',
+    '+': 'i-plus', 'desktop': 'i-monitor', '\u21BB': 'i-restart'
 };
 function iconMarkup(cls, icon) {
     if (cls === 'ssh') return '<span class="mono">&gt;_</span>';

@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -465,35 +466,114 @@ static const char *replica_state(void)
     return run_sync("pgrep -f 'guest=replic[a],' >/dev/null 2>&1") == 0 ? "running" : "stopped";
 }
 
+static int replica_tool_present(void)
+{
+    return access("/usr/local/sbin/appsandbox-replica", X_OK) == 0;
+}
+
+/* Every replica on this VM as one line of JSON ("[]" when there are none):
+ * what `appsandbox-replica list` prints, whitespace squeezed. */
+static void replicas_json(char *out, size_t cap)
+{
+    FILE *p;
+    size_t n = 0;
+    int c, in_str = 0;
+    out[0] = '[';
+    out[1] = ']';
+    out[2] = '\0';
+    if (!replica_tool_present()) return;
+    p = popen("/usr/local/sbin/appsandbox-replica list 2>/dev/null", "r");
+    if (!p) return;
+    n = 0;
+    while ((c = fgetc(p)) != EOF && n < cap - 1) {
+        if (c == '"') in_str = !in_str;
+        if (!in_str && (c == '\n' || c == '\r' || c == ' ' || c == '\t')) continue;
+        out[n++] = (char)c;
+    }
+    pclose(p);
+    out[n] = '\0';
+    if (n < 2 || out[0] != '[') { out[0] = '['; out[1] = ']'; out[2] = '\0'; }
+}
+
 static void send_replica_state(int fd)
 {
+    static char buf[2100];
     char msg[48];
     snprintf(msg, sizeof(msg), "replica:%s", replica_state());
     send_line(fd, msg);
+    memcpy(buf, "replicas:", 9);
+    replicas_json(buf + 9, sizeof(buf) - 9);
+    send_line(fd, buf);
 }
 
-/* "replica start|stop|restart": run the tool, answer replica_result:<sub>:ok|failed,
- * then the fresh state so the GUI updates without waiting for a heartbeat. */
-static void handle_replica(int fd, const char *sub)
+/* "replica [<name>] <sub>": start | stop | restart | destroy run synchronously
+ * and answer replica_result:<name>:<sub>:ok|failed followed by the fresh
+ * list; create | desktop | setup take minutes, so they run detached with a
+ * log in /var/log/appsandbox-replica-<name>.log and answer ...:started - the
+ * heartbeat shows the replica appearing / booting. "setup" is the whole
+ * first-time path (packages, patched QEMU, create, XFCE + Steam) and is a
+ * no-op when that replica already exists. Without a name: "replica". */
+static void handle_replica(int fd, const char *args)
 {
-    char cmd[160], msg[96];
-    int rc;
-    if (strcmp(sub, "start") != 0 && strcmp(sub, "stop") != 0 && strcmp(sub, "restart") != 0) {
-        send_line(fd, "replica_result:unknown:failed");
+    char name[64] = "replica", sub[16] = "", cmd[640], msg[160];
+    const char *sp = strchr(args, ' ');
+    const char *tool = "/usr/local/sbin/appsandbox-replica";
+    int rc, i;
+
+    if (sp) {
+        size_t nl = (size_t)(sp - args);
+        if (nl == 0 || nl >= sizeof(name)) { send_line(fd, "replica_result:?:?:failed"); return; }
+        memcpy(name, args, nl); name[nl] = '\0';
+        snprintf(sub, sizeof(sub), "%s", sp + 1);
+    } else {
+        snprintf(sub, sizeof(sub), "%s", args);
+    }
+    for (i = 0; name[i]; i++)
+        if (!isalnum((unsigned char)name[i]) && name[i] != '-' && name[i] != '_' && name[i] != '.') {
+            send_line(fd, "replica_result:?:?:failed"); return;
+        }
+    if (!replica_tool_present()) {
+        snprintf(msg, sizeof(msg), "replica_result:%s:%s:failed", name, sub);
+        send_line(fd, msg);
         return;
     }
-    if (access("/usr/local/sbin/appsandbox-replica", X_OK) != 0) {
-        send_line(fd, "replica_result:tool:failed");
+
+    if (strcmp(sub, "create") == 0 || strcmp(sub, "desktop") == 0 || strcmp(sub, "setup") == 0) {
+        if (strcmp(sub, "setup") == 0)
+            snprintf(cmd, sizeof(cmd),
+                "nohup sh -c '[ -f /var/lib/appsandbox/replica/replicas/%s/replica.conf ] && exit 0; "
+                "[ \"%s\" = replica ] && [ -f /var/lib/appsandbox/replica/replica.conf ] && exit 0; "
+                "%s install && { [ -f /opt/appsandbox/qemu-identity.installed ] || %s qemu build; } && "
+                "%s -n %s create && %s -n %s desktop' >/var/log/appsandbox-replica-%s.log 2>&1 </dev/null &",
+                name, name, tool, tool, tool, name, tool, name, name);
+        else if (strcmp(sub, "create") == 0)
+            snprintf(cmd, sizeof(cmd),
+                "nohup sh -c '%s install && %s -n %s create' >/var/log/appsandbox-replica-%s.log 2>&1 </dev/null &",
+                tool, tool, name, name);
+        else
+            snprintf(cmd, sizeof(cmd),
+                "nohup %s -n %s desktop >/var/log/appsandbox-replica-%s.log 2>&1 </dev/null &",
+                tool, name, name);
+        rc = run_sync(cmd);
+        agent_log("replica %s %s: launched rc=%d", name, sub, rc);
+        snprintf(msg, sizeof(msg), "replica_result:%s:%s:%s", name, sub, rc == 0 ? "started" : "failed");
+        send_line(fd, msg);
+        return;
+    }
+    if (strcmp(sub, "start") != 0 && strcmp(sub, "stop") != 0 && strcmp(sub, "restart") != 0 &&
+        strcmp(sub, "destroy") != 0) {
+        snprintf(msg, sizeof(msg), "replica_result:%s:%s:failed", name, sub);
+        send_line(fd, msg);
         return;
     }
     if (strcmp(sub, "restart") == 0)
-        snprintf(cmd, sizeof(cmd), "/usr/local/sbin/appsandbox-replica stop >/dev/null 2>&1; sleep 8; "
-                                   "/usr/local/sbin/appsandbox-replica start >/dev/null 2>&1");
+        snprintf(cmd, sizeof(cmd), "%s -n %s stop >/dev/null 2>&1; sleep 8; %s -n %s start >/dev/null 2>&1",
+                 tool, name, tool, name);
     else
-        snprintf(cmd, sizeof(cmd), "/usr/local/sbin/appsandbox-replica %s >/dev/null 2>&1", sub);
+        snprintf(cmd, sizeof(cmd), "%s -n %s %s >/dev/null 2>&1", tool, name, sub);
     rc = run_sync(cmd);
-    agent_log("replica %s: rc=%d", sub, rc);
-    snprintf(msg, sizeof(msg), "replica_result:%s:%s", sub, rc == 0 ? "ok" : "failed");
+    agent_log("replica %s %s: rc=%d", name, sub, rc);
+    snprintf(msg, sizeof(msg), "replica_result:%s:%s:%s", name, sub, rc == 0 ? "ok" : "failed");
     send_line(fd, msg);
     if (strcmp(sub, "stop") == 0) sleep(2);   /* virsh shutdown is asynchronous; give qemu a moment */
     send_replica_state(fd);
@@ -504,7 +584,7 @@ static void *heartbeat_thread(void *arg)
     (void)arg;
     int idd_last = 0;   /* last reported display-driver readiness (so we only send on change) */
     int vnc_last = -1;  /* last reported VNC listener state; -1 = report on first beat */
-    char replica_last[16] = "";   /* last reported nested-replica state */
+    static char replica_last[2100];   /* last reported replica list (JSON) */
     while (!g_stop) {
         /* Sleep first so the very first heartbeat is at +5s, after hello. */
         for (int s = 0; s < HEARTBEAT_INTERVAL_SEC && !g_stop; s++)
@@ -541,12 +621,14 @@ static void *heartbeat_thread(void *arg)
                 vnc_last = vnc;
             }
         }
-        /* Nested replica state, same on-change rule. */
+        /* Nested replicas, same on-change rule (the whole list as JSON). */
         {
-            const char *st = replica_state();
-            if (strcmp(st, replica_last) != 0) {
+            static char now[2100];
+            replicas_json(now, sizeof(now));
+            if (strcmp(now, replica_last) != 0 || replica_last[0] == '\0') {
                 send_replica_state(fd);
-                snprintf(replica_last, sizeof(replica_last), "%s", st);
+                snprintf(replica_last, sizeof(replica_last), "%s", now);
+                if (replica_last[0] == '\0') replica_last[0] = ' ';
             }
         }
     }
@@ -720,8 +802,9 @@ static void handle_set_ip(int fd, const char *tag, const char *args)
 static void replica_reidentify(void)
 {
     if (access("/usr/local/sbin/appsandbox-replica", X_OK) == 0 &&
-        access("/var/lib/appsandbox/replica/replica.conf", F_OK) == 0)
-        spawn_detached("/usr/local/sbin/appsandbox-replica reidentify >/dev/null 2>&1");
+        (access("/var/lib/appsandbox/replica/replica.conf", F_OK) == 0 ||
+         access("/var/lib/appsandbox/replica/replicas", F_OK) == 0))
+        spawn_detached("/usr/local/sbin/appsandbox-replica reidentify --all >/dev/null 2>&1");
 }
 
 static void handle_identity(int fd, const char *json)
@@ -903,7 +986,32 @@ static void *ssh_proxy_proc(void *arg)
             continue;
         }
 
-        /* Per-connection TCP socket → localhost:22. Done eagerly so we
+        /* The VNC bridge serves several consoles (one replica each, on
+         * 5900, 5901, ...): the host may open the connection with a
+         * "vnc <port>\n" line naming the one it wants. RFB is server-first,
+         * so a client never sends anything before that; a host without the
+         * preamble just gets the default port after a short wait. */
+        unsigned target = fw->tcp_port;
+        if (fw->vsock_port == VNC_VSOCK_PORT) {
+            struct pollfd cp = { .fd = c, .events = POLLIN };
+            if (poll(&cp, 1, 400) > 0) {
+                char pre[32];
+                ssize_t pn = recv(c, pre, sizeof(pre) - 1, MSG_PEEK);
+                if (pn > 4 && memcmp(pre, "vnc ", 4) == 0) {
+                    char *nl;
+                    pre[pn] = '\0';
+                    nl = strchr(pre, '\n');
+                    if (nl) {
+                        unsigned want = (unsigned)atoi(pre + 4);
+                        size_t consume = (size_t)(nl - pre) + 1;
+                        if (want >= 1024 && want <= 65535) target = want;
+                        if (recv(c, pre, consume, 0) != (ssize_t)consume) { close(c); continue; }
+                    }
+                }
+            }
+        }
+
+        /* Per-connection TCP socket → localhost:<port>. Done eagerly so we
          * surface refused/timeout immediately rather than after one
          * round of relay polling. */
         int t = socket(AF_INET, SOCK_STREAM, 0);
@@ -911,10 +1019,10 @@ static void *ssh_proxy_proc(void *arg)
         struct sockaddr_in ta = {0};
         ta.sin_family      = AF_INET;
         ta.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        ta.sin_port        = htons(fw->tcp_port);
+        ta.sin_port        = htons(target);
         if (connect(t, (struct sockaddr *)&ta, sizeof(ta)) < 0) {
             agent_log("%s: connect 127.0.0.1:%u failed: %s", fw->name,
-                      fw->tcp_port, strerror(errno));
+                      target, strerror(errno));
             close(t); close(c);
             continue;
         }

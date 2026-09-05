@@ -225,10 +225,13 @@ static void build_vm_json(JsonBuilder *jb, int i)
     jb_bool(jb, L"sshDeployKey", v->ssh_deploy_key);
     jb_bool(jb, L"sshKeyDeployed", v->ssh_key_deployed);
     jb_int(jb, L"vncPort", (int)v->vnc_guest_port);     /* guest listener, 0 = none */
-    {   /* nested replica state from the agent: "" (unknown) / none / stopped / running */
-        wchar_t rs[16];
+    {   /* nested replicas from the agent: legacy single state + the JSON list (as a string) */
+        static wchar_t rs[16], rl[2048];
         MultiByteToWideChar(CP_UTF8, 0, v->replica_state, -1, rs, 16);
         jb_string(jb, L"replica", rs);
+        MultiByteToWideChar(CP_UTF8, 0, v->replicas[0] ? v->replicas : "[]", -1, rl, 2048);
+        jb_string(jb, L"replicas", rl);
+        jb_bool(jb, L"replicaAuto", v->replica_auto);
     }
     jb_bool(jb, L"hasIdentity", v->identity[0] != L'\0');
     jb_int(jb, L"vncTunnelPort", (int)v->vnc_port);     /* host tunnel, 0 = not started */
@@ -995,6 +998,7 @@ static void on_webview2_message(const wchar_t *json)
         json_get_bool(json, L"sshEnabled", &cfg.ssh_enabled);
         json_get_bool(json, L"sshDeployKey", &cfg.ssh_deploy_key);
         json_get_bool(json, L"gaKernel", &cfg.linux_ga_kernel);
+        json_get_bool(json, L"replicaAuto", &cfg.replica_auto);
         {
             static wchar_t ident_buf[4096];
             ident_buf[0] = L'\0';
@@ -1136,43 +1140,53 @@ static void on_webview2_message(const wchar_t *json)
             }
             send_vm_list();
         }
-    } else if (wcscmp(action, L"replicaStart") == 0 || wcscmp(action, L"replicaStop") == 0 ||
-               wcscmp(action, L"replicaRestart") == 0) {
-        /* Nested replica control: the agent runs appsandbox-replica and
-           reports replica_result / the new state (fire-and-forget). */
+    } else if (wcsncmp(action, L"replica", 7) == 0 && action[7] >= L'A' && action[7] <= L'Z') {
+        /* Nested replica control: replicaStart / Stop / Restart / Destroy /
+           Create / Desktop / Setup, with "name" (default "replica"). The agent
+           runs appsandbox-replica and reports replica_result / the new list. */
         int idx;
         if (json_get_int(json, L"vmIndex", &idx) && idx >= 0 && idx < asb_vm_count()) {
             VmInstance *inst = asb_vm_instance(asb_vm_get(idx));
-            const char *sub = wcscmp(action, L"replicaStart") == 0 ? "start"
-                            : wcscmp(action, L"replicaStop") == 0 ? "stop" : "restart";
+            static wchar_t wname[64];
+            char name[64], sub[16], line[128];
+            int i;
+            wname[0] = L'\0';
+            json_get_string(json, L"name", wname, 64);
+            if (!wname[0]) wcscpy_s(wname, 64, L"replica");
+            WideCharToMultiByte(CP_UTF8, 0, wname, -1, name, sizeof(name), NULL, NULL);
+            for (i = 0; name[i]; i++)
+                if (!((name[i] >= '0' && name[i] <= '9') || (name[i] >= 'a' && name[i] <= 'z') ||
+                      (name[i] >= 'A' && name[i] <= 'Z') || name[i] == '-' || name[i] == '_' || name[i] == '.'))
+                    name[i] = '-';
+            WideCharToMultiByte(CP_UTF8, 0, action + 7, -1, sub, sizeof(sub), NULL, NULL);
+            for (i = 0; sub[i]; i++) if (sub[i] >= 'A' && sub[i] <= 'Z') sub[i] = (char)(sub[i] + 32);
             if (inst && inst->running && inst->agent_online) {
-                char line[32];
-                sprintf_s(line, sizeof(line), "replica %s", sub);
+                sprintf_s(line, sizeof(line), "replica %s %s", name, sub);
                 vm_agent_send(inst, line, NULL, 0, 0);
-                ui_log(L"Nested replica of \"%s\": %S requested.", inst->name, sub);
+                ui_log(L"Nested replica \"%S\" of \"%s\": %S requested.", name, inst->name, sub);
             } else {
                 ui_log(L"Nested replica: the guest agent of \"%s\" is not online.", inst ? inst->name : L"?");
             }
         }
     } else if (wcscmp(action, L"vncConnect") == 0 || wcscmp(action, L"vncOpen") == 0) {
         /* vncOpen: the in-app viewer (noVNC over a loopback WebSocket bridge
-           to the VNC tunnel); vncConnect: an external VNC viewer. */
-        int idx;
+           to a VNC tunnel); vncConnect: an external VNC viewer. "port" picks
+           the guest VNC port (a replica's console); default 5900. */
+        int idx, port = 0;
         BOOL in_app = (wcscmp(action, L"vncOpen") == 0);
         if (json_get_int(json, L"vmIndex", &idx) && idx >= 0 && idx < asb_vm_count()) {
             VmInstance *inst = asb_vm_instance(asb_vm_get(idx));
-            if (inst && inst->running && inst->vnc_guest_port) {
+            static wchar_t wname[64];
+            json_get_int(json, L"port", &port);
+            if (port <= 0 || port > 65535) port = 5900;
+            wname[0] = L'\0';
+            json_get_string(json, L"name", wname, 64);
+            if (inst && inst->running && (inst->vnc_guest_port || port != 5900)) {
                 UINT64 id = inst->unique_id;
-                int wait;
-                vm_vnc_proxy_start(inst);   /* no-op if already up */
-                /* The listener binds on its own thread; give it a moment. */
-                for (wait = 0; wait < 40; wait++) {
-                    inst = asb_find_vm_by_id(id);
-                    if (!inst || inst->vnc_port) break;
-                    Sleep(50);
-                }
-                if (inst && inst->vnc_port && in_app) {
-                    DWORD ws = vm_vnc_ws_port(inst->vnc_port);
+                DWORD hp = vm_vnc_proxy_port(inst, (unsigned)port);
+                inst = asb_find_vm_by_id(id);
+                if (inst && hp && in_app) {
+                    DWORD ws = vm_vnc_ws_port(hp);
                     if (ws) {
                         static wchar_t out[1024];
                         JsonBuilder jb;
@@ -1181,22 +1195,25 @@ static void on_webview2_message(const wchar_t *json)
                         jb_string(&jb, L"type", L"vncReady");
                         jb_int(&jb, L"vmIndex", idx);
                         jb_int(&jb, L"wsPort", (int)ws);
-                        jb_int(&jb, L"vncPort", (int)inst->vnc_port);
+                        jb_int(&jb, L"vncPort", (int)hp);
+                        jb_int(&jb, L"guestPort", port);
+                        jb_string(&jb, L"name", wname);
                         jb_string(&jb, L"vmName", inst->name);
                         jb_object_end(&jb);
                         webview2_post(out);
                     } else {
                         ui_log(L"VNC: the WebSocket bridge could not start; opening an external viewer instead.");
-                        launch_vnc_viewer(inst->vnc_port);
+                        launch_vnc_viewer(hp);
                     }
-                } else if (inst && inst->vnc_port) {
-                    launch_vnc_viewer(inst->vnc_port);
+                } else if (inst && hp) {
+                    launch_vnc_viewer(hp);
                 } else {
                     ui_log(L"VNC: the tunnel did not come up.");
                 }
             } else {
                 ui_show_alert(L"The guest has no VNC server on port 5900 yet. For the nested replica, run "
-                              L"'sudo appsandbox-replica create' (and 'desktop' for XFCE + Steam) inside the guest.");
+                              L"'sudo appsandbox-replica create' (and 'desktop' for XFCE + Steam) inside the guest, "
+                              L"or use the + button in the nested column.");
             }
         }
     } else if (wcscmp(action, L"deleteVm") == 0) {

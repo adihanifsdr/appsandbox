@@ -52,6 +52,9 @@
     <WholeProgramOptimization>true</WholeProgramOptimization>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <TargetName>nestbox_core</TargetName>
+  </PropertyGroup>
   <ImportGroup Label="ExtensionSettings">
   </ImportGroup>
   <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'" Label="PropertySheets">
@@ -69,22 +72,22 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <OutDir>$(SolutionDir)bin\$(Configuration)-ARM64\</OutDir>
     <IntDir>$(SolutionDir)obj\$(Configuration)-ARM64\core\</IntDir>
-    <TargetName>appsandbox_core</TargetName>
+    <TargetName>nestbox_core</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <OutDir>$(SolutionDir)bin\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)obj\$(Configuration)\core\</IntDir>
-    <TargetName>appsandbox_core</TargetName>
+    <TargetName>nestbox_core</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <OutDir>$(SolutionDir)bin\$(Configuration)-ARM64\</OutDir>
     <IntDir>$(SolutionDir)obj\$(Configuration)-ARM64\core\</IntDir>
-    <TargetName>appsandbox_core</TargetName>
+    <TargetName>nestbox_core</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <OutDir>$(SolutionDir)bin\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)obj\$(Configuration)\core\</IntDir>
-    <TargetName>appsandbox_core</TargetName>
+    <TargetName>nestbox_core</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
@@ -101,7 +104,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>virtdisk.lib;setupapi.lib;cfgmgr32.lib;ole32.lib;oleaut32.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <ImportLibrary>$(OutDir)appsandbox_core.lib</ImportLibrary>
+      <ImportLibrary>$(OutDir)nestbox_core.lib</ImportLibrary>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -119,7 +122,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>virtdisk.lib;setupapi.lib;cfgmgr32.lib;ole32.lib;oleaut32.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <ImportLibrary>$(OutDir)appsandbox_core.lib</ImportLibrary>
+      <ImportLibrary>$(OutDir)nestbox_core.lib</ImportLibrary>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
@@ -141,7 +144,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>virtdisk.lib;setupapi.lib;cfgmgr32.lib;ole32.lib;oleaut32.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <ImportLibrary>$(OutDir)appsandbox_core.lib</ImportLibrary>
+      <ImportLibrary>$(OutDir)nestbox_core.lib</ImportLibrary>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -163,7 +166,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>virtdisk.lib;setupapi.lib;cfgmgr32.lib;ole32.lib;oleaut32.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <ImportLibrary>$(OutDir)appsandbox_core.lib</ImportLibrary>
+      <ImportLibrary>$(OutDir)nestbox_core.lib</ImportLibrary>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

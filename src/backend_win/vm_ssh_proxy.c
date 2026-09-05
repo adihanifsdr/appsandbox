@@ -50,6 +50,7 @@ typedef struct SshProxy {
     DWORD          port;           /* bound 127.0.0.1 port */
     int            kind;           /* PROXY_SSH / PROXY_VNC */
     unsigned       hv_port;        /* guest-side HV/vsock service port */
+    unsigned       target_port;    /* VNC: guest TCP port the agent should bridge to (5900 = default console) */
     SOCKET         listen_sock;
     HANDLE         thread;
     volatile BOOL  stop;
@@ -75,11 +76,14 @@ static void ensure_cs_init(void)
     }
 }
 
-static SshProxy *find_proxy(VmInstance *vm, int kind)
+/* SSH: one proxy per VM. VNC: one per (VM, guest port) - each nested replica
+   has its own console port; target 0 matches any VNC proxy of the VM. */
+static SshProxy *find_proxy(VmInstance *vm, int kind, unsigned target)
 {
     int i;
     for (i = 0; i < MAX_PROXIES; i++)
-        if (g_proxies[i] && g_proxies[i]->vm_id == vm->unique_id && g_proxies[i]->kind == kind)
+        if (g_proxies[i] && g_proxies[i]->vm_id == vm->unique_id && g_proxies[i]->kind == kind &&
+            (kind != PROXY_VNC || target == 0 || g_proxies[i]->target_port == target))
             return g_proxies[i];
     return NULL;
 }
@@ -200,7 +204,7 @@ static DWORD WINAPI ssh_listener_thread(LPVOID param)
        to end up on a zeroed slot (runtime_id = 0 -> every SSH connection
        was accepted and immediately dropped). */
     vm = asb_find_vm_by_id(proxy->vm_id);
-    prev_port = vm ? (proxy->kind == PROXY_VNC ? vm->vnc_port : vm->ssh_port) : 0;
+    prev_port = vm ? (proxy->kind == PROXY_VNC ? (proxy->target_port == 5900 ? vm->vnc_port : 0) : vm->ssh_port) : 0;
 
     /* Bind ephemeral port on localhost */
     proxy->listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -238,7 +242,7 @@ bound:
     proxy->port = ntohs(bind_addr.sin_port);
     vm = asb_find_vm_by_id(proxy->vm_id);
     if (vm) {
-        if (proxy->kind == PROXY_VNC) vm->vnc_port = proxy->port;
+        if (proxy->kind == PROXY_VNC) { if (proxy->target_port == 5900) vm->vnc_port = proxy->port; }
         else                          vm->ssh_port = proxy->port;
     }
 
@@ -278,6 +282,17 @@ bound:
             ui_log(L"SSH proxy: cannot connect to guest for \"%s\".", proxy->vm_name);
             closesocket(client);
             continue;
+        }
+        if (proxy->kind == PROXY_VNC) {
+            /* Tell the agent's VNC bridge which console this connection is
+               for (RFB is server-first, so the client has not spoken yet). */
+            char pre[32];
+            int pn = sprintf_s(pre, sizeof(pre), "vnc %u\n", proxy->target_port);
+            if (send(hv, pre, pn, 0) != pn) {
+                closesocket(client);
+                closesocket(hv);
+                continue;
+            }
         }
 
         /* Find a free relay slot */
@@ -344,7 +359,7 @@ bound:
 
 /* ---- Public API ---- */
 
-static void proxy_start(VmInstance *instance, int kind, unsigned hv_port)
+static void proxy_start(VmInstance *instance, int kind, unsigned hv_port, unsigned target)
 {
     SshProxy *proxy;
     int i, slot;
@@ -358,7 +373,7 @@ static void proxy_start(VmInstance *instance, int kind, unsigned hv_port)
     EnterCriticalSection(&g_proxy_cs);
 
     /* Already running? */
-    if (find_proxy(instance, kind)) {
+    if (find_proxy(instance, kind, target)) {
         LeaveCriticalSection(&g_proxy_cs);
         return;
     }
@@ -384,7 +399,8 @@ static void proxy_start(VmInstance *instance, int kind, unsigned hv_port)
     wcscpy_s(proxy->vm_name, 256, instance->name);
     proxy->kind    = kind;
     proxy->hv_port = hv_port;
-    proxy->port    = (kind == PROXY_VNC) ? instance->vnc_port : instance->ssh_port;
+    proxy->target_port = target;
+    proxy->port    = (kind == PROXY_VNC) ? (target == 5900 ? instance->vnc_port : 0) : instance->ssh_port;
     proxy->listen_sock = INVALID_SOCKET;
     proxy->stop = FALSE;
     InitializeCriticalSection(&proxy->cs);
@@ -417,7 +433,7 @@ static void proxy_stop(VmInstance *instance, int kind)
     ensure_cs_init();
     EnterCriticalSection(&g_proxy_cs);
 
-    proxy = find_proxy(instance, kind);
+    proxy = find_proxy(instance, kind, 0);
     if (!proxy) {
         LeaveCriticalSection(&g_proxy_cs);
         return;
@@ -449,9 +465,37 @@ static void proxy_stop(VmInstance *instance, int kind)
 
     if (kind == PROXY_VNC) instance->vnc_port = 0;
     ui_log(L"%s proxy stopped for \"%s\".", proxy_kind_name(kind), instance->name);
+    /* a VM may have several VNC proxies (one per replica console) */
+    if (kind == PROXY_VNC) proxy_stop(instance, kind);
 }
 
-void vm_ssh_proxy_start(VmInstance *instance) { proxy_start(instance, PROXY_SSH, 7); }
+void vm_ssh_proxy_start(VmInstance *instance) { proxy_start(instance, PROXY_SSH, 7, 22); }
 void vm_ssh_proxy_stop(VmInstance *instance)  { proxy_stop(instance, PROXY_SSH); }
-void vm_vnc_proxy_start(VmInstance *instance) { proxy_start(instance, PROXY_VNC, 8); }
+void vm_vnc_proxy_start(VmInstance *instance) { proxy_start(instance, PROXY_VNC, 8, 5900); }
 void vm_vnc_proxy_stop(VmInstance *instance)  { proxy_stop(instance, PROXY_VNC); }
+
+/* Tunnel to one guest VNC port (the console of one replica); starts the proxy
+   if needed and waits for its listener to bind. Returns the host port, 0 if
+   it did not come up. */
+DWORD vm_vnc_proxy_port(VmInstance *instance, unsigned guest_port)
+{
+    int wait;
+    UINT64 id;
+    if (!instance) return 0;
+    id = instance->unique_id;
+    if (!guest_port) guest_port = 5900;
+    proxy_start(instance, PROXY_VNC, 8, guest_port);
+    for (wait = 0; wait < 40; wait++) {
+        SshProxy *p;
+        DWORD port = 0;
+        VmInstance *vm = asb_find_vm_by_id(id);
+        if (!vm) return 0;
+        EnterCriticalSection(&g_proxy_cs);
+        p = find_proxy(vm, PROXY_VNC, guest_port);
+        if (p) port = p->port;
+        LeaveCriticalSection(&g_proxy_cs);
+        if (port) return port;
+        Sleep(50);
+    }
+    return 0;
+}

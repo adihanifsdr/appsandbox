@@ -139,7 +139,7 @@ Kolom di daftar sandbox, dari kiri ke kanan setelah Snapshot:
 | ▶️ | Start/stop sandbox VM |
 | 📺 | Layar **utama** sandbox VM (GPU penuh) |
 | `>_` | Terminal SSH ke sandbox VM |
-| 🪆 | **Replica**: ▶ untuk menyalakan; ⏳ saat sedang boot; 🖥️ membuka layarnya di dalam Nestbox |
+| 🪆 | **Replica**: tombol `+` membuat replica baru (boleh lebih dari satu per sandbox). Setiap replica tampil sebagai baris di bawah sandbox-nya dengan tombol start, layar, XFCE + Steam, stop, restart, hapus |
 | 🪪 | Editor VM identity (profil JSON) |
 
 Jendela layar replica punya tombol Ctrl+Alt+Del, Fit/1:1, External viewer
@@ -148,7 +148,10 @@ hidup otomatis setiap sandbox VM boot.
 
 ## Menyiapkan replica pertama kali (sekali saja per sandbox VM)
 
-Masuk lewat tombol `>_`, lalu:
+Cara termudah: centang **Nested replica** saat New Sandbox (dikerjakan
+otomatis setelah install selesai), atau klik `+` di kolom 🪆 pada sandbox
+yang sedang jalan. Keduanya menjalankan langkah di bawah ini di latar
+belakang; kemajuannya tampil di log. Cara manual lewat tombol `>_`:
 
 ```
 sudo appsandbox-replica install       # pasang QEMU + libvirt (sekali)

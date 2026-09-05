@@ -354,14 +354,14 @@ if (-not $SkipDrivers) {
 # --------------------------------------------------- 5. stage + zip (explicit allowlist)
 
 $stageRoot = Join-Path $bin '_package'
-$stage     = Join-Path $stageRoot 'AppSandbox'
+$stage     = Join-Path $stageRoot 'Nestbox'
 if (Test-Path $stageRoot) { Remove-Item $stageRoot -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
 # Explicit allowlist (not "copy everything minus excludes"): the root holds ONLY the host app +
 # its direct deps; the guest binaries ship under resources\, the signed drivers under drivers\,
 # the web UI under web\.
-$rootBins = @('AppSandbox.exe', 'appsandbox_core.dll', 'iso-patch.exe', 'WebView2Loader.dll')
+$rootBins = @('Nestbox.exe', 'nestbox_core.dll', 'iso-patch.exe', 'WebView2Loader.dll')
 foreach ($b in $rootBins) {
     $src = Join-Path $bin $b
     if (-not (Test-Path $src)) { throw "Missing required root binary $b under $bin." }
@@ -399,7 +399,7 @@ foreach ($sub in @('examples', 'tests')) {
 # Tripwire: the signed drivers come from the deposit (not the build) - fail loudly if any
 # expected artifact is missing rather than shipping a partial zip.
 $required = @(
-    'AppSandbox.exe', 'appsandbox_core.dll', 'iso-patch.exe', 'WebView2Loader.dll',
+    'Nestbox.exe', 'nestbox_core.dll', 'iso-patch.exe', 'WebView2Loader.dll',
     'drivers\AppSandboxVDD.dll', 'drivers\AppSandboxVDD.inf', 'drivers\AppSandboxVDD.cat',
     'drivers\AppSandboxVAD.sys', 'drivers\AppSandboxVAD.inf', 'drivers\AppSandboxVAD.cat',
     'drivers\AppSandboxSHM.sys', 'drivers\AppSandboxSHM.inf', 'drivers\AppSandboxSHM.cat',
@@ -416,7 +416,7 @@ $files | ForEach-Object { Write-Host ("  " + $_.FullName.Substring($stage.Length
 $mb = [math]::Round((($files | Measure-Object Length -Sum).Sum) / 1MB, 1)
 Write-Host ("--- {0} files, {1} MB ---`n" -f $files.Count, $mb)
 
-$zip = Join-Path $bin ("AppSandbox-{0}-{1}-{2}.zip" -f $Version, $OS, $Platform.ToLower())
+$zip = Join-Path $bin ("Nestbox-{0}-{1}-{2}.zip" -f $Version, $OS, $Platform.ToLower())
 if (Test-Path $zip) { Remove-Item $zip -Force }
 # Flat layout: the items sit at the zip root (file.zip\AppSandbox.exe, file.zip\drivers\...),
 # with the drivers\ / resources\ / web\ subfolders preserved - no extra parent folder.

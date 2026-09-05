@@ -21,5 +21,8 @@ void vm_ssh_proxy_stop(VmInstance *instance);
    bound host port once the listener is up. Exported for the app. */
 ASB_API void vm_vnc_proxy_start(VmInstance *instance);
 ASB_API void vm_vnc_proxy_stop(VmInstance *instance);
+/* One tunnel per guest VNC port (each nested replica has its own console);
+   returns the bound host port once the listener is up, 0 on failure. */
+ASB_API DWORD vm_vnc_proxy_port(VmInstance *instance, unsigned guest_port);
 
 #endif /* VM_SSH_PROXY_H */

@@ -10,14 +10,15 @@
   drivers\ and any log/config files already in -Dest are left alone.
 
   USAGE:
-    .\tools\deploy-local.ps1                                  # -> D:\AppSandbox-0.1.4-win-x64
+    .\tools\deploy-local.ps1                                  # -> D:\Nestbox (migrates D:\AppSandbox-0.1.4-win-x64 on first run)
     .\tools\deploy-local.ps1 -Dest C:\path\to\install
     .\tools\deploy-local.ps1 -NoBuild                         # copy only
     .\tools\deploy-local.ps1 -SourceRepo you/appsandbox -SourceBranch my-branch
 #>
 [CmdletBinding()]
 param(
-  [string]$Dest = 'D:\AppSandbox-0.1.4-win-x64',
+  [string]$Dest = 'D:\Nestbox',
+  [string]$OldDest = 'D:\AppSandbox-0.1.4-win-x64',   # pre-rename install folder to migrate from
   [string]$SourceRepo = '',     # empty: derived from `git remote` (fork, then origin)
   [string]$SourceBranch = '',   # empty: current branch
   [switch]$NoBuild
@@ -54,11 +55,38 @@ if (-not $NoBuild) {
     if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
 }
 
+# First run after the rename: carry the old install folder over (drivers,
+# resources, log) and point every shortcut at the new exe.
+if (-not (Test-Path (Join-Path $Dest 'drivers')) -and (Test-Path $OldDest)) {
+    Write-Host "Migrating $OldDest -> $Dest"
+    New-Item -ItemType Directory -Force -Path $Dest | Out-Null
+    robocopy $OldDest $Dest /E /XF AppSandbox.exe appsandbox_core.dll AppSandbox.pdb appsandbox_core.pdb | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "migration copy failed" }
+    $sh = New-Object -ComObject WScript.Shell
+    $oldExe = Join-Path $OldDest 'AppSandbox.exe'
+    $lnkDirs = @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('CommonDesktopDirectory'),
+                 "$env:APPDATA\Microsoft\Windows\Start Menu\Programs",
+                 "$env:APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar")
+    foreach ($d in $lnkDirs) {
+        if (-not (Test-Path $d)) { continue }
+        Get-ChildItem $d -Filter *.lnk -ErrorAction SilentlyContinue | ForEach-Object {
+            $l = $sh.CreateShortcut($_.FullName)
+            if ($l.TargetPath -ieq $oldExe) {
+                $l.TargetPath = Join-Path $Dest 'Nestbox.exe'
+                $l.WorkingDirectory = $Dest
+                $l.IconLocation = (Join-Path $Dest 'Nestbox.exe') + ',0'
+                $l.Description = 'Nestbox'
+                $l.Save()
+                Write-Host "  shortcut repointed: $($_.FullName)"
+            }
+        }
+    }
+}
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 # Root binaries: skip unchanged ones (the app may be running from -Dest, which
 # locks them); a changed but locked binary is reported instead of aborting.
 $locked = @()
-foreach ($b in @('AppSandbox.exe', 'appsandbox_core.dll', 'iso-patch.exe', 'WebView2Loader.dll')) {
+foreach ($b in @('Nestbox.exe', 'nestbox_core.dll', 'iso-patch.exe', 'WebView2Loader.dll')) {
     $src = Join-Path $bin $b; $dst = Join-Path $Dest $b
     if ((Test-Path $dst) -and ((Get-FileHash $src).Hash -eq (Get-FileHash $dst).Hash)) { continue }
     try { Copy-Item $src $dst -Force -ErrorAction Stop } catch { $locked += $b }
@@ -77,8 +105,8 @@ foreach ($sub in @('examples', 'tests')) {
 }
 $global:LASTEXITCODE = 0
 if ($locked.Count) {
-    Write-Warning ("NOT updated (in use - close App Sandbox and re-run with -NoBuild): " + ($locked -join ', '))
+    Write-Warning ("NOT updated (in use - close Nestbox and re-run with -NoBuild): " + ($locked -join ', '))
 }
 Write-Host "Deployed to $Dest"
-Get-Item (Join-Path $Dest 'AppSandbox.exe'), (Join-Path $Dest 'appsandbox_core.dll'), (Join-Path $Dest 'iso-patch.exe') |
+Get-Item (Join-Path $Dest 'Nestbox.exe'), (Join-Path $Dest 'nestbox_core.dll'), (Join-Path $Dest 'iso-patch.exe') |
     Format-Table Name, Length, LastWriteTime -AutoSize

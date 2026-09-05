@@ -2,7 +2,7 @@
 asb.py -- Python client for the AppSandbox headless daemon (Windows + macOS).
 
 Start the daemon with:
-    Windows:  appsandbox.exe --headless                     (elevated shell)
+    Windows:  Nestbox.exe --headless                     (elevated shell)
     macOS:    AppSandbox.app/Contents/MacOS/AppSandbox --headless
 Then:
 
@@ -41,7 +41,7 @@ def _discovery_path():
 def daemon_launch_hint():
     if sys.platform == "darwin":
         return "AppSandbox.app/Contents/MacOS/AppSandbox --headless"
-    return "appsandbox.exe --headless (from an elevated shell)"
+    return "Nestbox.exe --headless (from an elevated shell)"
 
 
 def key_path():
