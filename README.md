@@ -106,6 +106,10 @@ apps are native C / Objective-C with an HTML/JS UI (WebView2 on Windows, WKWebVi
 
 [Windows] You can check if the GPU-PV driver setup is working by running gpu-test.exe inside your App Sandbox Windows VM, gpu-test.exe will show a box with 6 rotating cubes, each using a different rendering engine (D3D9, D3D10, D3D11, D3D12, OpenGL and Vulkan).  If one or more fail, they will not correctly show a rotating cube for that rendering API.  [gpu-test.zip](https://github.com/jamesstringer90/appsandbox/releases/download/v0.1.2/gpu-test.zip). Note: The rendering API succeeding means that the GPU-PV worked, but sometimes games or apps are coded in such a way that they will not detect the GPU-PV system correctly and still show an error.
 
+## Documentation
+
+- [docs/vm-identity-dan-replica.md](docs/vm-identity-dan-replica.md) (Bahasa Indonesia, non-technical): what the VM identity profile and the nested replica do, what each can and cannot hide, and how to use them from the GUI.
+
 ## License
 
 AppSandbox is licensed under the [MIT License](LICENSE) — Copyright (c) 2026 James Stringer.

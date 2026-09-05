@@ -431,8 +431,6 @@ FodyWeavers.xsd
 !/tools/win-mesa-gl/prebuilt/arm64
 !/tools/win-mesa-gl/prebuilt/arm64/**
 
-# Local-only planning and notes — kept on disk for context, not pushed.
-/docs/
 
 # Local signing / Hardware-API submission secrets — never committed
 tools/sign/*.local.*
