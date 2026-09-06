@@ -926,7 +926,9 @@ function buildRowCells(vm, i, statusTd) {
     if (vm.osType === 'Linux' && vm.running && vm.agentOnline && !bld && (reps.length || !vm.vncPort)) {
         vncCell = makeIconCell('vnc', '+', true,
             (function(idx) { return function() { addReplica(idx); }; })(i), '',
-            reps.length ? 'Add another nested replica' : 'Create a nested replica (KVM guest with the bare-metal identity; patched QEMU + XFCE + Steam)');
+            reps.length ? 'Add another nested replica, or a Steam seat'
+                        : 'Create a nested replica (KVM guest with the bare-metal identity; patched QEMU + XFCE + Steam) ' +
+                          'or a Steam seat (a user with its own XFCE + Steam desktop on this machine, no VM)');
     } else if (rep === 'stopped' && vm.running && !bld) {
         vncCell = makeIconCell('vnc', '\u25B6\uFE0F', vm.agentOnline,
             (function(idx) { return function() { sendCmd('replicaStart', {vmIndex: idx}); }; })(i), '',
@@ -1184,10 +1186,13 @@ function renderVmTable() {
     });
 }
 
-/* ---- Nested replicas: rows under their VM ----
-   vm.replicas is the agent's JSON list [{name, state, vnc, desktop}]. Each
-   replica gets a row with its own start / screen / desktop / stop / destroy
-   buttons in the same columns as the VM's. */
+/* ---- Nested replicas and Steam seats: rows under their VM ----
+   vm.replicas is the agent's JSON list [{name, state, vnc, desktop[, kind,
+   res]}]: the nested replicas (KVM guests) and, with kind "seat", the Steam
+   seats (a Linux user with an Xvnc display + XFCE + Steam on the machine
+   itself). Each gets a row with its own start / screen / stop / restart /
+   destroy buttons in the same columns as the VM's; replicas also have the
+   pencil (size) and the desktop installer. */
 function parseReplicas(str) {
     if (!str) return [];
     try { var v = JSON.parse(str); return Array.isArray(v) ? v : []; } catch (e) { return []; }
@@ -1205,9 +1210,11 @@ function buildReplicaRows(grp, vm, idx) {
     var reps = parseReplicas(vm.replicas);
     /* every running console, for the grid window (one window, all of them tiled) */
     var live = reps.filter(function(r) { return r.state === 'running' && r.vnc; });
-    var tiles = live.map(function(r) { return r.name + ':' + r.vnc; }).join(',');
+    var tiles = live.map(function(r) { return r.name + ':' + r.vnc + (r.kind === 'seat' ? ':seat' : ''); }).join(',');
     reps.forEach(function(r, ri) {
         var running = r.state === 'running';
+        var seat = r.kind === 'seat';
+        var act = seat ? 'seat' : 'replica';   /* action prefix: seatStart / replicaStart ... */
         var tr = document.createElement('tr');
         tr.className = 'replica-row ' + (running ? 'running' : 'stopped');
         /* one cell per column, under the same headers as the VM row */
@@ -1219,45 +1226,66 @@ function buildReplicaRows(grp, vm, idx) {
             return c;
         };
         var td = rc('');
-        td.innerHTML = '<span class="replica-arm"></span><svg class="ic"><use href="#i-nest"/></svg><span class="replica-name"></span>';
+        td.innerHTML = '<span class="replica-arm"></span><svg class="ic"><use href="#' + (seat ? 'i-screen' : 'i-nest') + '"/></svg><span class="replica-name"></span>';
         td.querySelector('.replica-name').textContent = r.name;
-        td.title = 'Nested replica: a KVM guest inside ' + vm.name + ' (appsandbox-replica)';
+        td.title = seat
+            ? 'Steam seat: user "' + r.name + '" with its own Xvnc display, XFCE and Steam on ' + vm.name + ' itself (appsandbox-seat). ' +
+              'No VM: shares the machine\'s identity (DMI, machine-id, disks, MAC).'
+            : 'Nested replica: a KVM guest inside ' + vm.name + ' (appsandbox-replica)';
         tr.appendChild(td);
-        tr.appendChild(rc(r.desktop ? 'Ubuntu · xfce' : 'Ubuntu', r.desktop ? 'Ubuntu cloud image with XFCE + Steam (autologin)' : 'Ubuntu cloud image, no desktop yet'));
+        if (seat)
+            tr.appendChild(rc('seat · xfce' + (r.res ? ' · ' + r.res : ''),
+                'A user account on ' + vm.name + ' (' + r.name + ' / test123) with an XFCE desktop on its own Xvnc display' + (r.res ? ' (' + r.res + ')' : '') + ' and Steam at login'));
+        else
+            tr.appendChild(rc(r.desktop ? 'Ubuntu · xfce' : 'Ubuntu', r.desktop ? 'Ubuntu cloud image with XFCE + Steam (autologin)' : 'Ubuntu cloud image, no desktop yet'));
         var st = rc(running ? 'running' : (r.state || 'stopped'));
         st.className = 'replica-cell ' + (running ? 'status-running' : 'status-stopped');   /* same lamp as the VM row */
         tr.appendChild(st);
         tr.appendChild(rc(''));                                                   /* agent */
-        tr.appendChild(rc(r.cpus || '', 'Virtual CPU cores of the replica'));
-        tr.appendChild(rc(r.ram ? r.ram + ' MB' : '', 'Memory of the replica'));
-        tr.appendChild(rc(r.disk ? r.disk + ' GB' : '', 'Disk of the replica (grows only)'));
-        tr.appendChild(rc(r.vnc ? 'vnc :' + r.vnc : '', 'Console: VNC server on 127.0.0.1:' + (r.vnc || 5900) + ' inside ' + vm.name));
-        tr.appendChild(rc('NAT', 'libvirt NAT network (virbr0) inside ' + vm.name));
+        if (seat) {
+            tr.appendChild(rc('', 'A seat shares the cores of ' + vm.name));
+            tr.appendChild(rc('', 'A seat uses only the memory its programs take'));
+            tr.appendChild(rc('', 'A seat lives in /home/' + r.name + ' on ' + vm.name + '\'s disk'));
+        } else {
+            tr.appendChild(rc(r.cpus || '', 'Virtual CPU cores of the replica'));
+            tr.appendChild(rc(r.ram ? r.ram + ' MB' : '', 'Memory of the replica'));
+            tr.appendChild(rc(r.disk ? r.disk + ' GB' : '', 'Disk of the replica (grows only)'));
+        }
+        tr.appendChild(rc(r.vnc ? 'vnc :' + r.vnc : '', (seat ? 'Display: Xvnc' : 'Console: VNC server') + ' on 127.0.0.1:' + (r.vnc || 5900) + ' inside ' + vm.name));
+        tr.appendChild(seat ? rc('host', 'The seat uses ' + vm.name + '\'s own network') : rc('NAT', 'libvirt NAT network (virbr0) inside ' + vm.name));
         if (!hostBridge.noSnapshots) tr.appendChild(rc(''));                      /* snapshot */
         var name = r.name;
         var cells = [
             makeIconCell('start', '\u25B6\uFE0F', !running,
-                function() { sendCmd('replicaStart', {vmIndex: idx, name: name}); }, '', 'Start replica "' + name + '"'),
+                function() { sendCmd(act + 'Start', {vmIndex: idx, name: name}); }, '', 'Start ' + act + ' "' + name + '"'),
             makeIconCell('connect-idd', '\uD83D\uDDA5\uFE0F', running && !!r.vnc,
-                function() { sendCmd('vncOpen', {vmIndex: idx, port: r.vnc, name: name}); }, '', 'Open the screen of replica "' + name + '" in its own window'),
-            makeIconCell('edit', 'edit', true,
-                function() { resizeReplica(idx, r); }, '', 'Cores, RAM and disk of replica "' + name + '"'),
-            makeIconCell('vnc', 'desktop', running && !r.desktop,
-                function() { confirmReplica(idx, name, 'replicaDesktop', 'Install XFCE + Steam in "' + name + '"? Takes 10-20 minutes and restarts the replica.', 'Install'); },
-                r.desktop ? 'hidden' : '', 'Install XFCE + Steam (autologin) in this replica'),
+                function() { sendCmd('vncOpen', {vmIndex: idx, port: r.vnc, name: name, kind: act}); }, '', 'Open the screen of ' + act + ' "' + name + '" in its own window'),
+            seat ? blankIconCell()
+                 : makeIconCell('edit', 'edit', true,
+                    function() { resizeReplica(idx, r); }, '', 'Cores, RAM and disk of replica "' + name + '"'),
+            seat ? blankIconCell()
+                 : makeIconCell('vnc', 'desktop', running && !r.desktop,
+                    function() { confirmReplica(idx, name, 'replicaDesktop', 'Install XFCE + Steam in "' + name + '"? Takes 10-20 minutes and restarts the replica.', 'Install'); },
+                    r.desktop ? 'hidden' : '', 'Install XFCE + Steam (autologin) in this replica'),
             ri === 0 && live.length
                 ? makeIconCell('vnc', 'grid', true,
                     function() { sendCmd('vncGrid', {vmIndex: idx, tiles: tiles}); }, '',
-                    live.length === 1 ? 'Open the running replica in a grid window (more tiles appear as replicas start)'
-                                      : 'Open all ' + live.length + ' running replicas side by side in one window')
+                    live.length === 1 ? 'Open the running screen in a grid window (more tiles appear as replicas and seats start)'
+                                      : 'Open all ' + live.length + ' running screens side by side in one window')
                 : blankIconCell(),
             makeIconCell('shutdown', '\u23FB', running,
-                function() { sendCmd('replicaStop', {vmIndex: idx, name: name}); }, '', 'Shut this replica down'),
+                function() { sendCmd(act + 'Stop', {vmIndex: idx, name: name}); }, '',
+                seat ? 'Stop this seat: its XFCE session and Steam end (the user account stays)' : 'Shut this replica down'),
             makeIconCell('stop', '\u21BB', running,
-                function() { sendCmd('replicaRestart', {vmIndex: idx, name: name}); }, '', 'Restart this replica (picks up a changed identity)'),
+                function() { sendCmd(act + 'Restart', {vmIndex: idx, name: name}); }, '',
+                seat ? 'Restart this seat (a fresh XFCE session)' : 'Restart this replica (picks up a changed identity)'),
             makeIconCell('delete', '\uD83D\uDDD1\uFE0F', true,
-                function() { confirmReplica(idx, name, 'replicaDestroy', 'Delete replica "' + name + '" and its disk? This cannot be undone.', 'Delete'); },
-                running ? 'running' : '', 'Delete this replica'),
+                function() {
+                    confirmReplica(idx, name, act + 'Destroy',
+                        seat ? 'Delete seat "' + name + '"? Its user account and home directory (/home/' + name + ', with Steam\'s files) are removed. This cannot be undone.'
+                             : 'Delete replica "' + name + '" and its disk? This cannot be undone.', 'Delete');
+                },
+                running ? 'running' : '', 'Delete this ' + act),
             blankIconCell()
         ];
         cells.forEach(function(c) { tr.appendChild(c); });
@@ -1266,7 +1294,8 @@ function buildReplicaRows(grp, vm, idx) {
 }
 
 function confirmReplica(idx, name, action, message, label) {
-    showModal('Nested replica', message, label, { confirmClass: action === 'replicaDestroy' ? 'danger' : 'primary' }).then(function(ok) {
+    var seat = action.indexOf('seat') === 0;
+    showModal(seat ? 'Steam seat' : 'Nested replica', message, label, { confirmClass: /Destroy$/.test(action) ? 'danger' : 'primary' }).then(function(ok) {
         if (ok) sendCmd(action, {vmIndex: idx, name: name});
     });
 }
@@ -1281,16 +1310,26 @@ function replicaLimits(vm) {
 
 /* "+" in the nested column: name and size a new replica; the agent then
    installs the packages, builds the identity-patched QEMU (first time only),
-   creates the replica and installs XFCE + Steam, all in the background. */
+   creates the replica and installs XFCE + Steam, all in the background.
+   The same dialog makes a Steam seat instead: a Linux user with an Xvnc
+   display, XFCE and Steam on the machine itself (no VM, no size; shares the
+   machine's identity), ready in a minute once the packages are in. */
 function addReplica(idx) {
-    var existing = parseReplicas(vms[idx] && vms[idx].replicas).map(function(r) { return r.name; });
-    var def = existing.indexOf('replica') < 0 ? 'replica' : 'replica' + (existing.length + 1);
+    var all = parseReplicas(vms[idx] && vms[idx].replicas);
+    var existing = all.map(function(r) { return r.name; });
+    var nrep = all.filter(function(r) { return r.kind !== 'seat'; }).length;
+    var nseat = all.length - nrep;
+    var def = existing.indexOf('replica') < 0 ? 'replica' : 'replica' + (nrep + 1);
+    var seatDef = existing.indexOf('seat') < 0 ? 'seat' : 'seat' + (nseat + 1);
     var vm = vms[idx] || {};
     var lim = replicaLimits(vm);
     var onHost = !!vm.isHost;
     var where = onHost ? 'this PC' : 'sandbox';
     var fields = [
-        { key: 'name', label: 'Name (letters, digits, - _ .)', type: 'text', value: def },
+        { key: 'kind', label: 'What to add', type: 'select', value: 'replica', options: [
+            { value: 'replica', label: 'Nested replica: a KVM guest with its own machine identity' },
+            { value: 'seat', label: 'Steam seat: a user + XFCE + Steam on ' + where + ' itself (no VM; cores / RAM / disk below do not apply)' } ] },
+        { key: 'name', label: 'Name (replica: letters, digits, - _ . ; seat: a Linux user name, lowercase)', type: 'text', value: def },
         { key: 'cpus', label: 'Cores (' + where + ': ' + lim.cores + ')', type: 'number', value: Math.min(4, lim.cores), min: 1, max: lim.cores },
         { key: 'ram', label: 'RAM in MB (' + where + ': ' + lim.vmRam + ')', type: 'number', value: Math.min(4096, lim.ram), min: 512, max: lim.ram, step: 256 },
         { key: 'disk', label: 'Disk in GB', type: 'number', value: 20, min: 5, max: 2048 }
@@ -1298,20 +1337,30 @@ function addReplica(idx) {
     /* Linux host: the patch is optional; the sandbox always builds it. */
     if (onHost && !vm.qemuPatched)
         fields.push({ key: 'patch', label: 'Build the identity-patched QEMU first (~10 min, once; hypervisor-level identity strings)', type: 'checkbox', value: false });
-    showModal('New nested replica',
-        onHost
+    showModal('New nested replica or Steam seat',
+        (onHost
             ? 'A replica is a KVM guest on this PC with the bare-metal identity from the profile. ' +
-              'Nestbox creates it from the Ubuntu cloud image and installs XFCE + Steam (10-20 min). ' +
-              'Progress shows in the log; the row appears once it boots. Its size can be changed later from the row.'
+              'Nestbox creates it from the Ubuntu cloud image and installs XFCE + Steam (10-20 min). '
             : 'A replica is a KVM guest inside this sandbox with the bare-metal identity from the profile. ' +
-              'Nestbox builds the patched QEMU (first time, ~10 min), creates the replica and installs XFCE + Steam (10-20 min). ' +
-              'Progress shows in the log; the row appears once it boots. Its size can be changed later from the row.',
+              'Nestbox builds the patched QEMU (first time, ~10 min), creates the replica and installs XFCE + Steam (10-20 min). ') +
+        'Progress shows in the log; the row appears once it boots. Its size can be changed later from the row. ' +
+        'A Steam seat is far lighter: a Linux user on ' + where + ' with an Xvnc display, XFCE and Steam at login ' +
+        '(packages once, ~1.5 GB; then seconds per seat), but every seat shows the same machine identity.',
         'Create', { confirmClass: 'primary', fields: fields })
     .then(function(f) {
         if (!f) return;
+        if (f.kind === 'seat') {
+            var sname = String(f.name || '').trim().toLowerCase();
+            if (sname === def) sname = seatDef;                  /* the replica default was left in place */
+            sname = sname.replace(/[^a-z0-9_-]/g, '-').replace(/^[^a-z]+/, '').slice(0, 31);
+            if (!sname) { showModal('Steam seat', 'A seat name is a Linux user name: lowercase letters, digits, - and _, starting with a letter.', 'OK', { confirmClass: 'primary' }); return; }
+            if (existing.indexOf(sname) >= 0) { showModal('Steam seat', 'A replica or seat named "' + sname + '" already exists.', 'OK', { confirmClass: 'primary' }); return; }
+            sendCmd('seatCreate', {vmIndex: idx, name: sname, res: '1600x900', steam: true});
+            return;
+        }
         var name = String(f.name || '').trim().replace(/[^A-Za-z0-9._-]/g, '-');
         if (!name) return;
-        if (existing.indexOf(name) >= 0) { showModal('Nested replica', 'A replica named "' + name + '" already exists.', 'OK', { confirmClass: 'primary' }); return; }
+        if (existing.indexOf(name) >= 0) { showModal('Nested replica', 'A replica or seat named "' + name + '" already exists.', 'OK', { confirmClass: 'primary' }); return; }
         var cpus = parseInt(f.cpus, 10) || 4, ram = parseInt(f.ram, 10) || 4096, disk = parseInt(f.disk, 10) || 20;
         sendCmd('replicaSetup', {vmIndex: idx, name: name, cpus: cpus, ram: ram, disk: disk, patch: !!f.patch});
     });
@@ -1898,21 +1947,36 @@ function showModal(title, message, confirmText, opts) {
     } else {
         inputRow.style.display = 'none';
     }
-    /* fields: [{key, label, type: text|number|checkbox, value, min, max, step}]
-       - a small form; the promise then resolves to {key: value} (or false). */
+    /* fields: [{key, label, type: text|number|checkbox|select, value, min, max,
+       step, options: [{value, label}]}] - a small form; the promise then
+       resolves to {key: value} (or false). */
     var fieldsEl = document.getElementById('modal-fields');
     fieldsEl.innerHTML = '';
     if (opts && opts.fields) {
         opts.fields.forEach(function(f) {
             var row = document.createElement('label');
-            var input = document.createElement('input');
-            input.type = f.type || 'text';
+            var input = document.createElement(f.type === 'select' ? 'select' : 'input');
+            if (f.type !== 'select') input.type = f.type || 'text';
             input.dataset.key = f.key;
             if (f.type === 'checkbox') {
                 row.className = 'check modal-field modal-field-check';
                 input.checked = !!f.value;
                 row.appendChild(input);
                 row.appendChild(document.createTextNode(' ' + f.label));
+            } else if (f.type === 'select') {
+                row.className = 'modal-field modal-field-text';
+                var slab = document.createElement('span');
+                slab.className = 'field-label';
+                slab.textContent = f.label;
+                (f.options || []).forEach(function(o) {
+                    var op = document.createElement('option');
+                    op.value = o.value;
+                    op.textContent = o.label;
+                    if (o.value === f.value) op.selected = true;
+                    input.appendChild(op);
+                });
+                row.appendChild(slab);
+                row.appendChild(input);
             } else {
                 row.className = 'modal-field' + (f.type === 'text' || !f.type ? ' modal-field-text' : '');
                 var lab = document.createElement('span');
@@ -1949,7 +2013,7 @@ function modalResolve(result) {
     if (pendingConfirm) {
         if (result && pendingConfirm.hasFields) {
             var values = {};
-            document.querySelectorAll('#modal-fields input').forEach(function(el) {
+            document.querySelectorAll('#modal-fields input, #modal-fields select').forEach(function(el) {
                 values[el.dataset.key] = el.type === 'checkbox' ? el.checked : el.value;
             });
             pendingConfirm.resolve(values);

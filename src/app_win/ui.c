@@ -1250,45 +1250,66 @@ static void on_webview2_message(const wchar_t *json)
             }
             send_vm_list();
         }
-    } else if (wcsncmp(action, L"replica", 7) == 0 && action[7] >= L'A' && action[7] <= L'Z') {
+    } else if ((wcsncmp(action, L"replica", 7) == 0 && action[7] >= L'A' && action[7] <= L'Z') ||
+               (wcsncmp(action, L"seat", 4) == 0 && action[4] >= L'A' && action[4] <= L'Z')) {
         /* Nested replica control: replicaStart / Stop / Restart / Destroy /
-           Create / Desktop / Setup, with "name" (default "replica"). The agent
-           runs appsandbox-replica and reports replica_result / the new list. */
+           Create / Desktop / Setup / Resize, with "name" (default "replica").
+           The agent runs appsandbox-replica and reports replica_result / the
+           new list. Steam seats go the same way: seatStart / Stop / Restart /
+           Destroy / Create become "seat <name> <sub>", appsandbox-seat in the
+           guest, seat_result back; the seats travel in the replicas list. */
         int idx;
+        BOOL seat = (action[0] == L's');
+        size_t plen = seat ? 4 : 7;
+        const wchar_t *what = seat ? L"Steam seat" : L"Nested replica";
         if (json_get_int(json, L"vmIndex", &idx) && idx >= 0 && idx < asb_vm_count()) {
             VmInstance *inst = asb_vm_instance(asb_vm_get(idx));
-            static wchar_t wname[64];
+            static wchar_t wname[64], wres[16];
             char name[64], sub[16], line[256], opts[128] = "";
             int i, val;
-            BOOL restart = FALSE;
+            BOOL restart = FALSE, steam = TRUE;
             size_t o = 0;
             wname[0] = L'\0';
             json_get_string(json, L"name", wname, 64);
-            if (!wname[0]) wcscpy_s(wname, 64, L"replica");
+            if (!wname[0]) wcscpy_s(wname, 64, seat ? L"seat" : L"replica");
             WideCharToMultiByte(CP_UTF8, 0, wname, -1, name, sizeof(name), NULL, NULL);
             for (i = 0; name[i]; i++)
                 if (!((name[i] >= '0' && name[i] <= '9') || (name[i] >= 'a' && name[i] <= 'z') ||
                       (name[i] >= 'A' && name[i] <= 'Z') || name[i] == '-' || name[i] == '_' || name[i] == '.'))
                     name[i] = '-';
-            WideCharToMultiByte(CP_UTF8, 0, action + 7, -1, sub, sizeof(sub), NULL, NULL);
+            WideCharToMultiByte(CP_UTF8, 0, action + plen, -1, sub, sizeof(sub), NULL, NULL);
             for (i = 0; sub[i]; i++) if (sub[i] >= 'A' && sub[i] <= 'Z') sub[i] = (char)(sub[i] + 32);
-            /* Sizing (replicaSetup / replicaResize): cores, RAM in MB, disk in
-               GB, and whether to restart the replica so the new size applies
-               now. Passed as key=value words; the agent re-validates them. */
-            if (json_get_int(json, L"cpus", &val) && val >= 1 && val <= 256)
-                o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " cpus=%d", val);
-            if (json_get_int(json, L"ram", &val) && val >= 256 && val <= 1048576)
-                o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " ram=%d", val);
-            if (json_get_int(json, L"disk", &val) && val >= 1 && val <= 65536)
-                o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " disk=%d", val);
-            if (json_get_bool(json, L"restart", &restart) && restart)
-                o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " restart=1");
-            if (inst && inst->running && inst->agent_online) {
-                sprintf_s(line, sizeof(line), "replica %s %s%s", name, sub, opts);
-                vm_agent_send(inst, line, NULL, 0, 0);
-                ui_log(L"Nested replica \"%S\" of \"%s\": %S requested.", name, inst->name, sub);
+            if (seat) {
+                /* Seat words (seatCreate): res=<W>x<H> and steam=0|1. The
+                   agent re-validates them. */
+                wres[0] = L'\0';
+                if (json_get_string(json, L"res", wres, 16) && wres[0]) {
+                    int ok = 1;
+                    for (i = 0; wres[i]; i++)
+                        if (!((wres[i] >= L'0' && wres[i] <= L'9') || wres[i] == L'x')) ok = 0;
+                    if (ok) o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " res=%S", wres);
+                }
+                if (json_get_bool(json, L"steam", &steam))
+                    o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " steam=%d", steam ? 1 : 0);
             } else {
-                ui_log(L"Nested replica: the guest agent of \"%s\" is not online.", inst ? inst->name : L"?");
+                /* Sizing (replicaSetup / replicaResize): cores, RAM in MB, disk in
+                   GB, and whether to restart the replica so the new size applies
+                   now. Passed as key=value words; the agent re-validates them. */
+                if (json_get_int(json, L"cpus", &val) && val >= 1 && val <= 256)
+                    o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " cpus=%d", val);
+                if (json_get_int(json, L"ram", &val) && val >= 256 && val <= 1048576)
+                    o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " ram=%d", val);
+                if (json_get_int(json, L"disk", &val) && val >= 1 && val <= 65536)
+                    o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " disk=%d", val);
+                if (json_get_bool(json, L"restart", &restart) && restart)
+                    o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " restart=1");
+            }
+            if (inst && inst->running && inst->agent_online) {
+                sprintf_s(line, sizeof(line), "%s %s %s%s", seat ? "seat" : "replica", name, sub, opts);
+                vm_agent_send(inst, line, NULL, 0, 0);
+                ui_log(L"%s \"%S\" of \"%s\": %S requested.", what, name, inst->name, sub);
+            } else {
+                ui_log(L"%s: the guest agent of \"%s\" is not online.", what, inst ? inst->name : L"?");
             }
         }
     } else if (wcscmp(action, L"vncConnect") == 0 || wcscmp(action, L"vncOpen") == 0) {
@@ -1299,11 +1320,17 @@ static void on_webview2_message(const wchar_t *json)
         BOOL in_app = (wcscmp(action, L"vncOpen") == 0);
         if (json_get_int(json, L"vmIndex", &idx) && idx >= 0 && idx < asb_vm_count()) {
             VmInstance *inst = asb_vm_instance(asb_vm_get(idx));
-            static wchar_t wname[64];
+            static wchar_t wname[64], wkind[16];
+            BOOL is_seat;
             json_get_int(json, L"port", &port);
             if (port <= 0 || port > 65535) port = 5900;
             wname[0] = L'\0';
             json_get_string(json, L"name", wname, 64);
+            /* "kind": "seat" for a Steam seat's display (the viewer's Stop /
+               Restart buttons then drive seatStop / seatRestart) */
+            wkind[0] = L'\0';
+            json_get_string(json, L"kind", wkind, 16);
+            is_seat = (wcscmp(wkind, L"seat") == 0);
             if (inst && inst->running && (inst->vnc_guest_port || port != 5900)) {
                 UINT64 id = inst->unique_id;
                 DWORD hp = vm_vnc_proxy_port(inst, (unsigned)port);
@@ -1318,8 +1345,8 @@ static void on_webview2_message(const wchar_t *json)
                         BOOL nested = wname[0] || strcmp(inst->replica_state, "running") == 0;
                         url_encode(rname, ename, ARRAYSIZE(ename));
                         url_encode(inst->name, evm, ARRAYSIZE(evm));
-                        swprintf_s(page, ARRAYSIZE(page), L"viewer.html?ws=%lu&vm=%d&port=%d&name=%s&vmName=%s&nested=%d",
-                                   ws, idx, port, ename, evm, nested ? 1 : 0);
+                        swprintf_s(page, ARRAYSIZE(page), L"viewer.html?ws=%lu&vm=%d&port=%d&name=%s&vmName=%s&nested=%d%s",
+                                   ws, idx, port, ename, evm, nested ? 1 : 0, is_seat ? L"&kind=seat" : L"");
                         if (nested)
                             swprintf_s(title, ARRAYSIZE(title), L"%s / %s - Nestbox", inst->name, rname);
                         else
@@ -1361,13 +1388,17 @@ static void on_webview2_message(const wchar_t *json)
                 swprintf_s(page, ARRAYSIZE(page), L"viewer.html?grid=1&vm=%d&vmName=%s&tiles=", idx, evm);
                 o = wcslen(page);
                 for (tok = wcstok_s(tiles, L",", &ctx); tok; tok = wcstok_s(NULL, L",", &ctx)) {
-                    wchar_t *colon = wcschr(tok, L':');
+                    wchar_t *colon = wcschr(tok, L':'), *c2;
+                    const wchar_t *tkind = L"";
                     int port;
                     DWORD hp, ws;
                     if (!colon) continue;
                     *colon = L'\0';
                     port = _wtoi(colon + 1);
                     if (port <= 0 || port > 65535 || !tok[0]) continue;
+                    /* "name:port:seat" marks a Steam seat's display */
+                    c2 = wcschr(colon + 1, L':');
+                    if (c2 && wcscmp(c2 + 1, L"seat") == 0) tkind = L":seat";
                     inst = asb_find_vm_by_id(id);
                     if (!inst) break;
                     hp = vm_vnc_proxy_port(inst, (unsigned)port);
@@ -1376,12 +1407,12 @@ static void on_webview2_message(const wchar_t *json)
                     if (!ws) { ui_log(L"Replica grid: no WebSocket bridge for port %d.", port); continue; }
                     url_encode(tok, ename, ARRAYSIZE(ename));
                     if (o + wcslen(ename) + 24 >= ARRAYSIZE(page)) break;
-                    o += (size_t)swprintf_s(page + o, ARRAYSIZE(page) - o, L"%s%s:%lu:%d", count ? L"," : L"", ename, ws, port);
+                    o += (size_t)swprintf_s(page + o, ARRAYSIZE(page) - o, L"%s%s:%lu:%d%s", count ? L"," : L"", ename, ws, port, tkind);
                     count++;
                 }
                 inst = asb_find_vm_by_id(id);
                 if (count && inst) {
-                    swprintf_s(title, ARRAYSIZE(title), L"%s - %d replica%s - Nestbox", inst->name, count, count == 1 ? L"" : L"s");
+                    swprintf_s(title, ARRAYSIZE(title), L"%s - %d screen%s - Nestbox", inst->name, count, count == 1 ? L"" : L"s");
                     open_viewer_window(title, page);
                 } else {
                     ui_log(L"Replica grid: no replica console reachable.");

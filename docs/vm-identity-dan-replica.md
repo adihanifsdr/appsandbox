@@ -170,6 +170,42 @@ sudo appsandbox-replica qemu restore         # kembalikan QEMU bawaan Ubuntu
 sudo appsandbox-identity status              # apa yang dilihat sandbox VM saat ini
 ```
 
+## Seat: beberapa Steam tanpa replica
+
+Replica dipakai karena tiap replica punya KTP mesin sendiri. Kalau yang
+dibutuhkan hanya beberapa Steam yang hidup bersamaan, ada cara yang jauh
+lebih ringan: **seat**. Satu seat adalah satu user Linux dengan layar Xvnc
+sendiri, desktop XFCE, dan Steam yang otomatis jalan saat login. Steam
+menyimpan kuncinya di folder home masing-masing user, jadi beberapa seat
+bisa jalan berdampingan di mesin yang sama.
+
+Tombol `+` di kolom 🪆 menanyakan mau menambah apa: **Nested replica** atau
+**Steam seat**. Seat bisa dibuat di dalam sandbox VM maupun langsung di host
+Ubuntu lewat `nestbox`, dan tidak butuh KVM. Barisnya punya tombol start,
+layar, stop, restart, dan hapus; layarnya terbuka di jendela sendiri seperti
+replica, dan ikut tampil di tombol grid.
+
+| | Replica | Seat |
+|---|---|---|
+| RAM | dialokasikan penuh per replica (default 4 GB) | hanya yang dipakai programnya |
+| CPU | dua lapis virtualisasi, grafis llvmpipe | langsung, grafis llvmpipe di layar Xvnc |
+| Waktu buat | 10-20 menit | detik (paket diunduh sekali, ±1,5 GB) |
+| KTP mesin | beda tiap replica | **sama semua**: DMI, machine-id, serial disk, MAC, dan di sandbox VM bit hypervisor |
+| Kalau dihapus | disk replica hilang | user dan foldernya (/home/nama) hilang |
+
+Nama seat adalah nama user Linux: huruf kecil, angka, `-` dan `_`, diawali
+huruf. Password-nya `test123`, sama seperti user di replica. Dari terminal:
+
+```
+sudo appsandbox-seat -n steam2 create        # user, layar, unit systemd; langsung jalan
+sudo appsandbox-seat list                    # semua seat sebagai JSON
+sudo appsandbox-seat -n steam2 destroy       # hapus user dan foldernya
+```
+
+Kapan pakai yang mana: kalau akun-akun Steam harus terlihat sebagai PC
+berbeda, tetap pakai replica. Kalau hanya perlu beberapa Steam hidup
+bersamaan dengan murah, pakai seat. Keduanya boleh ada di sandbox yang sama.
+
 ## Pertanyaan yang sering muncul
 
 **Kenapa aplikasi di sandbox VM tidak dipindah saja ke replica?**

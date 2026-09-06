@@ -57,7 +57,11 @@ is exposed on the server's public address.
 ## What works
 
 - `+` on the PC row: name and size a new replica; the log shows the steps
-  (packages, cloud image download, first boot, XFCE + Steam).
+  (packages, cloud image download, first boot, XFCE + Steam). The same dialog
+  adds a **Steam seat** instead: a Linux user with an Xvnc display, XFCE and
+  Steam on this PC, no VM and no `/dev/kvm` needed
+  ([../seat/](../seat/README.md)); its row has start, screen, stop, restart
+  and delete.
 - Replica rows: start, screen (browser window), pencil (cores / RAM / disk),
   desktop, shut down, restart, delete, and the grid button for every running
   replica in one window.

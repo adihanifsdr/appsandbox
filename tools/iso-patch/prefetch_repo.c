@@ -371,6 +371,14 @@ int do_prefetch_repo(const wchar_t *repo, const wchar_t *branch, const wchar_t *
         swprintf_s(s, MAX_PATH, L"%s\\tools\\linux\\replica\\README.md", extracted_root);
         swprintf_s(d, MAX_PATH, L"%s\\replica-README.md", out_dir);
         u_cp_file(s, d);
+        /* Steam seats: several desktops (user + Xvnc + XFCE + Steam) on the
+           guest itself, no VM (tools/linux/seat) */
+        swprintf_s(s, MAX_PATH, L"%s\\tools\\linux\\seat\\appsandbox-seat", extracted_root);
+        swprintf_s(d, MAX_PATH, L"%s\\appsandbox-seat", out_dir);
+        u_cp_file(s, d);
+        swprintf_s(s, MAX_PATH, L"%s\\tools\\linux\\seat\\README.md", extracted_root);
+        swprintf_s(d, MAX_PATH, L"%s\\seat-README.md", out_dir);
+        u_cp_file(s, d);
     }
 
     /* qemu-identity/: QEMU patches + build script for the replica's

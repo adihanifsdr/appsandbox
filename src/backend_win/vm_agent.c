@@ -366,6 +366,10 @@ static int process_async_message(VmInstance *vm, SOCKET s, const char *buf)
         }
     } else if (strncmp(buf, "replica_result:", 15) == 0) {
         ui_log(L"[%s] Nested replica: %S.", vm->name, buf + 15);
+    } else if (strncmp(buf, "seat_result:", 12) == 0) {
+        /* "seat_result:<name>:<sub>:ok|failed|started" - a Steam seat
+           (appsandbox-seat); the seats travel in the replicas list. */
+        ui_log(L"[%s] Steam seat: %S.", vm->name, buf + 12);
     } else if (strncmp(buf, "displays:", 9) == 0) {
         ui_log(L"[%s] Displays: %S", vm->name, buf + 9);
     } else if (strncmp(buf, "log:", 4) == 0) {

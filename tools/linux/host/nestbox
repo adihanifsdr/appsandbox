@@ -41,6 +41,11 @@ WEB_DIRS = [os.path.join(HERE, "web"),
 REPLICA_SRCS = [os.path.join(HERE, "appsandbox-replica"),
                 os.path.normpath(os.path.join(HERE, "..", "replica", "appsandbox-replica"))]
 REPLICA_TOOL = "/usr/local/sbin/appsandbox-replica"
+# Steam seats (a user + Xvnc + XFCE + Steam on this PC, no VM): same install
+# rule as the replica tool, listed and driven next to the replicas
+SEAT_SRCS = [os.path.join(HERE, "appsandbox-seat"),
+             os.path.normpath(os.path.join(HERE, "..", "seat", "appsandbox-seat"))]
+SEAT_TOOL = "/usr/local/sbin/appsandbox-seat"
 # the QEMU identity patches + build.sh: appsandbox-replica looks for them where
 # the App Sandbox guest image ships them, so a Linux host copies them there
 QEMU_SRC_DIRS = [os.path.join(HERE, "qemu-identity"),
@@ -292,19 +297,19 @@ def have(cmd):
     return shutil.which(cmd) is not None
 
 
-def run_tool(args, timeout=600):
-    """appsandbox-replica <args>; returns (rc, output)."""
+def run_tool(args, timeout=600, tool=REPLICA_TOOL):
+    """appsandbox-replica (or -seat) <args>; returns (rc, output)."""
     try:
-        p = subprocess.run([REPLICA_TOOL] + args, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run([tool] + args, capture_output=True, text=True, timeout=timeout)
         return p.returncode, (p.stdout + p.stderr)
     except (OSError, subprocess.SubprocessError) as e:
         return 1, str(e)
 
 
-def run_tool_streaming(args, tag):
-    """appsandbox-replica <args> with every output line in the UI log."""
+def run_tool_streaming(args, tag, tool=REPLICA_TOOL):
+    """appsandbox-replica (or -seat) <args> with every output line in the UI log."""
     try:
-        p = subprocess.Popen([REPLICA_TOOL] + args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        p = subprocess.Popen([tool] + args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              text=True, stdin=subprocess.DEVNULL)
     except OSError as e:
         log("[%s] %s" % (tag, e))
@@ -316,11 +321,8 @@ def run_tool_streaming(args, tag):
     return p.wait()
 
 
-def replica_list():
-    """[{name,state,vnc,desktop,cpus,ram,disk}, ...] from the tool; [] without libvirt."""
-    if not os.path.exists(REPLICA_TOOL) or not have("virsh"):
-        return []
-    rc, out = run_tool(["list"], timeout=60)
+def _tool_list(tool):
+    rc, out = run_tool(["list"], timeout=60, tool=tool)
     if rc != 0:
         return []
     try:
@@ -328,6 +330,17 @@ def replica_list():
         return v if isinstance(v, list) else []
     except ValueError:
         return []
+
+
+def replica_list():
+    """The replicas [{name,state,vnc,desktop,cpus,ram,disk}, ...] (none without
+    libvirt) followed by the Steam seats [{name,state,vnc,desktop,kind:"seat",res}, ...]."""
+    out = []
+    if os.path.exists(REPLICA_TOOL) and have("virsh"):
+        out += _tool_list(REPLICA_TOOL)
+    if os.path.exists(SEAT_TOOL):
+        out += _tool_list(SEAT_TOOL)
+    return out
 
 
 def host_entry(reps):
@@ -384,7 +397,7 @@ _busy = set()
 _busy_lock = threading.Lock()
 
 
-def run_replica_job(name, tag, steps):
+def run_replica_job(name, tag, steps, tool=REPLICA_TOOL):
     """steps: [(args, description)]; stops at the first failure. Detached."""
     with _busy_lock:
         if name in _busy:
@@ -396,7 +409,7 @@ def run_replica_job(name, tag, steps):
         try:
             for args, desc in steps:
                 log("[%s] %s ..." % (tag, desc))
-                rc = run_tool_streaming(args, tag)
+                rc = run_tool_streaming(args, tag, tool)
                 if rc != 0:
                     log("[%s] %s failed (rc=%d)." % (tag, desc, rc))
                     return
@@ -456,12 +469,42 @@ def clean_name(name):
     return name or "replica"
 
 
+def seat_name(name):
+    """A seat is a Linux user: lowercase letters, digits, - _, a letter first."""
+    name = re.sub(r"[^a-z0-9_-]", "-", str(name or "seat").lower())
+    name = re.sub(r"^[^a-z]+", "", name)[:31]
+    return name or "seat"
+
+
 def handle(msg, ws):
     action = msg.get("action")
     if action == "uiReady":
         ws.send(json.dumps(state_message("fullState")))
         return
     if action in ("selectVm", "reportMinSize", "browse", "getTemplates", "getAdapters"):
+        return
+
+    if action in ("seatStart", "seatStop", "seatRestart", "seatDestroy", "seatCreate"):
+        # Steam seats: appsandbox-seat on this PC (a user + Xvnc + XFCE + Steam), no KVM needed
+        sname = seat_name(msg.get("name"))
+        if not os.path.exists(SEAT_TOOL):
+            log("[%s] appsandbox-seat is not installed (expected next to nestbox or in ../seat)." % sname)
+            return
+        if action == "seatCreate":
+            if any(r.get("name") == sname for r in replica_list()):
+                log("[%s] already exists." % sname)
+                return
+            args = ["-n", sname, "create"]
+            res = str(msg.get("res") or "")
+            if re.match(r"^\d{3,5}x\d{3,5}$", res):
+                args += ["--resolution", res]
+            if msg.get("steam") is False:
+                args.append("--no-steam")
+            run_replica_job(sname, sname, [(args, "creating the Steam seat (packages the first time, ~1.5 GB)")], tool=SEAT_TOOL)
+        else:
+            sub = action[4:].lower()
+            run_replica_job(sname, sname, [(["-n", sname, sub], {"start": "starting", "stop": "stopping",
+                                            "restart": "restarting", "destroy": "deleting"}[sub])], tool=SEAT_TOOL)
         return
 
     name = clean_name(msg.get("name"))
@@ -502,20 +545,23 @@ def handle(msg, ws):
         run_replica_job(name, name, steps)
     elif action == "vncOpen":
         port = int(msg.get("port") or 5900)
-        url = "viewer.html?ws=%s&vm=0&port=%d&name=%s&vmName=%s&nested=1" % (
-            urllib.parse.quote(vnc_bridge(port)), port, urllib.parse.quote(name), urllib.parse.quote(HOSTNAME))
+        url = "viewer.html?ws=%s&vm=0&port=%d&name=%s&vmName=%s&nested=1%s" % (
+            urllib.parse.quote(vnc_bridge(port)), port, urllib.parse.quote(name), urllib.parse.quote(HOSTNAME),
+            "&kind=seat" if msg.get("kind") == "seat" else "")
         ws.send(json.dumps({"type": "openWindow", "url": url, "width": 1640, "height": 990}))
     elif action == "vncGrid":
         tiles = []
         for tok in str(msg.get("tiles") or "").split(","):
-            if ":" not in tok:
+            parts = tok.split(":")
+            if len(parts) < 2:
                 continue
-            n, p = tok.rsplit(":", 1)
+            n, p = parts[0], parts[1]
+            kind = ":seat" if len(parts) > 2 and parts[2] == "seat" else ""   # "name:port:seat" marks a Steam seat
             try:
                 p = int(p)
             except ValueError:
                 continue
-            tiles.append("%s:%s:%d" % (urllib.parse.quote(clean_name(n)), urllib.parse.quote(vnc_bridge(p)), p))
+            tiles.append("%s:%s:%d%s" % (urllib.parse.quote(clean_name(n)), urllib.parse.quote(vnc_bridge(p)), p, kind))
         if tiles:
             url = "viewer.html?grid=1&vm=0&vmName=%s&tiles=%s" % (urllib.parse.quote(HOSTNAME), ",".join(tiles))
             ws.send(json.dumps({"type": "openWindow", "url": url, "width": 0, "height": 0}))
@@ -629,16 +675,24 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 # ------------------------------------------------------------------ main
 
-def ensure_tool():
-    """Put appsandbox-replica from the checkout in /usr/local/sbin (newer wins)."""
-    src = next((p for p in REPLICA_SRCS if os.path.exists(p)), None)
+def _install_tool(srcs, dst):
+    """Copy a guest tool from the checkout to /usr/local/sbin (newer wins)."""
+    src = next((p for p in srcs if os.path.exists(p)), None)
     if not src:
-        return os.path.exists(REPLICA_TOOL)
-    if not os.path.exists(REPLICA_TOOL) or os.path.getmtime(src) > os.path.getmtime(REPLICA_TOOL):
-        os.makedirs(os.path.dirname(REPLICA_TOOL), exist_ok=True)
-        shutil.copy2(src, REPLICA_TOOL)
-        os.chmod(REPLICA_TOOL, 0o755)
-        print("installed %s" % REPLICA_TOOL)
+        return os.path.exists(dst)
+    if not os.path.exists(dst) or os.path.getmtime(src) > os.path.getmtime(dst):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+        os.chmod(dst, 0o755)
+        print("installed %s" % dst)
+    return True
+
+
+def ensure_tool():
+    """appsandbox-replica (required) and appsandbox-seat (Steam seats, optional) in /usr/local/sbin."""
+    _install_tool(SEAT_SRCS, SEAT_TOOL)
+    if not _install_tool(REPLICA_SRCS, REPLICA_TOOL):
+        return False
     # the patches for `qemu build` (the Build patch button): copy alongside
     qsrc = next((d for d in QEMU_SRC_DIRS if os.path.exists(os.path.join(d, "build.sh"))), None)
     if qsrc:
@@ -676,7 +730,8 @@ def main():
     if not os.path.exists("/dev/kvm"):
         # no point installing libvirt: appsandbox-replica refuses without KVM
         threading.Timer(2.0, log, args=("This PC has no /dev/kvm (virtualization not exposed to it): replicas cannot run here. "
-                                        "On a VPS ask the provider for nested virtualization; on bare metal enable VT-x / AMD-V in the firmware.",)).start()
+                                        "On a VPS ask the provider for nested virtualization; on bare metal enable VT-x / AMD-V in the firmware. "
+                                        "Steam seats (the + button, kind \"Steam seat\") work without KVM.",)).start()
     elif not have("virsh"):
         run_replica_job("*install", "host", [(["install"], "installing qemu / libvirt (first run)")])
     if not ARGS.no_browser:

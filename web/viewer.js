@@ -30,6 +30,10 @@ var wsPort = q.ws || '';
 var guestPort = parseInt(q.port, 10) || 5900;
 var replicaName = q.name || 'replica';
 var nested = q.nested === '1';
+/* what the screen belongs to: a nested replica (KVM guest) or a Steam seat
+   (a user's Xvnc desktop on the sandbox itself); picks the Stop / Restart
+   actions (replicaStop / seatStop ...) and the wording */
+var kind = q.kind === 'seat' ? 'seat' : 'replica';
 var rfb = null;
 
 /* grid mode: [{name, ws, port, rfb, el, status}] */
@@ -103,16 +107,16 @@ function buildGrid() {
     var spec = (q.tiles || '').split(',').filter(Boolean);
     spec.forEach(function(s) {
         var p = s.split(':');
-        var t = { name: p[0] || 'replica', ws: p[1] || '', port: parseInt(p[2], 10) || 5900, rfb: null };
+        var t = { name: p[0] || 'replica', ws: p[1] || '', port: parseInt(p[2], 10) || 5900, kind: p[3] === 'seat' ? 'seat' : 'replica', rfb: null };
         var el = document.createElement('div');
         el.className = 'tile';
-        el.innerHTML = '<div class="tile-bar"><svg class="ic"><use href="#i-nest"/></svg>' +
+        el.innerHTML = '<div class="tile-bar"><svg class="ic"><use href="#' + (t.kind === 'seat' ? 'i-screen' : 'i-nest') + '"/></svg>' +
                        '<span class="tile-name"></span><span class="tile-status mono"></span><span class="vnc-spacer"></span>' +
-                       '<button class="t-own" title="Open this replica in its own window">Own window</button>' +
+                       '<button class="t-own" title="Open this ' + t.kind + ' in its own window">Own window</button>' +
                        '<button class="t-reconnect" title="Connect this tile again">Reconnect</button></div>' +
                        '<div class="tile-screen"></div>';
         el.querySelector('.tile-name').textContent = t.name;
-        el.querySelector('.t-own').onclick = function(e) { e.stopPropagation(); sendCmd('vncOpen', { vmIndex: vmIndex, port: t.port, name: t.name }); };
+        el.querySelector('.t-own').onclick = function(e) { e.stopPropagation(); sendCmd('vncOpen', { vmIndex: vmIndex, port: t.port, name: t.name, kind: t.kind }); };
         el.querySelector('.t-reconnect').onclick = function(e) { e.stopPropagation(); tileConnect(t); };
         el.addEventListener('mousedown', function() { focusTile(t); });
         gridEl.appendChild(el);
@@ -144,10 +148,10 @@ function vncReconnect() {
     else connect();
 }
 function vncExternal() { sendCmd('vncConnect', { vmIndex: vmIndex, port: guestPort }); }
-function vncReplica(action) {
-    sendCmd(action, { vmIndex: vmIndex, name: replicaName });
-    setStatus(action === 'replicaStop' ? 'stopping the replica…'
-                                       : 'restarting the replica… (Reconnect once it is back up)');
+function vncReplica(what) {   /* 'Stop' | 'Restart' -> replicaStop / seatRestart ... */
+    sendCmd(kind + what, { vmIndex: vmIndex, name: replicaName });
+    setStatus(what === 'Stop' ? 'stopping the ' + kind + '…'
+                              : 'restarting the ' + kind + '… (Reconnect once it is back up)');
 }
 function vncClose() {
     if (rfb) { try { rfb.disconnect(); } catch (e) {} rfb = null; }
@@ -157,8 +161,8 @@ function vncClose() {
 
 if (grid) {
     document.getElementById('vnc-icon').setAttribute('href', '#i-grid');
-    document.getElementById('vnc-title').textContent = vmName + ' / replicas';
-    document.title = vmName + ' - replicas - Nestbox';
+    document.getElementById('vnc-title').textContent = vmName + ' / screens';
+    document.title = vmName + ' - screens - Nestbox';
     ['vnc-external-btn', 'vnc-restart-btn', 'vnc-stop-btn'].forEach(function(id) { document.getElementById(id).style.display = 'none'; });
     document.getElementById('vnc-screen').hidden = true;
     buildGrid();
@@ -166,8 +170,16 @@ if (grid) {
     document.getElementById('vnc-title').textContent = nested
         ? vmName + ' / ' + replicaName
         : vmName + ' (guest VNC :' + guestPort + ')';
-    document.getElementById('vnc-stop-btn').style.display = nested ? '' : 'none';
-    document.getElementById('vnc-restart-btn').style.display = nested ? '' : 'none';
+    var stopBtn = document.getElementById('vnc-stop-btn'), restartBtn = document.getElementById('vnc-restart-btn');
+    stopBtn.style.display = nested ? '' : 'none';
+    restartBtn.style.display = nested ? '' : 'none';
+    if (kind === 'seat') {
+        document.getElementById('vnc-icon').setAttribute('href', '#i-screen');
+        stopBtn.textContent = 'Stop seat';
+        stopBtn.title = 'Stop this seat: its XFCE session and Steam end (the user account stays)';
+        restartBtn.textContent = 'Restart seat';
+        restartBtn.title = 'Restart this seat (a fresh XFCE session)';
+    }
     document.title = (nested ? vmName + ' / ' + replicaName : vmName) + ' - Nestbox';
     connect();
 }

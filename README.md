@@ -16,7 +16,12 @@ macOS support are his work and stay MIT-licensed under his copyright (see
   USB and CPUID identity follows the same profile through seven small patches against upstream
   QEMU 8.2.2 (the parameterised form of [kila58/qemu-patched](https://github.com/kila58/qemu-patched)).
   Inside a replica `systemd-detect-virt` answers `none`, even as root.
-- **A window per screen.** Every replica console opens in its own Nestbox window (noVNC over a
+- **Steam seats: several Steam desktops without a VM.** The same `+` also adds a *seat*: a Linux
+  user with its own Xvnc display, XFCE session and Steam at login, run as a systemd unit on the
+  sandbox itself (or on an Ubuntu host). Seconds to create, no RAM reservation, no second layer of
+  virtualization; the trade-off is that every seat shows the machine's own identity. See
+  [tools/linux/seat/](tools/linux/seat/).
+- **A window per screen.** Every replica console and seat display opens in its own Nestbox window (noVNC over a
   loopback WebSocket bridge), so the sandbox list stays usable and several screens fit side by side.
   The replica's row has start / stop / restart / delete, a pencil for its cores, RAM and disk, and
   a `+` to add another replica, sized as you like.

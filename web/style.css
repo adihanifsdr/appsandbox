@@ -388,7 +388,7 @@ label.check { font-size: 12px; color: hsl(var(--ink)); cursor: pointer; display:
 #modal-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; margin: 2px 0 4px; }
 #modal-fields .modal-field { display: flex; flex-direction: column; min-width: 0; }
 #modal-fields .modal-field-text { grid-column: 1 / -1; }
-#modal-fields .modal-field input[type="text"], #modal-fields .modal-field input[type="number"] { width: 100%; box-sizing: border-box; }
+#modal-fields .modal-field input[type="text"], #modal-fields .modal-field input[type="number"], #modal-fields .modal-field select { width: 100%; box-sizing: border-box; }
 #modal-fields .modal-field-check { grid-column: 1 / -1; flex-direction: row; align-items: center; font-size: 12px; margin-top: 2px; }
 
 /* ------------------------------------------------------------ vnc viewer */

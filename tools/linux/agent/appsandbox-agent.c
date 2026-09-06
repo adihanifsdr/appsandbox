@@ -471,9 +471,17 @@ static int replica_tool_present(void)
     return access("/usr/local/sbin/appsandbox-replica", X_OK) == 0;
 }
 
-/* Every replica on this VM as one line of JSON ("[]" when there are none):
- * what `appsandbox-replica list` prints, whitespace squeezed. */
-static void replicas_json(char *out, size_t cap)
+/* Steam seats (appsandbox-seat): a Linux user with an Xvnc display, XFCE and
+ * Steam, on this VM itself - no nested guest. Listed and driven next to the
+ * replicas. */
+static int seat_tool_present(void)
+{
+    return access("/usr/local/sbin/appsandbox-seat", X_OK) == 0;
+}
+
+/* `<tool> list` squeezed into out (whitespace outside strings dropped);
+ * "[]" when the command fails or prints something that is not a JSON array. */
+static void list_json(const char *cmd, char *out, size_t cap)
 {
     FILE *p;
     size_t n = 0;
@@ -481,10 +489,8 @@ static void replicas_json(char *out, size_t cap)
     out[0] = '[';
     out[1] = ']';
     out[2] = '\0';
-    if (!replica_tool_present()) return;
-    p = popen("/usr/local/sbin/appsandbox-replica list 2>/dev/null", "r");
+    p = popen(cmd, "r");
     if (!p) return;
-    n = 0;
     while ((c = fgetc(p)) != EOF && n < cap - 1) {
         if (c == '"') in_str = !in_str;
         if (!in_str && (c == '\n' || c == '\r' || c == ' ' || c == '\t')) continue;
@@ -492,7 +498,34 @@ static void replicas_json(char *out, size_t cap)
     }
     pclose(p);
     out[n] = '\0';
-    if (n < 2 || out[0] != '[') { out[0] = '['; out[1] = ']'; out[2] = '\0'; }
+    if (n < 2 || out[0] != '[' || out[n - 1] != ']') { out[0] = '['; out[1] = ']'; out[2] = '\0'; }
+}
+
+/* Every replica and every Steam seat on this VM as one line of JSON ("[]"
+ * when there are none): `appsandbox-replica list` followed by
+ * `appsandbox-seat list` (its entries carry "kind":"seat"), so the host
+ * shows both as rows under the sandbox. */
+static void replicas_json(char *out, size_t cap)
+{
+    char seats[1200];
+    size_t n, m;
+    out[0] = '[';
+    out[1] = ']';
+    out[2] = '\0';
+    if (replica_tool_present())
+        list_json("/usr/local/sbin/appsandbox-replica list 2>/dev/null", out, cap);
+    if (!seat_tool_present()) return;
+    list_json("/usr/local/sbin/appsandbox-seat list 2>/dev/null", seats, sizeof(seats));
+    m = strlen(seats);
+    if (m <= 2) return;                       /* "[]": no seats */
+    n = strlen(out);
+    if (n <= 2) {                             /* no replicas: the seats alone */
+        if (m < cap) memcpy(out, seats, m + 1);
+        return;
+    }
+    if (n + m - 1 >= cap) return;             /* would not fit: keep the replicas */
+    out[n - 1] = ',';                         /* "...}" "," then the seats without their '[' */
+    memcpy(out + n, seats + 1, m);            /* m-1 chars + the terminator */
 }
 
 static void send_replica_state(int fd)
@@ -637,6 +670,97 @@ static void handle_replica(int fd, const char *args)
     snprintf(msg, sizeof(msg), "replica_result:%s:%s:%s", name, sub, rc == 0 ? "ok" : "failed");
     send_line(fd, msg);
     if (strcmp(sub, "stop") == 0) sleep(2);   /* virsh shutdown is asynchronous; give qemu a moment */
+    send_replica_state(fd);
+}
+
+/* "seat <name> <sub> [key=value ...]": start | stop | restart | destroy run
+ * synchronously and answer seat_result:<name>:<sub>:ok|failed plus the fresh
+ * list; create (the packages the first time, then a user with Xvnc + XFCE +
+ * Steam) takes minutes, so it runs detached with a log in
+ * /var/log/appsandbox-seat-<name>.log and answers ...:started - the
+ * heartbeat shows the seat's row appearing. Words: res=<W>x<H> (screen size)
+ * and steam=0|1 (Steam at login). The name is a Linux user name. */
+static void handle_seat(int fd, const char *args)
+{
+    char name[32] = "seat", sub[16] = "", cmd[512], msg[96], res[16] = "", opts[64] = "";
+    int steam = 1, rc, i;
+    const char *tool = "/usr/local/sbin/appsandbox-seat";
+    const char *sp = strchr(args, ' ');
+    const char *rest = NULL;
+
+    if (sp) {
+        size_t nl = (size_t)(sp - args);
+        const char *sp2;
+        if (nl == 0 || nl >= sizeof(name)) { send_line(fd, "seat_result:?:?:failed"); return; }
+        memcpy(name, args, nl); name[nl] = '\0';
+        sp2 = strchr(sp + 1, ' ');
+        if (sp2) {
+            size_t sl = (size_t)(sp2 - (sp + 1));
+            if (sl == 0 || sl >= sizeof(sub)) { send_line(fd, "seat_result:?:?:failed"); return; }
+            memcpy(sub, sp + 1, sl); sub[sl] = '\0';
+            rest = sp2 + 1;
+        } else {
+            snprintf(sub, sizeof(sub), "%s", sp + 1);
+        }
+    } else {
+        snprintf(sub, sizeof(sub), "%s", args);
+    }
+    if (!islower((unsigned char)name[0])) { send_line(fd, "seat_result:?:?:failed"); return; }
+    for (i = 0; name[i]; i++)
+        if (!islower((unsigned char)name[i]) && !isdigit((unsigned char)name[i]) && name[i] != '-' && name[i] != '_') {
+            send_line(fd, "seat_result:?:?:failed"); return;
+        }
+    for (i = 0; sub[i]; i++)
+        if (!islower((unsigned char)sub[i])) { send_line(fd, "seat_result:?:?:failed"); return; }
+    while (rest && *rest) {
+        const char *eq, *end;
+        while (*rest == ' ') rest++;
+        if (!*rest) break;
+        end = strchr(rest, ' ');
+        if (!end) end = rest + strlen(rest);
+        eq = memchr(rest, '=', (size_t)(end - rest));
+        if (eq) {
+            size_t kl = (size_t)(eq - rest), vl = (size_t)(end - eq - 1), k;
+            if (kl == 3 && memcmp(rest, "res", 3) == 0 && vl >= 3 && vl < sizeof(res)) {
+                int ok = 1, xs = 0;
+                for (k = 0; k < vl; k++) {
+                    if (eq[1 + k] == 'x') xs++;
+                    else if (!isdigit((unsigned char)eq[1 + k])) ok = 0;
+                }
+                if (ok && xs == 1 && eq[1] != 'x' && eq[vl] != 'x') { memcpy(res, eq + 1, vl); res[vl] = '\0'; }
+            } else if (kl == 5 && memcmp(rest, "steam", 5) == 0 && vl == 1 && (eq[1] == '0' || eq[1] == '1')) {
+                steam = eq[1] == '1';
+            }
+        }
+        rest = end;
+    }
+    if (!seat_tool_present()) {
+        snprintf(msg, sizeof(msg), "seat_result:%s:%s:failed", name, sub);
+        send_line(fd, msg);
+        return;
+    }
+    if (strcmp(sub, "create") == 0) {
+        if (res[0]) snprintf(opts + strlen(opts), sizeof(opts) - strlen(opts), " --resolution %s", res);
+        if (!steam) snprintf(opts + strlen(opts), sizeof(opts) - strlen(opts), " --no-steam");
+        snprintf(cmd, sizeof(cmd), "nohup %s -n %s create%s >/var/log/appsandbox-seat-%s.log 2>&1 </dev/null &",
+                 tool, name, opts, name);
+        rc = run_sync(cmd);
+        agent_log("seat %s create%s: launched rc=%d", name, opts, rc);
+        snprintf(msg, sizeof(msg), "seat_result:%s:%s:%s", name, sub, rc == 0 ? "started" : "failed");
+        send_line(fd, msg);
+        return;
+    }
+    if (strcmp(sub, "start") != 0 && strcmp(sub, "stop") != 0 && strcmp(sub, "restart") != 0 &&
+        strcmp(sub, "destroy") != 0) {
+        snprintf(msg, sizeof(msg), "seat_result:%s:%s:failed", name, sub);
+        send_line(fd, msg);
+        return;
+    }
+    snprintf(cmd, sizeof(cmd), "%s -n %s %s >>/var/log/appsandbox-seat-%s.log 2>&1", tool, name, sub, name);
+    rc = run_sync(cmd);
+    agent_log("seat %s %s: rc=%d", name, sub, rc);
+    snprintf(msg, sizeof(msg), "seat_result:%s:%s:%s", name, sub, rc == 0 ? "ok" : "failed");
+    send_line(fd, msg);
     send_replica_state(fd);
 }
 
@@ -1527,6 +1651,9 @@ static void handle_client(int fd)
         }
         else if (strncmp(cmd, "replica ", 8) == 0) {
             handle_replica(fd, cmd + 8);
+        }
+        else if (strncmp(cmd, "seat ", 5) == 0) {
+            handle_seat(fd, cmd + 5);
         }
         else if (strncmp(cmd, "ssh_deploy_key ", 15) == 0) {
             send_reply(fd, tag, deploy_ssh_key(cmd + 15) ? "ssh_key_deployed" : "ssh_key_failed");

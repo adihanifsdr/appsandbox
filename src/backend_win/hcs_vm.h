@@ -111,7 +111,7 @@ typedef struct {
     wchar_t     ssh_pubkey[512];         /* AppSandbox public-key line to deploy (ed25519) */
     volatile DWORD vnc_guest_port;       /* guest-side VNC listener reported by the agent (0 = none) */
     char        replica_state[16];       /* Linux: nested replica per the agent: "" / none / stopped / running */
-    char        replicas[2048];          /* Linux: every replica as JSON [{name,state,vnc,desktop}], "" = unknown */
+    char        replicas[2048];          /* Linux: every replica and Steam seat as JSON [{name,state,vnc,desktop[,kind]}], "" = unknown */
     BOOL        replica_auto;            /* Linux: build the first replica (patched QEMU + XFCE/Steam) once the agent is up */
     wchar_t     identity[4096];          /* Linux: VM identity profile (compact JSON), "" = none */
     DWORD       vnc_port;                /* host 127.0.0.1 port of the VNC tunnel (0 = not started) */

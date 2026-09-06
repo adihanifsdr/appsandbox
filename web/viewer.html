@@ -17,6 +17,7 @@
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
   <symbol id="i-nest" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="13" height="13" rx="2"/><path d="M8 21h11a2 2 0 0 0 2-2V8"/></symbol>
+  <symbol id="i-screen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="13" height="13" rx="2"/><path d="M8 21h11a2 2 0 0 0 2-2V8"/><path d="M7 9.5l2.5 2.5L7 14.5"/></symbol>
   <symbol id="i-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
 </defs></svg>
 
@@ -29,8 +30,8 @@
     <button onclick="vncToggleScale()" id="vnc-scale-btn" title="Fit the screen to this window or show it 1:1">Fit</button>
     <button onclick="vncReconnect()" title="Connect again (after the replica restarted, or when the connection was lost)">Reconnect</button>
     <button onclick="vncExternal()" id="vnc-external-btn" title="Open the same screen in an installed VNC viewer (TigerVNC, RealVNC, ...)">External viewer</button>
-    <button onclick="vncReplica('replicaRestart')" id="vnc-restart-btn" title="Restart the nested replica (stop + start)">Restart replica</button>
-    <button class="danger" onclick="vncReplica('replicaStop')" id="vnc-stop-btn" title="Shut the nested replica down">Stop replica</button>
+    <button onclick="vncReplica('Restart')" id="vnc-restart-btn" title="Restart the nested replica (stop + start)">Restart replica</button>
+    <button class="danger" onclick="vncReplica('Stop')" id="vnc-stop-btn" title="Shut the nested replica down">Stop replica</button>
     <button class="primary" onclick="vncClose()">Close</button>
 </div>
 <div id="vnc-screen"></div>

@@ -403,8 +403,13 @@ cmd_create() {
     command -v virsh >/dev/null || cmd_install
     # 5900 may already be taken by something the user runs in this VM (x11vnc,
     # a docker container publishing 127.0.0.1:5900 ...): pick the next free port.
-    local want=$VNC
-    while ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$VNC\$"; do VNC=$((VNC + 1)); [ $VNC -gt $((want + 20)) ] && die "no free VNC port near $want"; done
+    # A stopped Steam seat (appsandbox-seat) is not listening but owns its
+    # port too, so its seat.conf counts as taken.
+    local want=$VNC seat_ports
+    seat_ports=$(sed -n "s/^VNC='\(.*\)'/\1/p" /var/lib/appsandbox/seat/seats/*/seat.conf 2>/dev/null | tr '\n' ' ')
+    while ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$VNC\$" || case " $seat_ports " in *" $VNC "*) true ;; *) false ;; esac; do
+        VNC=$((VNC + 1)); [ $VNC -gt $((want + 20)) ] && die "no free VNC port near $want"
+    done
     [ "$VNC" != "$want" ] && echo "note: 127.0.0.1:$want is in use, replica console on 127.0.0.1:$VNC instead"
     mkdir -p "$DIR" "$ROOT"; cd "$DIR"
     if virsh dominfo "$NAME" >/dev/null 2>&1; then

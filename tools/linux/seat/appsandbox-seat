@@ -1,0 +1,302 @@
+#!/bin/bash
+# appsandbox-seat - several Steam desktops on one Linux machine, without a VM.
+#
+# A "seat" is a Linux user of its own with an Xvnc display (TigerVNC), an
+# XFCE session and Steam started at login, run as a systemd unit
+# (appsandbox-seat@<name>). Every seat has its own VNC port on 127.0.0.1,
+# which is exactly what Nestbox tunnels to: the seat's screen opens in its own
+# Nestbox window, like a replica's console. Steam keeps its lock in $HOME, so
+# one Steam per user runs side by side with the others.
+#
+# Compared to a replica (appsandbox-replica, a nested KVM guest) a seat is
+# light: no image, no RAM reservation, no second layer of virtualization,
+# ready in seconds. What it does not have is an identity of its own: every
+# seat shows the machine it runs on (DMI, machine-id, disk serials, MAC, and
+# inside a sandbox VM the hypervisor flag). Rendering is software (llvmpipe)
+# on the Xvnc display, the same as in a replica.
+#
+# Usage:  appsandbox-seat [-n NAME] <command> ...
+#         appsandbox-seat install [--no-steam]          # packages (once): Xvnc, XFCE, Steam
+#         appsandbox-seat create [--vnc 5901] [--resolution 1600x900] [--no-steam]
+#         appsandbox-seat list                          # every seat as JSON [{name,state,vnc,desktop,kind,res}]
+#         appsandbox-seat start|stop|restart|status|destroy
+#         appsandbox-seat run                           # internal: the unit's ExecStart, as the seat's user
+#
+# NAME is the Linux user name (lowercase letters, digits, - _; a letter
+# first), default "seat". Files: /var/lib/appsandbox/seat/seats/<name>/seat.conf;
+# the user's home is /home/<name>, password test123 (same as a replica's
+# "user"). Logs: journalctl -u appsandbox-seat@<name>.
+set -euo pipefail
+
+if [ "${1:-}" = "-n" ] || [ "${1:-}" = "--name" ]; then
+    [ -n "${2:-}" ] || { echo "appsandbox-seat: -n needs a name" >&2; exit 1; }
+    SEAT_NAME=$2; shift 2
+fi
+NAME=${SEAT_NAME:-seat}
+case "$NAME" in
+    [a-z]|[a-z][a-z0-9_-]*) [ ${#NAME} -le 31 ] || { echo "appsandbox-seat: name too long (31 max)" >&2; exit 1; } ;;
+    *) echo "appsandbox-seat: bad seat name '$NAME' (a Linux user name: lowercase letters, digits, - _; a letter first)" >&2; exit 1 ;;
+esac
+ROOT=${SEAT_ROOT:-/var/lib/appsandbox/seat}
+DIR=$ROOT/seats/$NAME
+CONF=$DIR/seat.conf
+REPLICA_ROOT=${REPLICA_ROOT:-/var/lib/appsandbox/replica}
+UNIT=appsandbox-seat@$NAME
+UNIT_FILE=/etc/systemd/system/appsandbox-seat@.service
+SELF=/usr/local/sbin/appsandbox-seat
+VNC=5901; RES=1600x900; STEAM=1
+
+die() { echo "appsandbox-seat: $*" >&2; exit 1; }
+need_root() { [ "$(id -u)" = 0 ] || die "run as root (sudo)"; }
+check_res() {
+    case "$RES" in
+        [0-9][0-9]*x[0-9][0-9]*) ;;
+        *) die "--resolution must be WIDTHxHEIGHT, e.g. 1600x900" ;;
+    esac
+}
+conf_get() { sed -n "s/^$2='\(.*\)'/\1/p" "$1" 2>/dev/null | head -1; }
+
+# ---- packages -------------------------------------------------------------
+
+have_desktop() { command -v Xvnc >/dev/null && command -v startxfce4 >/dev/null; }
+have_steam() { command -v steam >/dev/null; }
+
+install_desktop() {
+    have_desktop && return 0
+    echo "==> installing Xvnc (TigerVNC) + XFCE (~300 MB) ..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -q
+    apt-get install -y -q tigervnc-standalone-server xfce4 xfce4-terminal dbus-x11 xterm
+}
+
+install_steam() {
+    have_steam && return 0
+    echo "==> installing Steam (i386 multiarch + steam-installer, ~1 GB with its libraries) ..."
+    export DEBIAN_FRONTEND=noninteractive
+    dpkg --add-architecture i386
+    apt-get update -q
+    echo steam steam/question select "I AGREE" | debconf-set-selections
+    echo steam steam/license note '' | debconf-set-selections
+    apt-get install -y -q steam-installer || apt-get install -y -q steam
+}
+
+cmd_install() {
+    need_root
+    local steam=1
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --no-steam) steam=0; shift ;;
+            *) die "unknown option $1" ;;
+        esac
+    done
+    install_desktop
+    [ $steam = 1 ] && install_steam
+    echo "OK: seat packages installed (Xvnc, XFCE$( [ $steam = 1 ] && echo ', Steam'))"
+}
+
+# ---- the unit ---------------------------------------------------------------
+
+write_unit() {
+    # PAMName=login registers a logind session for the user (XDG_RUNTIME_DIR,
+    # a session bus), which xfce4-session and Steam expect. ExecStart runs
+    # "run" below as the seat's user; KillMode takes Xvnc and the session down
+    # together.
+    local want
+    want=$(cat <<EOF
+[Unit]
+Description=Nestbox seat %i: Xvnc + XFCE (+ Steam) as user %i
+Documentation=file:/opt/appsandbox/seat-README.md
+After=network.target systemd-user-sessions.service
+ConditionPathExists=$ROOT/seats/%i/seat.conf
+
+[Service]
+Type=simple
+User=%i
+PAMName=login
+WorkingDirectory=~
+Environment=XDG_SESSION_TYPE=x11 XDG_SESSION_CLASS=user
+ExecStart=$SELF -n %i run
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)
+    if [ ! -f "$UNIT_FILE" ] || [ "$(cat "$UNIT_FILE")" != "$want" ]; then
+        printf '%s\n' "$want" > "$UNIT_FILE"
+        systemctl daemon-reload
+    fi
+}
+
+# ---- ports ------------------------------------------------------------------
+
+# every VNC port already promised to a seat or a replica on this machine
+used_ports() {
+    local f
+    for f in "$ROOT"/seats/*/seat.conf; do [ -f "$f" ] && conf_get "$f" VNC; done
+    for f in "$REPLICA_ROOT/replica.conf" "$REPLICA_ROOT"/replicas/*/replica.conf; do [ -f "$f" ] && conf_get "$f" VNC; done
+    true
+}
+
+pick_port() {
+    local want=$VNC used
+    used=$(used_ports | tr '\n' ' ')
+    while :; do
+        case " $used " in *" $VNC "*) VNC=$((VNC + 1)); continue ;; esac
+        if ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$VNC\$"; then VNC=$((VNC + 1)); continue; fi
+        break
+    done
+    [ $VNC -le $((want + 50)) ] || die "no free VNC port near $want"
+    [ "$VNC" != "$want" ] && echo "note: 127.0.0.1:$want is taken, seat '$NAME' on 127.0.0.1:$VNC instead"
+    true
+}
+
+# ---- create / destroy -------------------------------------------------------
+
+cmd_create() {
+    need_root
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --vnc) VNC=$2; shift 2 ;;
+            --resolution) RES=$2; shift 2 ;;
+            --no-steam) STEAM=0; shift ;;
+            *) die "unknown option $1" ;;
+        esac
+    done
+    check_res
+    case "$VNC" in ''|*[!0-9]*) die "--vnc must be a port number" ;; esac
+    [ -f "$CONF" ] && die "seat '$NAME' already exists (appsandbox-seat -n $NAME destroy first)"
+    if getent passwd "$NAME" >/dev/null; then
+        die "a user named '$NAME' already exists on this machine; pick another seat name"
+    fi
+    [ -x "$SELF" ] || die "$SELF is missing: install this script there first"
+    install_desktop
+    [ $STEAM = 1 ] && install_steam
+    pick_port
+
+    useradd -m -s /bin/bash -c "Nestbox seat $NAME" "$NAME"
+    echo "$NAME:test123" | chpasswd
+    local g
+    for g in audio video render; do getent group "$g" >/dev/null && usermod -aG "$g" "$NAME"; done
+    local home; home=$(getent passwd "$NAME" | cut -d: -f6)
+    # install -d applies -o/-g to the last component only: name every directory
+    install -d -o "$NAME" -g "$NAME" "$home/.config" "$home/.config/autostart"
+    # no screensaver / locker on a VNC display (the packages stay for the
+    # machine's own desktop; these per-user overrides hide their autostart)
+    local s
+    for s in xfce4-screensaver light-locker xscreensaver; do
+        printf '[Desktop Entry]\nType=Application\nName=%s\nHidden=true\n' "$s" > "$home/.config/autostart/$s.desktop"
+    done
+    if [ $STEAM = 1 ]; then
+        printf '[Desktop Entry]\nType=Application\nName=Steam\nComment=Nestbox seat: Steam at login\nExec=steam\nTerminal=false\nX-GNOME-Autostart-enabled=true\n' \
+            > "$home/.config/autostart/steam.desktop"
+    fi
+    chown -R "$NAME:$NAME" "$home/.config"
+
+    install -d -m 0755 "$DIR"
+    printf "VNC='%s'\nRES='%s'\nSTEAM='%s'\nCREATED='%s'\n" "$VNC" "$RES" "$STEAM" "$(date -u +%FT%TZ)" > "$CONF"
+    chmod 0644 "$CONF"
+    write_unit
+    systemctl enable --now "$UNIT" >/dev/null
+    echo "OK: seat '$NAME' created and started (user $NAME / test123, vnc 127.0.0.1:$VNC, $RES$( [ $STEAM = 1 ] && echo ', Steam at login'))"
+    echo "    open it with the screen button of its row; log: journalctl -u $UNIT"
+}
+
+cmd_destroy() {
+    need_root
+    [ -f "$CONF" ] || die "no seat '$NAME' here"
+    systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
+    pkill -KILL -u "$NAME" >/dev/null 2>&1 || true
+    sleep 1
+    if getent passwd "$NAME" >/dev/null; then
+        userdel -r "$NAME" >/dev/null 2>&1 || userdel "$NAME" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$DIR"
+    echo "OK: seat '$NAME' removed (user, home and unit)"
+}
+
+# ---- start / stop / status --------------------------------------------------
+
+cmd_start()   { need_root; [ -f "$CONF" ] || die "no seat '$NAME' here"; write_unit; systemctl start "$UNIT"; echo "OK: seat '$NAME' started"; }
+cmd_stop()    { need_root; [ -f "$CONF" ] || die "no seat '$NAME' here"; systemctl stop "$UNIT"; echo "OK: seat '$NAME' stopped"; }
+cmd_restart() { need_root; [ -f "$CONF" ] || die "no seat '$NAME' here"; write_unit; systemctl restart "$UNIT"; echo "OK: seat '$NAME' restarted"; }
+
+seat_state() {   # $1 = name -> running | stopped
+    case "$(systemctl is-active "appsandbox-seat@$1" 2>/dev/null)" in
+        active|activating|reloading) echo running ;;
+        *) echo stopped ;;
+    esac
+}
+
+cmd_status() {
+    [ -f "$CONF" ] || die "no seat '$NAME' here"
+    echo "seat:   $NAME ($(seat_state "$NAME"))"
+    echo "vnc:    127.0.0.1:$(conf_get "$CONF" VNC)   resolution: $(conf_get "$CONF" RES)   steam: $(conf_get "$CONF" STEAM)"
+    echo "unit:   $UNIT"
+    systemctl status "$UNIT" --no-pager 2>/dev/null | sed -n 2,4p || true
+}
+
+# every seat on this machine, as JSON: [{"name","state","vnc","desktop","kind","res"}, ...]
+cmd_list() {
+    local d name vnc first=1
+    echo "["
+    for d in "$ROOT"/seats/*; do
+        [ -f "$d/seat.conf" ] || continue
+        name=$(basename "$d")
+        vnc=$(conf_get "$d/seat.conf" VNC)
+        [ $first = 1 ] || echo ","
+        first=0
+        printf '  {"name": "%s", "state": "%s", "vnc": %s, "desktop": true, "kind": "seat", "res": "%s"}' \
+            "$name" "$(seat_state "$name")" "${vnc:-0}" "$(conf_get "$d/seat.conf" RES)"
+    done
+    echo; echo "]"
+}
+
+# ---- run: Xvnc + the session, as the seat's user (the unit's ExecStart) ------
+
+cmd_run() {
+    [ -f "$CONF" ] || die "no seat '$NAME' here"
+    [ "$(id -un)" = "$NAME" ] || die "run is started by systemd as user $NAME (appsandbox-seat -n $NAME start)"
+    local vnc res disp i
+    vnc=$(conf_get "$CONF" VNC); res=$(conf_get "$CONF" RES)
+    # display numbers well above the machine's own (:0, :1 ...): 5901 -> :11
+    disp=$((vnc - 5900 + 10))
+    export DISPLAY=:$disp HOME USER=$NAME LOGNAME=$NAME
+    # software GL on the Xvnc display: no DRI there, and the sandbox's d3d12
+    # selection (GPU-PV) must not leak in - Steam then renders with llvmpipe
+    unset MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER __GLX_VENDOR_LIBRARY_NAME VK_DRIVER_FILES LD_LIBRARY_PATH
+    export LIBGL_ALWAYS_SOFTWARE=1
+    # a stale lock from a killed Xvnc would stop the new one
+    if [ -e "/tmp/.X$disp-lock" ] && ! kill -0 "$(tr -d ' \n' < "/tmp/.X$disp-lock" 2>/dev/null)" 2>/dev/null; then
+        rm -f "/tmp/.X$disp-lock" "/tmp/.X11-unix/X$disp"
+    fi
+    Xvnc ":$disp" -geometry "$res" -depth 24 -rfbport "$vnc" -localhost yes -SecurityTypes None \
+         -AlwaysShared -desktop "$NAME" -pn -noreset >/dev/null 2>&1 &
+    local xpid=$!
+    for i in $(seq 1 50); do [ -S "/tmp/.X11-unix/X$disp" ] && break; kill -0 $xpid 2>/dev/null || die "Xvnc exited (port $vnc or display :$disp taken?)"; sleep 0.2; done
+    [ -S "/tmp/.X11-unix/X$disp" ] || { kill $xpid 2>/dev/null; die "Xvnc did not come up on :$disp"; }
+    # startxfce4 with DISPLAY set runs the XFCE xinitrc on it (dbus, xfce4-session)
+    local rc=0
+    startxfce4 || rc=$?
+    kill $xpid 2>/dev/null || true
+    exit $rc
+}
+
+# ---- dispatch ---------------------------------------------------------------
+
+cmd=${1:-}; shift || true
+case "$cmd" in
+    install) cmd_install "$@" ;;
+    create)  cmd_create "$@" ;;
+    destroy) cmd_destroy "$@" ;;
+    start)   cmd_start "$@" ;;
+    stop)    cmd_stop "$@" ;;
+    restart) cmd_restart "$@" ;;
+    status)  cmd_status "$@" ;;
+    list)    cmd_list "$@" ;;
+    run)     cmd_run "$@" ;;
+    *)       die "unknown command '$cmd' (install|create|list|start|stop|restart|status|destroy)" ;;
+esac
