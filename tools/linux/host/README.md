@@ -34,6 +34,21 @@ Root is needed for libvirt and `/dev/kvm`; the browser and an external VNC
 viewer are started as the user who ran `sudo`. Check `ls -l /dev/kvm` first:
 without it (virtualization disabled in the firmware) replicas cannot run.
 
+## As a desktop app
+
+`nestbox-app` shows the same panel in a native GTK window (WebKitGTK) instead
+of a browser tab, the way `Nestbox.exe` embeds it in WebView2 on Windows. It
+starts the server through `pkexec` when nothing answers on the port (one
+password dialog), and every replica screen the panel opens gets a GTK window
+of its own. Closing the windows leaves the server and the replicas running.
+
+```bash
+tools/linux/host/install-desktop.sh   # once: icon + "Nestbox" in the application menu
+tools/linux/host/nestbox-app          # or click it in the menu
+```
+
+Needs `python3-gi` and `gir1.2-webkit2-4.1`, both part of Ubuntu Desktop.
+
 ## As a service, and from another machine
 
 ```bash

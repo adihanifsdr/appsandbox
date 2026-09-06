@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""
+nestbox-app - panel Nestbox sebagai jendela GTK native di host Linux.
+
+Padanan dari jendela WebView2 yang dipakai Nestbox.exe: server `nestbox`
+(root, libvirt + /dev/kvm) dinyalakan lewat pkexec kalau belum jalan, lalu
+UI-nya ditampilkan di satu Gtk.Window lewat WebKitGTK, bukan di browser.
+Setiap layar replica (viewer, grid) yang dibuka panel mendapat jendela GTK
+sendiri, persis "a window per screen" di Windows. Menutup jendela tidak
+mematikan server: replica yang berjalan tetap berjalan.
+
+    tools/linux/host/nestbox-app                 # port 8765
+    tools/linux/host/nestbox-app --port 9000
+
+Butuh python3-gi + gir1.2-webkit2-4.1 (bawaan Ubuntu Desktop).
+"""
+import argparse
+import os
+import signal
+import subprocess
+import sys
+import time
+import urllib.request
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("WebKit2", "4.1")
+from gi.repository import GLib, Gtk, WebKit2  # noqa: E402
+
+TITLE = "Nestbox"
+WMCLASS = "Nestbox"
+ICON = "nestbox"
+SIZE = (1280, 860)
+VIEWER_SIZE = (1024, 768)
+
+
+def serving(url):
+    try:
+        urllib.request.urlopen(url, timeout=1).read(1)
+        return True
+    except Exception:
+        return False
+
+
+def ensure_server(port):
+    """Nyalakan server sebagai root lewat pkexec kalau port belum menjawab."""
+    url = "http://127.0.0.1:%d/" % port
+    if serving(url):
+        return url
+    server = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nestbox")
+    log = open(os.path.expanduser("~/.cache/nestbox.log"), "ab")
+    subprocess.Popen(["pkexec", server, "--port", str(port), "--no-browser"],
+                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    # Run pertama memasang qemu/libvirt, jadi sabar.
+    for _ in range(600):
+        if serving(url):
+            return url
+        time.sleep(1)
+    sys.exit("server nestbox tidak menjawab di %s; lihat ~/.cache/nestbox.log" % url)
+
+
+class Window(Gtk.Window):
+    # Jendela viewer ikut dihitung: aplikasi keluar saat jendela terakhir tutup.
+    count = 0
+
+    def __init__(self, url, size, related=None):
+        super().__init__(title=TITLE)
+        Window.count += 1
+        self.connect("destroy", Window.closed)
+        self.set_default_size(*size)
+        self.set_icon_name(ICON)
+        self.view = WebKit2.WebView(related_view=related) if related else WebKit2.WebView()
+        s = self.view.get_settings()
+        s.set_javascript_can_open_windows_automatically(True)
+        s.set_allow_modal_dialogs(True)
+        self.view.connect("create", self.on_create)
+        self.view.connect("notify::title", self.on_title)
+        self.view.connect("close", lambda *_: self.destroy())
+        self.add(self.view)
+        if url:
+            self.view.load_uri(url)
+        self.show_all()
+
+    @staticmethod
+    def closed(_):
+        Window.count -= 1
+        if Window.count <= 0:
+            Gtk.main_quit()
+
+    def on_title(self, view, _):
+        self.set_title(view.get_title() or TITLE)
+
+    # window.open() dari panel (viewer replica, grid) -> jendela GTK baru.
+    def on_create(self, view, _nav):
+        w = Window(None, VIEWER_SIZE, related=view)
+        w.view.connect("ready-to-show", lambda v: w.present())
+        return w.view
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--port", type=int, default=8765)
+    a = p.parse_args()
+
+    GLib.set_prgname(WMCLASS)
+    GLib.set_application_name(TITLE)
+    url = ensure_server(a.port)
+    Window(url, SIZE)
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()
