@@ -47,9 +47,24 @@ var focusedTile = null;
     document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
 })();
 
+/* Linux host: the page comes from tools/linux/host/nestbox over HTTP and the
+   bar's actions (seatStop, vncConnect, ...) go to it on the same WebSocket
+   the panel uses, /ws. The Windows app gets them through WebView2. */
+var isWS = !(window.chrome && window.chrome.webview) && /^https?:/.test(location.protocol);
+var hostWs = null, hostQueue = [];
+function hostConnect() {
+    hostWs = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    hostWs.onopen = function() { var q = hostQueue; hostQueue = []; q.forEach(function(s) { hostWs.send(s); }); };
+    hostWs.onclose = function() { hostWs = null; };
+}
 function sendCmd(action, data) {
     var msg = Object.assign({ action: action }, data || {});
     if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(msg);
+    else if (isWS) {
+        var s = JSON.stringify(msg);
+        if (hostWs && hostWs.readyState === 1) hostWs.send(s);
+        else { hostQueue.push(s); if (!hostWs) hostConnect(); }
+    }
 }
 function setStatus(s) { document.getElementById('vnc-status').textContent = s; }
 

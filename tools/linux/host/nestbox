@@ -585,7 +585,13 @@ def handle(msg, ws):
         url = "viewer.html?ws=%s&vm=0&port=%d&name=%s&vmName=%s&nested=1%s" % (
             urllib.parse.quote(vnc_bridge(port)), port, urllib.parse.quote(name), urllib.parse.quote(HOSTNAME),
             "&kind=seat" if msg.get("kind") == "seat" else "")
-        ws.send(json.dumps({"type": "openWindow", "url": url, "width": 1640, "height": 990}))
+        # the window: the screen at 1:1 plus the bar (a seat's resolution is known)
+        width, height = 1640, 990
+        for r in replica_list():
+            m = re.match(r"^(\d+)x(\d+)$", str(r.get("res") or "")) if r.get("name") == name else None
+            if m:
+                width, height = int(m.group(1)) + 2, int(m.group(2)) + 42
+        ws.send(json.dumps({"type": "openWindow", "url": url, "width": width, "height": height}))
     elif action == "vncGrid":
         tiles = []
         for tok in str(msg.get("tiles") or "").split(","):

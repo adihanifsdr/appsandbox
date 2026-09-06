@@ -25,9 +25,10 @@ import urllib.request
 
 import gi
 
+gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
 gi.require_version("WebKit2", "4.1")
-from gi.repository import GLib, Gtk, WebKit2  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk, WebKit2  # noqa: E402
 
 # The UI measures its table and asks the host for a minimum window size
 # ("setMinSize"; Nestbox.exe honours it, the Linux server ignores it). It
@@ -48,6 +49,54 @@ MIN_SIZE_HOOK = """
     };
 })();
 """
+
+# A screen window (viewer.html) at 1:1 wants to be exactly as large as the
+# framebuffer plus its bar; Nestbox.exe sizes its WebView2 window so, the
+# browser cannot. When the Fit / 1:1 button lands on 1:1 (or a console
+# connects while 1:1 is on) the page asks the window to fit the canvas.
+VIEWER_FIT_HOOK = """
+(function () {
+    function fit() {
+        if (window.scaled !== false) return;
+        var c = document.querySelector('#vnc-screen canvas'), bar = document.getElementById('vnc-bar');
+        if (!c || !c.width) return;
+        window.webkit.messageHandlers.gtkWindow.postMessage(JSON.stringify(
+            { action: 'fitWindow', width: c.width, height: c.height + (bar ? bar.offsetHeight : 0) }));
+    }
+    document.addEventListener('DOMContentLoaded', function () {
+        if (!document.getElementById('vnc-screen')) return;
+        var toggle = window.vncToggleScale;
+        if (typeof toggle === 'function')
+            window.vncToggleScale = function () { toggle.apply(this, arguments); setTimeout(fit, 50); };
+        /* the canvas appears when the console connects, and grows with the framebuffer */
+        new MutationObserver(function () { setTimeout(fit, 50); })
+            .observe(document.getElementById('vnc-screen'), { childList: true, subtree: true, attributes: true, attributeFilter: ['width', 'height'] });
+    });
+})();
+"""
+
+
+def content_manager(handler):
+    """Both hooks, with the page -> window channel wired to `handler`."""
+    ucm = WebKit2.UserContentManager()
+    for src in (MIN_SIZE_HOOK, VIEWER_FIT_HOOK):
+        ucm.add_script(WebKit2.UserScript(
+            src, WebKit2.UserContentInjectedFrames.TOP_FRAME,
+            WebKit2.UserScriptInjectionTime.START, None, None))
+    ucm.connect("script-message-received::gtkWindow", handler)
+    ucm.register_script_message_handler("gtkWindow")
+    return ucm
+
+
+def workarea():
+    """Usable width and height of the monitor (minus panels), for clamping windows."""
+    try:
+        d = Gdk.Display.get_default()
+        m = d.get_primary_monitor() or d.get_monitor(0)
+        g = m.get_workarea()
+        return g.width, g.height
+    except Exception:
+        return 1920, 1080
 
 TITLE = "Nestbox"
 WMCLASS = "Nestbox"
@@ -91,15 +140,10 @@ class Window(Gtk.Window):
         self.connect("destroy", Window.closed)
         self.set_default_size(*size)
         self.set_icon_name(ICON)
+        ucm = content_manager(self.on_page_message)
         if related:
-            self.view = WebKit2.WebView(related_view=related)
+            self.view = WebKit2.WebView(related_view=related, user_content_manager=ucm)
         else:
-            ucm = WebKit2.UserContentManager()
-            ucm.add_script(WebKit2.UserScript(
-                MIN_SIZE_HOOK, WebKit2.UserContentInjectedFrames.TOP_FRAME,
-                WebKit2.UserScriptInjectionTime.START, None, None))
-            ucm.connect("script-message-received::gtkWindow", self.on_min_size)
-            ucm.register_script_message_handler("gtkWindow")
             self.view = WebKit2.WebView(user_content_manager=ucm)
         s = self.view.get_settings()
         s.set_javascript_can_open_windows_automatically(True)
@@ -121,12 +165,21 @@ class Window(Gtk.Window):
     def on_title(self, view, _):
         self.set_title(view.get_title() or TITLE)
 
-    # setMinSize from the page: the window can never be narrower than its table.
-    def on_min_size(self, _ucm, result):
+    # Messages from the page through the gtkWindow handler:
+    #   setMinSize  - the panel: the window can never be narrower than its table
+    #   fitWindow   - a screen at 1:1: the window takes the framebuffer's size
+    def on_page_message(self, _ucm, result):
         try:
             m = json.loads(result.get_js_value().to_string())
             w, h = int(m["width"]), int(m["height"])
         except (ValueError, KeyError, TypeError, AttributeError):
+            return
+        if m.get("action") == "fitWindow":
+            mw, mh = workarea()
+            w, h = min(w, mw - 16), min(h, mh - 56)     # room for the title bar
+            print("screen window %dx%d (1:1)" % (w, h), flush=True)
+            self.set_size_request(320, 240)
+            self.resize(w, h)
             return
         print("window minimum %dx%d (asked by the page)" % (w, h), flush=True)
         self.set_size_request(w, h)
@@ -134,10 +187,23 @@ class Window(Gtk.Window):
         if cw < w or ch < h:
             self.resize(max(cw, w), max(ch, h))
 
-    # window.open() dari panel (viewer replica, grid) -> jendela GTK baru.
+    # window.open() from the panel (a replica's screen, the grid) -> a GTK
+    # window of its own, at the size the page asked for (the server sends the
+    # framebuffer plus the bar, so 1:1 fits from the start), clamped to the
+    # monitor.
     def on_create(self, view, _nav):
         w = Window(None, VIEWER_SIZE, related=view)
-        w.view.connect("ready-to-show", lambda v: w.present())
+
+        def shown(v):
+            try:
+                g = v.get_window_properties().get_geometry()
+                mw, mh = workarea()
+                if g.width > 0 and g.height > 0:
+                    w.resize(min(g.width, mw - 16), min(g.height, mh - 56))
+            except Exception:
+                pass
+            w.present()
+        w.view.connect("ready-to-show", shown)
         return w.view
 
 
