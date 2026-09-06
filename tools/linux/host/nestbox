@@ -604,6 +604,11 @@ def handle(msg, ws):
 # ------------------------------------------------------------------ HTTP
 
 class Handler(http.server.SimpleHTTPRequestHandler):
+    # RFC 6455 wants the 101 on HTTP/1.1; WebKit (libsoup) drops a WebSocket whose
+    # handshake came back as HTTP/1.0, which is what SimpleHTTPRequestHandler
+    # answers by default. Chrome and Firefox happen to tolerate it.
+    protocol_version = "HTTP/1.1"
+
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=ARGS.web, **kw)
 
