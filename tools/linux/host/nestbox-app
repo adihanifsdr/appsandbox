@@ -151,6 +151,10 @@ class Window(Gtk.Window):
         self.view.connect("create", self.on_create)
         self.view.connect("notify::title", self.on_title)
         self.view.connect("close", lambda *_: self.destroy())
+        # the web process can die under it (seen: WebKit's ThreadedCompositor
+        # hitting an assertion while a 1600x900 screen was open, RAM nearly
+        # gone) and the window stays white; reload instead of staying blank
+        self.view.connect("web-process-terminated", self.on_terminated)
         self.add(self.view)
         if url:
             self.view.load_uri(url)
@@ -164,6 +168,10 @@ class Window(Gtk.Window):
 
     def on_title(self, view, _):
         self.set_title(view.get_title() or TITLE)
+
+    def on_terminated(self, view, reason):
+        print("web process gone (%s): reloading" % reason.value_nick, flush=True)
+        GLib.timeout_add(1000, lambda: (view.reload(), False)[1])
 
     # Messages from the page through the gtkWindow handler:
     #   setMinSize  - the panel: the window can never be narrower than its table
