@@ -150,6 +150,7 @@ th {
     white-space: nowrap;
 }
 th.num, td.num { text-align: right; }
+td.gpu-col { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
 td {
     padding: 7px 10px;
     border-bottom: 1px solid hsl(var(--line));

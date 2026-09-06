@@ -1395,6 +1395,8 @@ function makeCell(text, row, col, title) {
     var td = document.createElement('td');
     td.textContent = text;
     if (title) td.title = title;
+    /* GPU names from lspci run long: clip them so the icon columns stay in view */
+    if (col === 7) { td.className = 'gpu-col'; if (!title) td.title = text; }
 
     /* Editable columns: 4=CPU, 5=RAM, 7=GPU, 8=Network */
     if (editModeRow === row && (col === 4 || col === 5 || col === 7 || col === 8)) {

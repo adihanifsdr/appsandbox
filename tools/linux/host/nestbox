@@ -256,7 +256,14 @@ def _gpu_name():
         for line in out.splitlines():
             if re.search(r"VGA|3D controller|Display controller", line):
                 name = line.split(": ", 1)[1] if ": " in line else line
-                return re.sub(r"\s*\(rev [0-9a-f]+\)\s*$", "", name)[:60]
+                name = re.sub(r"\s*\(rev [0-9a-f]+\)\s*$", "", name)
+                # "Intel Corporation TigerLake-LP GT2 [Iris Xe Graphics]" -> "Intel Iris Xe Graphics":
+                # the bracketed marketing name, with the vendor's first word, keeps the row narrow
+                m = re.match(r"^(\S+)(?: Corporation| Inc\.?| Ltd\.?| Co\.?)*\b.*\[([^\]]+)\]\s*$", name)
+                if m:
+                    vendor = {"Advanced": "AMD"}.get(m.group(1), m.group(1))
+                    name = "%s %s" % (vendor, m.group(2)) if not m.group(2).startswith(vendor) else m.group(2)
+                return name[:48]
     except (OSError, subprocess.SubprocessError):
         pass
     return "host GPU"
