@@ -470,7 +470,9 @@ def handle(msg, ws):
     elif action == "replicaStop":
         run_replica_job(name, name, [(["-n", name, "stop"], "shutting down")])
     elif action == "replicaRestart":
-        run_replica_job(name, name, [(["-n", name, "stop"], "shutting down"), (["-n", name, "start"], "starting")])
+        # one tool command: "stop" is an async ACPI button, so stop-then-start
+        # in two steps hits "Domain is already active"; restart waits in between
+        run_replica_job(name, name, [(["-n", name, "restart"], "restarting")])
     elif action == "replicaDestroy":
         run_replica_job(name, name, [(["-n", name, "destroy"], "deleting")])
     elif action == "replicaDesktop":

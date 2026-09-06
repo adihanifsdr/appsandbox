@@ -23,7 +23,7 @@
 #         appsandbox-replica qemu build|restore|status
 #         appsandbox-replica desktop [--no-steam]     # XFCE + Steam + autologin, virtio video
 #         appsandbox-replica list                     # every replica as JSON [{name,state,vnc,desktop,cpus,ram,disk}]
-#         appsandbox-replica start|stop|destroy|status|ip|ssh [cmd]|console|xml|checks
+#         appsandbox-replica start|stop|restart|destroy|status|ip|ssh [cmd]|console|xml|checks
 #
 # One sandbox VM can hold several replicas: each has a name (-n), its own
 # libvirt domain, disk, ssh key, VNC port and files under
@@ -680,6 +680,32 @@ print(json.dumps(out, indent=2))
 PY'
 }
 
+# stop + start, but actually waiting in between: 'virsh shutdown' only sends
+# the ACPI power button and returns at once, so a plain "stop; start" hits
+# "Domain is already active". Polls domstate for up to 60 s, then pulls the
+# plug (virsh destroy) if the guest ignored the button (no desktop session,
+# a hung boot).
+cmd_restart() {
+    need_root
+    virsh dominfo "$NAME" >/dev/null 2>&1 || die "domain '$NAME' is not defined (appsandbox-replica create)"
+    if virsh domstate "$NAME" 2>/dev/null | grep -q running; then
+        virsh shutdown "$NAME" >/dev/null
+        local i=0
+        while virsh domstate "$NAME" 2>/dev/null | grep -q running; do
+            i=$((i + 1))
+            if [ $i -gt 60 ]; then
+                echo "    guest did not shut down in 60 s; forcing it off"
+                virsh destroy "$NAME" >/dev/null 2>&1 || true
+                sleep 1
+                break
+            fi
+            sleep 1
+        done
+        echo "    shut down after ${i}s"
+    fi
+    virsh start "$NAME"
+}
+
 cmd=${1:-status}; shift || true
 case "$cmd" in
     install) cmd_install ;;
@@ -690,6 +716,7 @@ case "$cmd" in
     desktop) cmd_desktop "$@" ;;
     start)   need_root; virsh start "$NAME" ;;
     stop)    need_root; virsh shutdown "$NAME" ;;
+    restart) cmd_restart ;;
     destroy) need_root; virsh destroy "$NAME" 2>/dev/null || true; virsh undefine "$NAME" 2>/dev/null || true
              rm -f "$DIR/disk.qcow2" "$DIR/seed.iso" "$DIR/$NAME.xml" "$DIR/replica.conf" "$DIR/user-data" "$DIR/meta-data" "$DIR/id_ed25519" "$DIR/id_ed25519.pub"
              [ "$DIR" != "$ROOT" ] && rmdir "$DIR" 2>/dev/null; echo "replica '$NAME' removed (base image kept in $ROOT)" ;;
@@ -702,5 +729,5 @@ case "$cmd" in
     console) exec virsh console "$NAME" ;;
     xml)     cat "$DIR/$NAME.xml" ;;
     checks)  cmd_checks ;;
-    *)       die "unknown command '$cmd' (install|create|reidentify|qemu|desktop|list|start|stop|destroy|status|ip|ssh|console|xml|checks)" ;;
+    *)       die "unknown command '$cmd' (install|create|reidentify|qemu|desktop|list|start|stop|restart|destroy|status|ip|ssh|console|xml|checks)" ;;
 esac
