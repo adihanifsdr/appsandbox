@@ -25,6 +25,14 @@
 #         appsandbox-seat start|stop|restart|status|destroy
 #         appsandbox-seat run                           # internal: the unit's ExecStart, as the seat's user
 #
+# The display is an Xvnc with DRI3 when the machine has a DRM render node
+# (/dev/dri/renderD*): Vulkan and EGL then run on the real GPU inside every
+# seat, which games built on them (bgfx, SDL3) need to start at all. Ubuntu
+# 24.04's TigerVNC 1.13 has no DRI3, so "install" also unpacks Ubuntu 25.04's
+# tigervnc-standalone-server 1.15 (Xtigervnc with GLX + DRI3; upstream's
+# generic build lacks GLX, which the Steam client cannot do without) into
+# /opt/tigervnc, and "run" prefers it.
+#
 # NAME is the Linux user name (lowercase letters, digits, - _; a letter
 # first), default "seat". Files: /var/lib/appsandbox/seat/seats/<name>/seat.conf;
 # the user's home is /home/<name>, password test123 (same as a replica's
@@ -48,6 +56,9 @@ UNIT=appsandbox-seat@$NAME
 UNIT_FILE=/etc/systemd/system/appsandbox-seat@.service
 SELF=/usr/local/sbin/appsandbox-seat
 VNC=5901; RES=1600x900; STEAM=1
+TIGERVNC_DEB=tigervnc-standalone-server_1.15.0+dfsg-2build1_amd64.deb
+TIGERVNC_URL="http://archive.ubuntu.com/ubuntu/pool/universe/t/tigervnc/$TIGERVNC_DEB"
+TIGERVNC_OPT=/opt/tigervnc
 STEAM_APP=''; COPY_FROM=''; AUTOSTART=(); AUTOSTART_SET=0
 
 die() { echo "appsandbox-seat: $*" >&2; exit 1; }
@@ -134,6 +145,29 @@ write_conf() {
 # ---- packages -------------------------------------------------------------
 
 have_desktop() { command -v Xvnc >/dev/null && command -v startxfce4 >/dev/null; }
+
+# the Xvnc to run: the one in /opt/tigervnc when it is there (GLX + DRI3), else the distro's
+xvnc_bin() { [ -x "$TIGERVNC_OPT/usr/bin/Xtigervnc" ] && echo "$TIGERVNC_OPT/usr/bin/Xtigervnc" || command -v Xvnc; }
+xvnc_dri3() { "$(xvnc_bin)" -help 2>&1 | grep -q -- "-rendernode"; }
+render_node() { ls /dev/dri/renderD* 2>/dev/null | head -1; }
+
+# Xtigervnc with GLX + DRI3 (TigerVNC 1.15, Ubuntu 25.04's package) when the
+# distro's Xvnc lacks DRI3. Only unpacked under /opt/tigervnc, never dpkg -i:
+# the distro's package set stays as it is.
+install_tigervnc() {
+    xvnc_dri3 && return 0
+    [ -n "$(render_node)" ] || { echo "==> no DRM render node here: keeping the distro's Xvnc (software GL only)"; return 0; }
+    echo "==> unpacking $TIGERVNC_DEB (Xvnc with GLX + DRI3) into $TIGERVNC_OPT ..."
+    local tmp; tmp=$(mktemp -d)
+    if curl -fsSL -o "$tmp/tigervnc.deb" "$TIGERVNC_URL" && dpkg-deb -x "$tmp/tigervnc.deb" "$tmp/opt"; then
+        rm -rf "$TIGERVNC_OPT"
+        mv "$tmp/opt" "$TIGERVNC_OPT"
+        xvnc_dri3 && echo "==> $(xvnc_bin): DRI3 on $(render_node)" || echo "==> $(xvnc_bin) does not offer -rendernode; seats stay on software GL"
+    else
+        echo "==> could not fetch $TIGERVNC_URL; seats stay on the distro's Xvnc (software GL only)"
+    fi
+    rm -rf "$tmp"
+}
 have_steam() { command -v steam >/dev/null; }
 
 install_desktop() {
@@ -141,7 +175,7 @@ install_desktop() {
     echo "==> installing Xvnc (TigerVNC) + XFCE (~300 MB) ..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -q
-    apt-get install -y -q tigervnc-standalone-server xfce4 xfce4-terminal dbus-x11 xterm
+    apt-get install -y -q tigervnc-standalone-server xfce4 xfce4-terminal dbus-x11 xterm xauth
 }
 
 install_steam() {
@@ -165,8 +199,9 @@ cmd_install() {
         esac
     done
     install_desktop
+    install_tigervnc
     [ $steam = 1 ] && install_steam
-    echo "OK: seat packages installed (Xvnc, XFCE$( [ $steam = 1 ] && echo ', Steam'))"
+    echo "OK: seat packages installed (Xvnc$(xvnc_dri3 && echo ' with DRI3'), XFCE$( [ $steam = 1 ] && echo ', Steam'))"
 }
 
 # ---- the unit ---------------------------------------------------------------
@@ -250,6 +285,7 @@ cmd_create() {
     fi
     [ -x "$SELF" ] || die "$SELF is missing: install this script there first"
     install_desktop
+    install_tigervnc
     [ $STEAM = 1 ] && install_steam
     pick_port
 
@@ -345,6 +381,7 @@ cmd_status() {
     echo "seat:   $NAME ($(seat_state "$NAME"))"
     echo "vnc:    127.0.0.1:$(conf_get "$CONF" VNC)   resolution: $(conf_get "$CONF" RES)   steam: $(conf_get "$CONF" STEAM)   app: $(conf_get "$CONF" STEAM_APP)"
     echo "login:  $(conf_get "$CONF" AUTOSTART | tr '\t' ' ')"
+    echo "gpu:    $( { xvnc_dri3 && [ -n "$(render_node)" ]; } && echo "DRI3 on $(render_node) ($(xvnc_bin))" || echo "none: software GL ($(xvnc_bin))")"
     echo "unit:   $UNIT"
     systemctl status "$UNIT" --no-pager 2>/dev/null | sed -n 2,4p || true
 }
@@ -375,16 +412,31 @@ cmd_run() {
     # display numbers well above the machine's own (:0, :1 ...): 5901 -> :11
     disp=$((vnc - 5900 + 10))
     export DISPLAY=:$disp HOME USER=$NAME LOGNAME=$NAME
-    # software GL on the Xvnc display: no DRI there, and the sandbox's d3d12
-    # selection (GPU-PV) must not leak in - Steam then renders with llvmpipe
     unset MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER __GLX_VENDOR_LIBRARY_NAME VK_DRIVER_FILES LD_LIBRARY_PATH
-    export LIBGL_ALWAYS_SOFTWARE=1
+    # With DRI3 (upstream Xvnc + a render node) Vulkan and EGL reach the GPU
+    # and the seat renders like the machine's own desktop. Without it the
+    # display has no DRI at all: force software GL so nothing tries the GPU
+    # (no DRI there, and the sandbox's d3d12 selection must not leak in).
+    local xvnc dri3=()
+    xvnc=$(xvnc_bin)
+    if xvnc_dri3 && [ -n "$(render_node)" ]; then
+        dri3=(-rendernode "$(render_node)")
+    else
+        export LIBGL_ALWAYS_SOFTWARE=1
+    fi
     # a stale lock from a killed Xvnc would stop the new one
+    # a cookie of the seat's own: newer Xvnc admits nobody without one, and it
+    # keeps the other seats (other local users) out of this display
+    local xauth=$HOME/.Xauthority
+    export XAUTHORITY=$xauth
+    touch "$xauth"; chmod 600 "$xauth"
+    xauth -q -f "$xauth" remove ":$disp" 2>/dev/null || true
+    xauth -q -f "$xauth" add ":$disp" MIT-MAGIC-COOKIE-1 "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
     if [ -e "/tmp/.X$disp-lock" ] && ! kill -0 "$(tr -d ' \n' < "/tmp/.X$disp-lock" 2>/dev/null)" 2>/dev/null; then
         rm -f "/tmp/.X$disp-lock" "/tmp/.X11-unix/X$disp"
     fi
-    Xvnc ":$disp" -geometry "$res" -depth 24 -rfbport "$vnc" -localhost yes -SecurityTypes None \
-         -AlwaysShared -desktop "$NAME" -pn -noreset >/dev/null 2>&1 &
+    "$xvnc" ":$disp" -geometry "$res" -depth 24 -rfbport "$vnc" -localhost yes -SecurityTypes None \
+         -AlwaysShared -desktop "$NAME" -pn -noreset -auth "$xauth" "${dri3[@]}" >/dev/null 2>&1 &
     local xpid=$!
     for i in $(seq 1 50); do [ -S "/tmp/.X11-unix/X$disp" ] && break; kill -0 $xpid 2>/dev/null || die "Xvnc exited (port $vnc or display :$disp taken?)"; sleep 0.2; done
     [ -S "/tmp/.X11-unix/X$disp" ] || { kill $xpid 2>/dev/null; die "Xvnc did not come up on :$disp"; }

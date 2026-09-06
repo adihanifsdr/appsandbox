@@ -62,6 +62,21 @@ login (repeatable); a program every seat can run has to live outside the
 creating user's home, e.g. `/usr/local/bin`. `configure` changes all of this
 on an existing seat. From Nestbox, the fields of the "+" dialog do the same.
 
+## The GPU inside a seat
+
+A seat's display is an Xvnc with **DRI3** whenever the machine has a DRM
+render node (`/dev/dri/renderD*`): Vulkan, EGL and GLX inside the seat then
+run on the real GPU, exactly as on the machine's own desktop. Games need
+this to start at all: a bgfx/SDL3 client asks for Vulkan and falls back to
+EGL, the Steam client itself insists on a GLX visual, and an X server
+without DRI3 gives none of them a device. Ubuntu 24.04's TigerVNC 1.13 has
+no DRI3, so `install` (and `create`) unpack Ubuntu 25.04's
+`tigervnc-standalone-server` 1.15 into `/opt/tigervnc` (never `dpkg -i`;
+upstream's generic build was tried first and lacks GLX) and `run` starts
+that `Xtigervnc -rendernode /dev/dri/renderD128`. Each seat gets an X cookie
+of its own in `~/.Xauthority`. `status` shows the `gpu:` line. Without a
+render node the distro's Xvnc stays and the seat falls back to software GL.
+
 ## How a seat runs
 
 `/etc/systemd/system/appsandbox-seat@.service` runs `appsandbox-seat -n <name>
