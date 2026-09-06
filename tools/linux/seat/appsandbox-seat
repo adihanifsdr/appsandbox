@@ -483,6 +483,13 @@ cmd_run() {
         # Xvnc's fake present timer and a game crawls at 1-2 fps with the GPU
         # idle (Kathana: 2 fps -> 138 fps). Immediate mode skips that wait.
         export MESA_VK_WSI_PRESENT_MODE=immediate
+        # ... and without FIFO nothing paces the game, so it renders as fast
+        # as it can (138 fps, twice the CPU of a 60 Hz desktop). The MangoHud
+        # Vulkan layer, when installed (apt install mangohud), caps it; the
+        # overlay itself stays hidden. Steam's runtime imports host layers.
+        if [ -e /usr/share/vulkan/implicit_layer.d/MangoHud.x86_64.json ]; then
+            export MANGOHUD=1 MANGOHUD_CONFIG="no_display,fps_limit=${SEAT_FPS_LIMIT:-30}"
+        fi
     else
         export LIBGL_ALWAYS_SOFTWARE=1
     fi

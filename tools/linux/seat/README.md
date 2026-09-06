@@ -82,8 +82,13 @@ them. There is no real vblank: a Vulkan game in the default FIFO present
 mode waits for Xvnc's fake present timer after every frame and crawls at
 1-2 fps with the GPU idle (Kathana: 2 fps), so `run` sets
 `MESA_VK_WSI_PRESENT_MODE=immediate` for the session (138 fps on the same
-seat). And there is nothing to composite for, so `create` writes an xfwm4
-config with compositing off; on an existing seat:
+seat). Without FIFO nothing paces the game, so when MangoHud is installed
+(`apt install mangohud`) `run` also sets `MANGOHUD=1` with
+`no_display,fps_limit=30` — the overlay stays hidden, the cap applies to
+every Vulkan program in the seat, Steam's runtime imports the host layer.
+`SEAT_FPS_LIMIT` in the unit's environment changes the number. And there
+is nothing to composite for, so `create` writes an xfwm4 config with
+compositing off; on an existing seat:
 `xfconf-query -c xfwm4 -p /general/use_compositing -s false`.
 
 Snap apps (Steam) need `/var/lib/snapd/desktop` in `XDG_DATA_DIRS` to show
