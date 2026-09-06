@@ -49,6 +49,7 @@ sudo appsandbox-replica checks                    # prints the checks as [{check
 sudo appsandbox-replica ssh                       # user / test123, key auth
 sudo appsandbox-replica qemu build                # once: identity-patched QEMU (ACPI / SMBIOS / drive / CPUID strings)
 sudo appsandbox-replica reidentify [--restart]    # re-read the profile into the domain (the agent does this on every change)
+sudo appsandbox-replica restart                   # ACPI shutdown, wait for shut off (90 s, then forced), start - the Restart button
 sudo appsandbox-replica desktop                   # XFCE + autologin inside the replica, virtio video 1600x900
 ```
 

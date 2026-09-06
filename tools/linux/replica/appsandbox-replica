@@ -682,26 +682,33 @@ PY'
 
 # stop + start, but actually waiting in between: 'virsh shutdown' only sends
 # the ACPI power button and returns at once, so a plain "stop; start" hits
-# "Domain is already active". Polls domstate for up to 60 s, then pulls the
-# plug (virsh destroy) if the guest ignored the button (no desktop session,
-# a hung boot).
+# "Domain is already active". Waits for the domain to be *shut off* (not just
+# "not running": a busy libvirt can miss a poll, and "in shutdown" is still
+# alive) for up to 90 s, then pulls the plug (virsh destroy) if the guest
+# ignored the button (no desktop session, a hung or thrashing boot).
+wait_shut_off() {   # $1 = seconds; 0 = shut off, 1 = still up
+    local i=0 st
+    while :; do
+        st=$(virsh domstate "$NAME" 2>/dev/null | head -1)
+        case "$st" in "shut off"|crashed) return 0 ;; esac
+        i=$((i + 1)); [ $i -ge "$1" ] && return 1
+        sleep 1
+    done
+}
+
 cmd_restart() {
     need_root
     virsh dominfo "$NAME" >/dev/null 2>&1 || die "domain '$NAME' is not defined (appsandbox-replica create)"
-    if virsh domstate "$NAME" 2>/dev/null | grep -q running; then
-        virsh shutdown "$NAME" >/dev/null
-        local i=0
-        while virsh domstate "$NAME" 2>/dev/null | grep -q running; do
-            i=$((i + 1))
-            if [ $i -gt 60 ]; then
-                echo "    guest did not shut down in 60 s; forcing it off"
-                virsh destroy "$NAME" >/dev/null 2>&1 || true
-                sleep 1
-                break
-            fi
-            sleep 1
-        done
-        echo "    shut down after ${i}s"
+    if ! wait_shut_off 1; then
+        virsh shutdown "$NAME" >/dev/null 2>&1 || true
+        local t0=$(date +%s)
+        if wait_shut_off 90; then
+            echo "    shut down after $(( $(date +%s) - t0 ))s"
+        else
+            echo "    guest did not shut down in 90 s; forcing it off"
+            virsh destroy "$NAME" >/dev/null 2>&1 || true
+            wait_shut_off 15 || die "domain '$NAME' will not stop (virsh domstate: $(virsh domstate "$NAME" 2>&1 | head -1))"
+        fi
     fi
     virsh start "$NAME"
 }
