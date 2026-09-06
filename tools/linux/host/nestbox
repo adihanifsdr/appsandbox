@@ -430,11 +430,26 @@ def run_replica_job(name, tag, steps, tool=REPLICA_TOOL):
 # ------------------------------------------------------------- desktop user
 
 def desktop_user():
+    if os.environ.get("PKEXEC_UID", "").isdigit():      # started through pkexec (nestbox-app)
+        try:
+            return pwd.getpwuid(int(os.environ["PKEXEC_UID"]))
+        except KeyError:
+            pass
     name = os.environ.get("SUDO_USER") or os.environ.get("USER") or "root"
     try:
         return pwd.getpwnam(name)
     except KeyError:
         return pwd.getpwuid(os.getuid())
+
+
+def steam_library_with(app_id):
+    """The desktop user's Steam folder (snap or apt Steam) that has app_id installed, or None."""
+    home = desktop_user().pw_dir
+    for d in ("snap/steam/common/.local/share/Steam", ".local/share/Steam", ".steam/steam"):
+        lib = os.path.join(home, d)
+        if os.path.isfile(os.path.join(lib, "steamapps", "appmanifest_%s.acf" % app_id)):
+            return lib
+    return None
 
 
 def run_as_desktop_user(cmd):
@@ -507,6 +522,21 @@ def handle(msg, ws):
                 args += ["--resolution", res]
             if msg.get("steam") is False:
                 args.append("--no-steam")
+            # a game at login, its files from this PC's library, extra programs
+            app = str(msg.get("steamApp") or "").strip()
+            if app.isdigit():
+                args += ["--steam-app", app]
+                if msg.get("copyGame"):
+                    lib = steam_library_with(app)
+                    if lib:
+                        args += ["--copy-app-from", lib]
+                    else:
+                        log("[%s] app %s is not installed in %s's Steam library on this PC; the seat downloads it itself."
+                            % (sname, app, desktop_user().pw_name))
+            for entry in msg.get("autostart") or []:
+                entry = str(entry).strip()
+                if re.match(r"^[^=\s][^=]*=\S", entry):
+                    args += ["--autostart", entry]
             run_replica_job(sname, sname, [(args, "creating the Steam seat (packages the first time, ~1.5 GB)")], tool=SEAT_TOOL)
         else:
             sub = action[4:].lower()

@@ -32,6 +32,12 @@ replicas when every instance has to look like a different PC.
 sudo appsandbox-seat install [--no-steam]              # packages once: Xvnc, XFCE, Steam
 sudo appsandbox-seat -n steam2 create                  # user steam2 (password test123), display, unit; starts it
 sudo appsandbox-seat -n steam2 create --resolution 1280x720 --vnc 5905
+sudo appsandbox-seat -n steam2 create --steam-app 2081880 \
+     --copy-app-from /home/me/snap/steam/common/.local/share/Steam \
+     --autostart 'Auto Kathana=/usr/local/bin/auto-kathana'   # Steam opens that game at login, its files
+                                                              # copied from that library, the bot started too
+sudo appsandbox-seat -n steam2 configure --steam-app 2081880 --autostart 'Auto Kathana=/usr/local/bin/auto-kathana'
+                                                       # the same on an existing seat (restarts it)
 sudo appsandbox-seat list                              # [{name,state,vnc,desktop,kind:"seat",res}, ...]
 sudo appsandbox-seat -n steam2 start|stop|restart|status
 sudo appsandbox-seat -n steam2 destroy                 # unit, user and /home/steam2
@@ -43,6 +49,18 @@ skipping the ports of every replica and seat on the machine (`--vnc` asks for
 one). Files: `/var/lib/appsandbox/seat/seats/<name>/seat.conf`; the log of a
 seat is `journalctl -u appsandbox-seat@<name>`, of its creation
 `/var/log/appsandbox-seat-<name>.log` when Nestbox created it.
+
+`--steam-app` makes the seat's Steam start with `steam://rungameid/<id>`, so
+the game opens as soon as the seat has signed in to Steam (each seat signs in
+on its own; the login is the only thing left to do by hand). `--copy-app-from`
+takes the game's `appmanifest_<id>.acf` and `steamapps/common/<dir>` from
+another Steam folder on this machine (the snap keeps it under
+`~/snap/steam/common/.local/share/Steam`, apt Steam under
+`~/.local/share/Steam`) into the seat's library, so it is installed the
+moment Steam starts. `--autostart Name=command` adds a program to the seat's
+login (repeatable); a program every seat can run has to live outside the
+creating user's home, e.g. `/usr/local/bin`. `configure` changes all of this
+on an existing seat. From Nestbox, the fields of the "+" dialog do the same.
 
 ## How a seat runs
 

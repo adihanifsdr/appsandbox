@@ -1334,6 +1334,14 @@ function addReplica(idx) {
         { key: 'ram', label: 'RAM in MB (' + where + ': ' + lim.vmRam + ')', type: 'number', value: Math.min(4096, lim.ram), min: 512, max: lim.ram, step: 256 },
         { key: 'disk', label: 'Disk in GB', type: 'number', value: 20, min: 5, max: 2048 }
     ];
+    /* Steam seat extras (a replica ignores them), remembered in this browser
+       so the next seat gets the same game and programs. */
+    var last = {};
+    try { last = JSON.parse(localStorage.getItem('nestbox.seat') || '{}') || {}; } catch (e) {}
+    fields.push(
+        { key: 'steamApp', label: 'Seat: Steam game to open at login (app id, e.g. 2081880 for Kathana; empty = Steam only)', type: 'text', value: last.steamApp || '' },
+        { key: 'copyGame', label: 'Seat: copy that game from this PC\'s Steam library instead of downloading it again', type: 'checkbox', value: last.copyGame !== false },
+        { key: 'autostart', label: 'Seat: also start at login (a command, e.g. /usr/local/bin/auto-kathana; optional)', type: 'text', value: last.autostart || '' });
     /* Linux host: the patch is optional; the sandbox always builds it. */
     if (onHost && !vm.qemuPatched)
         fields.push({ key: 'patch', label: 'Build the identity-patched QEMU first (~10 min, once; hypervisor-level identity strings)', type: 'checkbox', value: false });
@@ -1345,7 +1353,8 @@ function addReplica(idx) {
               'Nestbox builds the patched QEMU (first time, ~10 min), creates the replica and installs XFCE + Steam (10-20 min). ') +
         'Progress shows in the log; the row appears once it boots. Its size can be changed later from the row. ' +
         'A Steam seat is far lighter: a Linux user on ' + where + ' with an Xvnc display, XFCE and Steam at login ' +
-        '(packages once, ~1.5 GB; then seconds per seat), but every seat shows the same machine identity.',
+        '(packages once, ~1.5 GB; then seconds per seat), but every seat shows the same machine identity. ' +
+        'A seat can open a Steam game at login, take its files from this PC\'s library, and start other programs; the seat still signs in to Steam itself.',
         'Create', { confirmClass: 'primary', fields: fields })
     .then(function(f) {
         if (!f) return;
@@ -1355,7 +1364,16 @@ function addReplica(idx) {
             sname = sname.replace(/[^a-z0-9_-]/g, '-').replace(/^[^a-z]+/, '').slice(0, 31);
             if (!sname) { showModal('Steam seat', 'A seat name is a Linux user name: lowercase letters, digits, - and _, starting with a letter.', 'OK', { confirmClass: 'primary' }); return; }
             if (existing.indexOf(sname) >= 0) { showModal('Steam seat', 'A replica or seat named "' + sname + '" already exists.', 'OK', { confirmClass: 'primary' }); return; }
-            sendCmd('seatCreate', {vmIndex: idx, name: sname, res: '1600x900', steam: true});
+            var app = String(f.steamApp || '').replace(/\D/g, '');
+            var cmd = String(f.autostart || '').trim();
+            try { localStorage.setItem('nestbox.seat', JSON.stringify({ steamApp: app, copyGame: !!f.copyGame, autostart: cmd })); } catch (e) {}
+            var autostart = [];
+            if (cmd) {
+                /* the entry's name: the program's basename (the last path-like word) */
+                var toks = cmd.split(/\s+/), paths = toks.filter(function(t) { return t.indexOf('/') >= 0; });
+                autostart.push((paths.length ? paths[paths.length - 1] : toks[0]).split('/').pop() + '=' + cmd);
+            }
+            sendCmd('seatCreate', {vmIndex: idx, name: sname, res: '1600x900', steam: true, steamApp: app, copyGame: !!f.copyGame, autostart: autostart});
             return;
         }
         var name = String(f.name || '').trim().replace(/[^A-Za-z0-9._-]/g, '-');

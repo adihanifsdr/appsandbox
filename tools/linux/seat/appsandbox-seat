@@ -18,6 +18,9 @@
 # Usage:  appsandbox-seat [-n NAME] <command> ...
 #         appsandbox-seat install [--no-steam]          # packages (once): Xvnc, XFCE, Steam
 #         appsandbox-seat create [--vnc 5901] [--resolution 1600x900] [--no-steam]
+#                                [--steam-app 2081880 [--copy-app-from /home/me/.local/share/Steam]]
+#                                [--autostart 'Auto Kathana=/usr/local/bin/auto-kathana'] ...
+#         appsandbox-seat configure <the same --steam-app / --copy-app-from / --autostart>   # on an existing seat
 #         appsandbox-seat list                          # every seat as JSON [{name,state,vnc,desktop,kind,res}]
 #         appsandbox-seat start|stop|restart|status|destroy
 #         appsandbox-seat run                           # internal: the unit's ExecStart, as the seat's user
@@ -45,6 +48,7 @@ UNIT=appsandbox-seat@$NAME
 UNIT_FILE=/etc/systemd/system/appsandbox-seat@.service
 SELF=/usr/local/sbin/appsandbox-seat
 VNC=5901; RES=1600x900; STEAM=1
+STEAM_APP=''; COPY_FROM=''; AUTOSTART=(); AUTOSTART_SET=0
 
 die() { echo "appsandbox-seat: $*" >&2; exit 1; }
 need_root() { [ "$(id -u)" = 0 ] || die "run as root (sudo)"; }
@@ -55,6 +59,77 @@ check_res() {
     esac
 }
 conf_get() { sed -n "s/^$2='\(.*\)'/\1/p" "$1" 2>/dev/null | head -1; }
+
+# --steam-app / --copy-app-from / --autostart, shared by create and configure.
+# Returns 0 when $1 was one of them and sets REPLY to the words it took.
+app_opt() {
+    case "$1" in
+        --steam-app) STEAM_APP=${2:-}; REPLY=2 ;;
+        --copy-app-from) COPY_FROM=${2:-}; REPLY=2 ;;
+        --autostart)
+            # the first --autostart replaces what the seat had, the rest add to it
+            [ $AUTOSTART_SET = 1 ] || { AUTOSTART=(); AUTOSTART_SET=1; }
+            AUTOSTART+=("${2:-}"); REPLY=2 ;;
+        *) return 1 ;;
+    esac
+}
+
+# a user's Steam data folder: the snap keeps it under ~/snap/steam
+steam_dir_for() {   # $1 = home
+    case "$(command -v steam 2>/dev/null)" in
+        /snap/bin/*) echo "$1/snap/steam/common/.local/share/Steam" ;;
+        *) echo "$1/.local/share/Steam" ;;
+    esac
+}
+
+# What the seat opens at login: Steam (with the game of --steam-app), the
+# game's files copied from another library (--copy-app-from, so a seat does
+# not download again what this PC already has), and the extra programs of
+# --autostart ("Name=command"). Writes ~/.config/autostart of the seat.
+apply_apps() {   # $1 = home
+    local home=$1 exec_ entry name slug lib manifest installdir src dst
+    install -d -o "$NAME" -g "$NAME" "$home/.config" "$home/.config/autostart"
+    rm -f "$home/.config/autostart/seat-"*.desktop "$home/.config/autostart/steam.desktop"
+    if [ "$STEAM" = 1 ]; then
+        exec_=steam
+        [ -n "$STEAM_APP" ] && exec_="steam steam://rungameid/$STEAM_APP"
+        printf '[Desktop Entry]\nType=Application\nName=Steam\nComment=Nestbox seat: Steam at login\nExec=%s\nTerminal=false\nX-GNOME-Autostart-enabled=true\n' "$exec_" \
+            > "$home/.config/autostart/steam.desktop"
+    fi
+    if [ -n "$STEAM_APP" ] && [ -n "$COPY_FROM" ]; then
+        manifest=$COPY_FROM/steamapps/appmanifest_$STEAM_APP.acf
+        [ -f "$manifest" ] || die "no appmanifest_$STEAM_APP.acf under $COPY_FROM/steamapps (is the game installed there?)"
+        installdir=$(sed -n 's/^[[:space:]]*"installdir"[[:space:]]*"\(.*\)"/\1/p' "$manifest" | head -1)
+        src=$COPY_FROM/steamapps/common/$installdir
+        [ -n "$installdir" ] && [ -d "$src" ] || die "$src is missing"
+        lib=$(steam_dir_for "$home")
+        dst=$lib/steamapps/common/$installdir
+        if [ -d "$dst" ]; then
+            echo "==> $installdir is already in $lib"
+        else
+            echo "==> copying $installdir ($(du -sh "$src" | cut -f1)) into $lib ..."
+            install -d "$lib/steamapps/common"
+            cp -a --reflink=auto "$src" "$dst"
+            cp -a "$manifest" "$lib/steamapps/"
+            chown -R "$NAME:$NAME" "$home/snap" "$home/.local" 2>/dev/null || true
+        fi
+    fi
+    for entry in "${AUTOSTART[@]}"; do
+        name=${entry%%=*}; exec_=${entry#*=}
+        [ -n "$name" ] && [ -n "$exec_" ] && [ "$name" != "$entry" ] || die "--autostart wants Name=command, got '$entry'"
+        slug=$(printf '%s' "$name" | tr -c 'A-Za-z0-9' '-')
+        printf '[Desktop Entry]\nType=Application\nName=%s\nComment=Nestbox seat: started at login\nExec=%s\nTerminal=false\nX-GNOME-Autostart-enabled=true\n' "$name" "$exec_" \
+            > "$home/.config/autostart/seat-$slug.desktop"
+    done
+    chown -R "$NAME:$NAME" "$home/.config"
+}
+
+write_conf() {
+    install -d -m 0755 "$DIR"
+    printf "VNC='%s'\nRES='%s'\nSTEAM='%s'\nCREATED='%s'\nSTEAM_APP='%s'\nAUTOSTART='%s'\n" \
+        "$VNC" "$RES" "$STEAM" "$CREATED" "$STEAM_APP" "$(IFS=$'\t'; echo "${AUTOSTART[*]}")" > "$CONF"
+    chmod 0644 "$CONF"
+}
 
 # ---- packages -------------------------------------------------------------
 
@@ -163,11 +238,12 @@ cmd_create() {
             --vnc) VNC=$2; shift 2 ;;
             --resolution) RES=$2; shift 2 ;;
             --no-steam) STEAM=0; shift ;;
-            *) die "unknown option $1" ;;
+            *) if app_opt "$@"; then shift $REPLY; else die "unknown option $1"; fi ;;
         esac
     done
     check_res
     case "$VNC" in ''|*[!0-9]*) die "--vnc must be a port number" ;; esac
+    case "$STEAM_APP" in *[!0-9]*) die "--steam-app wants a Steam app id (digits)" ;; esac
     [ -f "$CONF" ] && die "seat '$NAME' already exists (appsandbox-seat -n $NAME destroy first)"
     if getent passwd "$NAME" >/dev/null; then
         die "a user named '$NAME' already exists on this machine; pick another seat name"
@@ -190,27 +266,45 @@ cmd_create() {
     for s in xfce4-screensaver light-locker xscreensaver; do
         printf '[Desktop Entry]\nType=Application\nName=%s\nHidden=true\n' "$s" > "$home/.config/autostart/$s.desktop"
     done
-    if [ $STEAM = 1 ]; then
-        printf '[Desktop Entry]\nType=Application\nName=Steam\nComment=Nestbox seat: Steam at login\nExec=steam\nTerminal=false\nX-GNOME-Autostart-enabled=true\n' \
-            > "$home/.config/autostart/steam.desktop"
-    fi
     chown -R "$NAME:$NAME" "$home/.config"
+    apply_apps "$home"
 
-    install -d -m 0755 "$DIR"
-    printf "VNC='%s'\nRES='%s'\nSTEAM='%s'\nCREATED='%s'\n" "$VNC" "$RES" "$STEAM" "$(date -u +%FT%TZ)" > "$CONF"
-    chmod 0644 "$CONF"
+    CREATED=$(date -u +%FT%TZ)
+    write_conf
     write_unit
     systemctl enable --now "$UNIT" >/dev/null
-    echo "OK: seat '$NAME' created and started (user $NAME / test123, vnc 127.0.0.1:$VNC, $RES$( [ $STEAM = 1 ] && echo ', Steam at login'))"
+    echo "OK: seat '$NAME' created and started (user $NAME / test123, vnc 127.0.0.1:$VNC, $RES$( [ $STEAM = 1 ] && echo ", Steam${STEAM_APP:+ app $STEAM_APP} at login")$( [ ${#AUTOSTART[@]} -gt 0 ] && echo ", ${#AUTOSTART[@]} autostart"))"
     echo "    open it with the screen button of its row; log: journalctl -u $UNIT"
+}
+
+# configure: change what an existing seat opens at login (restarts it if running)
+cmd_configure() {
+    need_root
+    [ -f "$CONF" ] || die "no seat '$NAME' here"
+    VNC=$(conf_get "$CONF" VNC); RES=$(conf_get "$CONF" RES); STEAM=$(conf_get "$CONF" STEAM)
+    CREATED=$(conf_get "$CONF" CREATED); STEAM_APP=$(conf_get "$CONF" STEAM_APP)
+    local saved; saved=$(conf_get "$CONF" AUTOSTART)
+    AUTOSTART=(); [ -n "$saved" ] && IFS=$'\t' read -r -a AUTOSTART <<< "$saved"
+    while [ $# -gt 0 ]; do
+        if app_opt "$@"; then shift $REPLY; else die "unknown option $1"; fi
+    done
+    case "$STEAM_APP" in *[!0-9]*) die "--steam-app wants a Steam app id (digits)" ;; esac
+    local home; home=$(getent passwd "$NAME" | cut -d: -f6)
+    apply_apps "$home"
+    write_conf
+    if [ "$(seat_state "$NAME")" = running ] || pgrep -u "$NAME" >/dev/null 2>&1; then
+        seat_down "$NAME"; write_unit; systemctl start "$UNIT"
+        echo "OK: seat '$NAME' reconfigured and restarted"
+    else
+        echo "OK: seat '$NAME' reconfigured (applies when it starts)"
+    fi
 }
 
 cmd_destroy() {
     need_root
     [ -f "$CONF" ] || die "no seat '$NAME' here"
-    systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
-    pkill -KILL -u "$NAME" >/dev/null 2>&1 || true
-    sleep 1
+    systemctl disable "$UNIT" >/dev/null 2>&1 || true
+    seat_down "$NAME"
     if getent passwd "$NAME" >/dev/null; then
         userdel -r "$NAME" >/dev/null 2>&1 || userdel "$NAME" >/dev/null 2>&1 || true
     fi
@@ -220,9 +314,24 @@ cmd_destroy() {
 
 # ---- start / stop / status --------------------------------------------------
 
+# Everything of a seat, down. PAMName=login makes pam_systemd move Xvnc and
+# the XFCE session into a logind scope of their own (session-N.scope) and
+# snap Steam lands in user@UID.service: both outside the unit's cgroup, so
+# "systemctl stop" alone leaves the display running and the next start finds
+# :N taken. The seat's user exists for nothing else, so end its logind
+# sessions and every process it has.
+seat_down() {   # $1 = name
+    systemctl stop "appsandbox-seat@$1" >/dev/null 2>&1 || true
+    loginctl terminate-user "$1" >/dev/null 2>&1 || true
+    pkill -TERM -u "$1" >/dev/null 2>&1 || true
+    local i
+    for i in $(seq 1 20); do pgrep -u "$1" >/dev/null 2>&1 || break; sleep 0.5; done
+    pkill -KILL -u "$1" >/dev/null 2>&1 || true
+}
+
 cmd_start()   { need_root; [ -f "$CONF" ] || die "no seat '$NAME' here"; write_unit; systemctl start "$UNIT"; echo "OK: seat '$NAME' started"; }
-cmd_stop()    { need_root; [ -f "$CONF" ] || die "no seat '$NAME' here"; systemctl stop "$UNIT"; echo "OK: seat '$NAME' stopped"; }
-cmd_restart() { need_root; [ -f "$CONF" ] || die "no seat '$NAME' here"; write_unit; systemctl restart "$UNIT"; echo "OK: seat '$NAME' restarted"; }
+cmd_stop()    { need_root; [ -f "$CONF" ] || die "no seat '$NAME' here"; seat_down "$NAME"; echo "OK: seat '$NAME' stopped"; }
+cmd_restart() { need_root; [ -f "$CONF" ] || die "no seat '$NAME' here"; seat_down "$NAME"; write_unit; systemctl start "$UNIT"; echo "OK: seat '$NAME' restarted"; }
 
 seat_state() {   # $1 = name -> running | stopped
     case "$(systemctl is-active "appsandbox-seat@$1" 2>/dev/null)" in
@@ -234,7 +343,8 @@ seat_state() {   # $1 = name -> running | stopped
 cmd_status() {
     [ -f "$CONF" ] || die "no seat '$NAME' here"
     echo "seat:   $NAME ($(seat_state "$NAME"))"
-    echo "vnc:    127.0.0.1:$(conf_get "$CONF" VNC)   resolution: $(conf_get "$CONF" RES)   steam: $(conf_get "$CONF" STEAM)"
+    echo "vnc:    127.0.0.1:$(conf_get "$CONF" VNC)   resolution: $(conf_get "$CONF" RES)   steam: $(conf_get "$CONF" STEAM)   app: $(conf_get "$CONF" STEAM_APP)"
+    echo "login:  $(conf_get "$CONF" AUTOSTART | tr '\t' ' ')"
     echo "unit:   $UNIT"
     systemctl status "$UNIT" --no-pager 2>/dev/null | sed -n 2,4p || true
 }
@@ -249,8 +359,8 @@ cmd_list() {
         vnc=$(conf_get "$d/seat.conf" VNC)
         [ $first = 1 ] || echo ","
         first=0
-        printf '  {"name": "%s", "state": "%s", "vnc": %s, "desktop": true, "kind": "seat", "res": "%s"}' \
-            "$name" "$(seat_state "$name")" "${vnc:-0}" "$(conf_get "$d/seat.conf" RES)"
+        printf '  {"name": "%s", "state": "%s", "vnc": %s, "desktop": true, "kind": "seat", "res": "%s", "steamApp": "%s"}' \
+            "$name" "$(seat_state "$name")" "${vnc:-0}" "$(conf_get "$d/seat.conf" RES)" "$(conf_get "$d/seat.conf" STEAM_APP)"
     done
     echo; echo "]"
 }
@@ -291,6 +401,7 @@ cmd=${1:-}; shift || true
 case "$cmd" in
     install) cmd_install "$@" ;;
     create)  cmd_create "$@" ;;
+    configure) cmd_configure "$@" ;;
     destroy) cmd_destroy "$@" ;;
     start)   cmd_start "$@" ;;
     stop)    cmd_stop "$@" ;;
@@ -298,5 +409,5 @@ case "$cmd" in
     status)  cmd_status "$@" ;;
     list)    cmd_list "$@" ;;
     run)     cmd_run "$@" ;;
-    *)       die "unknown command '$cmd' (install|create|list|start|stop|restart|status|destroy)" ;;
+    *)       die "unknown command '$cmd' (install|create|configure|list|start|stop|restart|status|destroy)" ;;
 esac
