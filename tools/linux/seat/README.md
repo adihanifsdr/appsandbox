@@ -77,6 +77,19 @@ that `Xtigervnc -rendernode /dev/dri/renderD128`. Each seat gets an X cookie
 of its own in `~/.Xauthority`. `status` shows the `gpu:` line. Without a
 render node the distro's Xvnc stays and the seat falls back to software GL.
 
+Two things Xvnc lacks that a desktop has, and what `run`/`create` do about
+them. There is no real vblank: a Vulkan game in the default FIFO present
+mode waits for Xvnc's fake present timer after every frame and crawls at
+1-2 fps with the GPU idle (Kathana: 2 fps), so `run` sets
+`MESA_VK_WSI_PRESENT_MODE=immediate` for the session (138 fps on the same
+seat). And there is nothing to composite for, so `create` writes an xfwm4
+config with compositing off; on an existing seat:
+`xfconf-query -c xfwm4 -p /general/use_compositing -s false`.
+
+Snap apps (Steam) need `/var/lib/snapd/desktop` in `XDG_DATA_DIRS` to show
+up in the XFCE menu and Application Finder; `run` adds it, since the
+systemd unit starts without a login environment.
+
 ## How a seat runs
 
 `/etc/systemd/system/appsandbox-seat@.service` runs `appsandbox-seat -n <name>
@@ -87,6 +100,15 @@ and Nestbox reaches it through its tunnel), waits for the socket and runs
 `startxfce4` on it; XFCE's autostart then launches Steam. Stopping the unit
 ends the session and the display together. Display numbers start at `:11`
 (`5901` → `:11`) so they never collide with the machine's own X server.
+
+Easy Anti-Cheat games (Kathana) share one launch lock across every user of
+the Steam snap: `/tmp/EasyAntiCheatLauncherSemaphore` inside the snap's
+private `/tmp`. The bootstrapper creates it `0700`, so after one user has
+played, every other user's launch fails at once with "Failed at essential
+procedures, please run the system repair." `start` and `restart` replace it
+with a root-owned `0666` file that all users can lock; if the machine's own
+user hits the error, `sudo appsandbox-seat -n <any seat> restart` (or just
+`sudo rm` the file) clears it.
 
 Rendering is software: the run script sets `LIBGL_ALWAYS_SOFTWARE=1` and
 clears the sandbox's d3d12 (GPU-PV) selection, because an Xvnc display has no

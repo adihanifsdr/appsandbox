@@ -178,6 +178,32 @@ install_desktop() {
     apt-get install -y -q tigervnc-standalone-server xfce4 xfce4-terminal dbus-x11 xterm xauth
 }
 
+# seat users are not admins, so every privileged desktop action (Wi-Fi scan,
+# mounting, power) would raise a polkit password dialog inside the seat:
+# let members of nestbox-seat through.  Both formats: JS rules for polkit
+# >= 0.106 (Ubuntu 24.04+), .pkla for 0.105 (Ubuntu 22.04).
+SEAT_GROUP=nestbox-seat
+install_polkit() {
+    groupadd -f "$SEAT_GROUP"
+    install -d /etc/polkit-1/rules.d /etc/polkit-1/localauthority/50-local.d
+    cat > /etc/polkit-1/rules.d/49-nestbox-seat.rules <<EOR
+polkit.addRule(function(action, subject) {
+    if (subject.isInGroup("$SEAT_GROUP")) {
+        return polkit.Result.YES;
+    }
+});
+EOR
+    cat > /etc/polkit-1/localauthority/50-local.d/49-nestbox-seat.pkla <<EOP
+[Nestbox seat users need no password]
+Identity=unix-group:$SEAT_GROUP
+Action=*
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes
+EOP
+    systemctl try-restart polkit >/dev/null 2>&1 || true
+}
+
 install_steam() {
     have_steam && return 0
     echo "==> installing Steam (i386 multiarch + steam-installer, ~1 GB with its libraries) ..."
@@ -199,6 +225,7 @@ cmd_install() {
         esac
     done
     install_desktop
+    install_polkit
     install_tigervnc
     [ $steam = 1 ] && install_steam
     echo "OK: seat packages installed (Xvnc$(xvnc_dri3 && echo ' with DRI3'), XFCE$( [ $steam = 1 ] && echo ', Steam'))"
@@ -285,6 +312,7 @@ cmd_create() {
     fi
     [ -x "$SELF" ] || die "$SELF is missing: install this script there first"
     install_desktop
+    install_polkit
     install_tigervnc
     [ $STEAM = 1 ] && install_steam
     pick_port
@@ -292,7 +320,7 @@ cmd_create() {
     useradd -m -s /bin/bash -c "Nestbox seat $NAME" "$NAME"
     echo "$NAME:test123" | chpasswd
     local g
-    for g in audio video render; do getent group "$g" >/dev/null && usermod -aG "$g" "$NAME"; done
+    for g in audio video render "$SEAT_GROUP"; do getent group "$g" >/dev/null && usermod -aG "$g" "$NAME"; done
     local home; home=$(getent passwd "$NAME" | cut -d: -f6)
     # install -d applies -o/-g to the last component only: name every directory
     install -d -o "$NAME" -g "$NAME" "$home/.config" "$home/.config/autostart"
@@ -302,6 +330,17 @@ cmd_create() {
     for s in xfce4-screensaver light-locker xscreensaver; do
         printf '[Desktop Entry]\nType=Application\nName=%s\nHidden=true\n' "$s" > "$home/.config/autostart/$s.desktop"
     done
+    # no compositor on a VNC display: nothing to composite for, and every
+    # frame would be redrawn twice before Xvnc encodes it
+    install -d "$home/.config/xfce4/xfconf/xfce-perchannel-xml"
+    cat > "$home/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="use_compositing" type="bool" value="false"/>
+  </property>
+</channel>
+XML
     chown -R "$NAME:$NAME" "$home/.config"
     apply_apps "$home"
 
@@ -365,9 +404,23 @@ seat_down() {   # $1 = name
     pkill -KILL -u "$1" >/dev/null 2>&1 || true
 }
 
-cmd_start()   { need_root; [ -f "$CONF" ] || die "no seat '$NAME' here"; write_unit; systemctl start "$UNIT"; echo "OK: seat '$NAME' started"; }
+# Easy Anti-Cheat keeps its launch lock (/tmp/EasyAntiCheatLauncherSemaphore)
+# in the Steam snap's private /tmp, which every user of the snap shares. The
+# bootstrapper creates it 0700, so once one user has started an EAC game every
+# other user's launch dies before it even logs: "Failed at essential
+# procedures, please run the system repair." A root-owned 0666 file serves
+# them all (fs.protected_regular lets anyone open it: root owns /tmp too).
+eac_lock_fix() {
+    local d=/tmp/snap-private-tmp/snap.steam/tmp f
+    [ -d "$d" ] || return 0
+    f=$d/EasyAntiCheatLauncherSemaphore
+    [ "$(stat -c '%u:%a' "$f" 2>/dev/null)" = "0:666" ] && return 0
+    rm -f "$f"; install -m 0666 -o root -g root /dev/null "$f"
+}
+
+cmd_start()   { need_root; [ -f "$CONF" ] || die "no seat '$NAME' here"; eac_lock_fix; write_unit; systemctl start "$UNIT"; echo "OK: seat '$NAME' started"; }
 cmd_stop()    { need_root; [ -f "$CONF" ] || die "no seat '$NAME' here"; seat_down "$NAME"; echo "OK: seat '$NAME' stopped"; }
-cmd_restart() { need_root; [ -f "$CONF" ] || die "no seat '$NAME' here"; seat_down "$NAME"; write_unit; systemctl start "$UNIT"; echo "OK: seat '$NAME' restarted"; }
+cmd_restart() { need_root; [ -f "$CONF" ] || die "no seat '$NAME' here"; seat_down "$NAME"; eac_lock_fix; write_unit; systemctl start "$UNIT"; echo "OK: seat '$NAME' restarted"; }
 
 seat_state() {   # $1 = name -> running | stopped
     case "$(systemctl is-active "appsandbox-seat@$1" 2>/dev/null)" in
@@ -412,6 +465,11 @@ cmd_run() {
     # display numbers well above the machine's own (:0, :1 ...): 5901 -> :11
     disp=$((vnc - 5900 + 10))
     export DISPLAY=:$disp HOME USER=$NAME LOGNAME=$NAME
+    # the unit starts without a login environment: snap apps (Steam) need
+    # /snap/bin on PATH and their .desktop files in XDG_DATA_DIRS, or the
+    # XFCE menu and Application Finder never show them
+    case ":$PATH:" in *:/snap/bin:*) ;; *) export PATH="$PATH:/snap/bin" ;; esac
+    export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:/var/lib/snapd/desktop"
     unset MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER __GLX_VENDOR_LIBRARY_NAME VK_DRIVER_FILES LD_LIBRARY_PATH
     # With DRI3 (upstream Xvnc + a render node) Vulkan and EGL reach the GPU
     # and the seat renders like the machine's own desktop. Without it the
@@ -421,6 +479,10 @@ cmd_run() {
     xvnc=$(xvnc_bin)
     if xvnc_dri3 && [ -n "$(render_node)" ]; then
         dri3=(-rendernode "$(render_node)")
+        # Xvnc has no real vblank: a Vulkan swapchain in FIFO mode waits for
+        # Xvnc's fake present timer and a game crawls at 1-2 fps with the GPU
+        # idle (Kathana: 2 fps -> 138 fps). Immediate mode skips that wait.
+        export MESA_VK_WSI_PRESENT_MODE=immediate
     else
         export LIBGL_ALWAYS_SOFTWARE=1
     fi
