@@ -405,8 +405,13 @@ cmd_create() {
     # a docker container publishing 127.0.0.1:5900 ...): pick the next free port.
     # A stopped Steam seat (appsandbox-seat) is not listening but owns its
     # port too, so its seat.conf counts as taken.
-    local want=$VNC seat_ports
-    seat_ports=$(sed -n "s/^VNC='\(.*\)'/\1/p" /var/lib/appsandbox/seat/seats/*/seat.conf 2>/dev/null | tr '\n' ' ')
+    local want=$VNC seat_ports="" f
+    # The glob stays literal when no seat exists yet; sed would then fail with
+    # rc=2 and set -e would kill create() before the first replica is made.
+    for f in /var/lib/appsandbox/seat/seats/*/seat.conf; do
+        [ -f "$f" ] || continue
+        seat_ports+="$(sed -n "s/^VNC='\(.*\)'/\1/p" "$f") "
+    done
     while ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$VNC\$" || case " $seat_ports " in *" $VNC "*) true ;; *) false ;; esac; do
         VNC=$((VNC + 1)); [ $VNC -gt $((want + 20)) ] && die "no free VNC port near $want"
     done
