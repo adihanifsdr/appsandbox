@@ -17,9 +17,9 @@
 #         appsandbox-replica create [--smbios sysinfo|host] [--disk 20G]
 #                                   [--ram 4096] [--cpus 4] [--vnc 5900]
 #                                   [--profile /etc/appsandbox/identity.json]
-#                                   [--image URL] [--video cirrus|virtio] [--resolution 1600x900]
+#                                   [--image URL] [--video cirrus|virtio] [--resolution 800x600]
 #         appsandbox-replica reidentify [--restart] [--profile FILE] [--all]
-#         appsandbox-replica resize [--cpus 4] [--ram 4096] [--disk 30G] [--resolution 1600x900] [--restart]
+#         appsandbox-replica resize [--cpus 4] [--ram 4096] [--disk 30G] [--resolution 800x600] [--restart]
 #         appsandbox-replica qemu build|restore|status
 #         appsandbox-replica desktop [--no-steam]     # XFCE + Steam + autologin, virtio video
 #         appsandbox-replica list                     # every replica as JSON [{name,state,vnc,desktop,cpus,ram,disk}]
@@ -66,7 +66,7 @@ DEFAULT_IMAGE=https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubu
 PROFILE=/etc/appsandbox/identity.json
 SMBIOS=sysinfo; DISK=20G; RAM=4096; CPUS=4; VNC=5900; IMAGE=$DEFAULT_IMAGE
 VIDEO=cirrus      # cirrus = the classic QEMU/OpenStack look; virtio = 2D virtio-vga, larger modes (desktop)
-RES=1600x900      # the virtio head's preferred mode: what the desktop comes up in (--resolution)
+RES=800x600       # the virtio head's preferred mode: what the desktop comes up in (--resolution)
 QEMU_SRC=${REPLICA_QEMU_SRC:-/opt/appsandbox/qemu-identity}   # patches + build.sh, shipped in the guest image
 QEMU_BIN=/usr/bin/qemu-system-x86_64
 QEMU_DISTRIB=/usr/bin/qemu-system-x86_64.distrib
@@ -290,7 +290,7 @@ disk_gb() {   # $1 = replica dir, $2 = DISK from its conf (may be empty)
 # every replica on this VM, as JSON: [{"name","state","vnc","desktop","cpus","ram","disk"}, ...]
 # (ram in MiB, disk in GiB)
 cmd_list() {
-    local d name state vnc desk ram cpus disk
+    local d name state vnc desk ram cpus disk res
     echo "["
     local first=1
     for d in "$ROOT" "$ROOT"/replicas/*; do
@@ -299,12 +299,13 @@ cmd_list() {
         vnc=$(sed -n "s/^VNC='\(.*\)'/\1/p" "$d/replica.conf"); desk=$(sed -n "s/^DESKTOP='\(.*\)'/\1/p" "$d/replica.conf")
         ram=$(sed -n "s/^RAM='\(.*\)'/\1/p" "$d/replica.conf"); cpus=$(sed -n "s/^CPUS='\(.*\)'/\1/p" "$d/replica.conf")
         disk=$(disk_gb "$d" "$(sed -n "s/^DISK='\(.*\)'/\1/p" "$d/replica.conf")")
+        res=$(sed -n "s/^RES='\(.*\)'/\1/p" "$d/replica.conf")
         state=$(virsh domstate "$name" 2>/dev/null | head -1)
         case "$state" in running) state=running ;; "") state=undefined ;; *) state=stopped ;; esac
         [ $first = 1 ] || echo ","
         first=0
-        printf '  {"name": "%s", "state": "%s", "vnc": %s, "desktop": %s, "cpus": %s, "ram": %s, "disk": %s}' \
-            "$name" "$state" "${vnc:-0}" "$([ "${desk:-0}" = 1 ] && echo true || echo false)" "${cpus:-0}" "${ram:-0}" "${disk:-0}"
+        printf '  {"name": "%s", "state": "%s", "vnc": %s, "desktop": %s, "cpus": %s, "ram": %s, "disk": %s, "res": "%s"}' \
+            "$name" "$state" "${vnc:-0}" "$([ "${desk:-0}" = 1 ] && echo true || echo false)" "${cpus:-0}" "${ram:-0}" "${disk:-0}" "$res"
     done
     echo; echo "]"
 }

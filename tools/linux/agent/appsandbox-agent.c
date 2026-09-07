@@ -554,7 +554,7 @@ static void send_replica_state(int fd)
 static void handle_replica(int fd, const char *args)
 {
     char name[64] = "replica", sub[16] = "", cmd[1024], msg[160], sizing[96] = "";
-    char opt_cpus[8] = "", opt_ram[8] = "", opt_disk[8] = "";
+    char opt_cpus[8] = "", opt_ram[8] = "", opt_disk[8] = "", opt_res[12] = "";
     int restart = 0;
     const char *sp = strchr(args, ' ');
     const char *rest = NULL;
@@ -601,6 +601,15 @@ static void handle_replica(int fd, const char *args)
             else if (kl == 3 && memcmp(rest, "ram", 3) == 0) dst = opt_ram;
             else if (kl == 4 && memcmp(rest, "disk", 4) == 0) dst = opt_disk;
             else if (kl == 7 && memcmp(rest, "restart", 7) == 0 && digits) restart = atoi(eq + 1) != 0;
+            else if (kl == 3 && memcmp(rest, "res", 3) == 0) {
+                /* WIDTHxHEIGHT: digits around one 'x' (800x600 .. 1920x1080) */
+                size_t j, xs = 0; int okr = vl >= 7 && vl < sizeof(opt_res);
+                for (j = 0; okr && j < vl; j++) {
+                    if (eq[1 + j] == 'x') xs++;
+                    else if (!isdigit((unsigned char)eq[1 + j])) okr = 0;
+                }
+                if (okr && xs == 1) { memcpy(opt_res, eq + 1, vl); opt_res[vl] = '\0'; }
+            }
             if (dst && digits) { memcpy(dst, eq + 1, vl); dst[vl] = '\0'; }
         }
         rest = end;
@@ -608,6 +617,7 @@ static void handle_replica(int fd, const char *args)
     if (opt_cpus[0]) snprintf(sizing + strlen(sizing), sizeof(sizing) - strlen(sizing), " --cpus %s", opt_cpus);
     if (opt_ram[0])  snprintf(sizing + strlen(sizing), sizeof(sizing) - strlen(sizing), " --ram %s", opt_ram);
     if (opt_disk[0]) snprintf(sizing + strlen(sizing), sizeof(sizing) - strlen(sizing), " --disk %sG", opt_disk);
+    if (opt_res[0])  snprintf(sizing + strlen(sizing), sizeof(sizing) - strlen(sizing), " --resolution %s", opt_res);
     if (!replica_tool_present()) {
         snprintf(msg, sizeof(msg), "replica_result:%s:%s:failed", name, sub);
         send_line(fd, msg);

@@ -1495,7 +1495,7 @@ function replicaRow(vm, idx, r, cols) {
     var spec = seat
         ? ['xfce', r.res || '', r.steamApp ? 'steam app ' + r.steamApp : 'steam', r.vnc ? 'vnc :' + r.vnc : '']
         : [r.cpus ? r.cpus + ' cores' : '', r.ram ? r.ram + ' MB' : '', r.disk ? r.disk + ' GB' : '',
-           r.desktop ? 'xfce' : 'no desktop', r.vnc ? 'vnc :' + r.vnc : ''];
+           r.desktop ? 'xfce' : 'no desktop', r.desktop && r.res ? r.res : '', r.vnc ? 'vnc :' + r.vnc : ''];
     var specEl = td.querySelector('.replica-spec');
     specEl.textContent = spec.filter(Boolean).join('  ·  ');
     specEl.title = seat
@@ -1631,6 +1631,10 @@ function openAddModal(idx) {
     g('add-rep-ram').max = lim.ram;
     g('add-rep-ram-info').textContent = where + ' has ' + lim.vmRam + ' MB; up to ' + lim.ram + ' MB for a replica';
     g('add-rep-disk').value = 20;
+    var lastRep = {};
+    try { lastRep = JSON.parse(localStorage.getItem('nestbox.replica') || '{}') || {}; } catch (e) {}
+    g('add-rep-res').value = lastRep.res || '800x600';
+    if (!g('add-rep-res').value) g('add-rep-res').value = '800x600';
     var patch = onHost && !vm.qemuPatched;
     g('add-rep-patch-label').hidden = !patch;
     g('add-rep-patch-row').hidden = !patch;
@@ -1739,9 +1743,12 @@ function onAddConfirm() {
         var ram = Math.min(lim.ram, Math.max(512, parseInt(document.getElementById('add-rep-ram').value, 10) || 4096));
         var disk = Math.min(2048, Math.max(5, parseInt(document.getElementById('add-rep-disk').value, 10) || 20));
         var patch = !document.getElementById('add-rep-patch-row').hidden && document.getElementById('add-rep-patch').checked;
+        var res = document.getElementById('add-rep-res').value;
+        if (!/^\d{3,5}x\d{3,5}$/.test(res)) res = '800x600';
+        try { localStorage.setItem('nestbox.replica', JSON.stringify({ res: res })); } catch (e) {}
         setPending('create:rep:' + vm.name + '/' + name, { label: 'Creating', name: name, kind: 'replica', ttl: 60 * 60000,
             expect: function() { return !!findRep(vm.name, name); } });
-        sendCmd('replicaSetup', {vmIndex: idx, name: name, cpus: cpus, ram: ram, disk: disk, patch: patch});
+        sendCmd('replicaSetup', {vmIndex: idx, name: name, cpus: cpus, ram: ram, disk: disk, res: res, patch: patch});
     }
     closeAddModal();
 }

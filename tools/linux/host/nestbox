@@ -483,6 +483,10 @@ def sizing_args(msg):
         v = msg.get(key)
         if isinstance(v, (int, float)) and lo <= int(v) <= hi:
             out += [flag, "%d%s" % (int(v), suffix)]
+    # the screen its desktop comes up in (virtio video); the tool's default when absent
+    res = str(msg.get("res") or "")
+    if re.match(r"^\d{3,5}x\d{3,5}$", res):
+        out += ["--resolution", res]
     return out
 
 

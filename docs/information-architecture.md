@@ -24,7 +24,7 @@ everything that takes longer than a click has to say so *in the list*.
 |---|---|---|
 | A VM on this PC (Windows host) | **sandbox** | Inherited name; the row at the top level. |
 | The machine itself (Linux host) | **this PC** | The single top-level row; it never starts or stops. |
-| A KVM guest inside a sandbox / on this PC, with the profile's machine identity | **replica** | "Nested replica" in headings. Sized: cores, RAM, disk. |
+| A KVM guest inside a sandbox / on this PC, with the profile's machine identity | **replica** | "Nested replica" in headings. Sized: cores, RAM, disk, screen. |
 | A Linux user with an Xvnc display, XFCE and Steam, on the sandbox / PC itself | **seat** | "Steam seat" in headings. Not sized: it takes what its programs take. |
 | A window showing a console or display | **screen** | "Screens" = the grid of every running one. |
 | What the guest / replica reports about its hardware | **identity** | The per-VM JSON profile. |
@@ -61,7 +61,7 @@ the data columns:
 
 `└ icon  name  KIND  ● state   spec line`
 
-- Spec, replica: `4 cores · 8192 MB · 40 GB · xfce | no desktop · vnc :5900`.
+- Spec, replica: `4 cores · 8192 MB · 40 GB · xfce · 800x600 | no desktop · vnc :5900`.
 - Spec, seat: `xfce · 1600x900 · steam app 2081880 | steam · vnc :5903`.
 - Actions: `[start · screen] [size · desktop] [stop · restart] [delete]`; a seat
   keeps the two empty slots of the second group.
@@ -91,7 +91,7 @@ variants of one form:
 
 | | Nested replica | Steam seat |
 |---|---|---|
-| Fields | name, cores, memory, disk, (build the QEMU patch first — Linux host without it) | user name, screen size; on a Linux host also Steam game, copy from this PC's library, a program to start |
+| Fields | name, cores, memory, disk, screen size (800 × 600 unless chosen), (build the QEMU patch first — Linux host without it) | user name, screen size; on a Linux host also Steam game, copy from this PC's library, a program to start |
 | Ready in | 10–20 min | seconds (packages once) |
 | Reserves | cores, RAM, disk | nothing |
 | Identity | its own, from the profile | the machine's |

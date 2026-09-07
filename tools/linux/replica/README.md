@@ -50,7 +50,7 @@ sudo appsandbox-replica ssh                       # user / test123, key auth
 sudo appsandbox-replica qemu build                # once: identity-patched QEMU (ACPI / SMBIOS / drive / CPUID strings)
 sudo appsandbox-replica reidentify [--restart]    # re-read the profile into the domain (the agent does this on every change)
 sudo appsandbox-replica restart                   # ACPI shutdown, wait for shut off (90 s, then forced), start - the Restart button
-sudo appsandbox-replica desktop                   # XFCE + autologin inside the replica, virtio video 1600x900
+sudo appsandbox-replica desktop                   # XFCE + autologin inside the replica, virtio video 800x600
 ```
 
 `desktop` makes the replica usable from the App Sandbox **VNC button**: it
@@ -77,7 +77,7 @@ edit it and `virsh define` it to tweak anything.
 changes an existing replica: cores, RAM and the screen mode are redefined and
 apply at its next boot (right away with `--restart`); the disk only grows
 (live when the replica runs), and the guest's cloud-init growpart extends the
-root filesystem at the next boot. `--resolution` (default 1600x900, also on
+root filesystem at the next boot. `--resolution` (default 800x600, also on
 `create`) is the virtio head's preferred mode, i.e. what the desktop comes up
 in; a running desktop can switch live with `xrandr -s 800x600`.
 The pencil on a replica row in Nestbox does the same, and the "+" dialog

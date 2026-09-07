@@ -1293,14 +1293,22 @@ static void on_webview2_message(const wchar_t *json)
                     o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " steam=%d", steam ? 1 : 0);
             } else {
                 /* Sizing (replicaSetup / replicaResize): cores, RAM in MB, disk in
-                   GB, and whether to restart the replica so the new size applies
-                   now. Passed as key=value words; the agent re-validates them. */
+                   GB, the screen (res=<W>x<H>) and whether to restart the replica
+                   so the new size applies now. Passed as key=value words; the
+                   agent re-validates them. */
                 if (json_get_int(json, L"cpus", &val) && val >= 1 && val <= 256)
                     o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " cpus=%d", val);
                 if (json_get_int(json, L"ram", &val) && val >= 256 && val <= 1048576)
                     o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " ram=%d", val);
                 if (json_get_int(json, L"disk", &val) && val >= 1 && val <= 65536)
                     o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " disk=%d", val);
+                wres[0] = L'\0';
+                if (json_get_string(json, L"res", wres, 16) && wres[0]) {
+                    int ok = 1;
+                    for (i = 0; wres[i]; i++)
+                        if (!((wres[i] >= L'0' && wres[i] <= L'9') || wres[i] == L'x')) ok = 0;
+                    if (ok) o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " res=%S", wres);
+                }
                 if (json_get_bool(json, L"restart", &restart) && restart)
                     o += (size_t)sprintf_s(opts + o, sizeof(opts) - o, " restart=1");
             }

@@ -294,6 +294,17 @@
                 <input type="number" id="add-rep-disk" class="input-sm" min="5" max="2048" value="20"><span class="unit-label">GB</span>
                 <span class="host-info">grows only; changed later from the row</span>
             </div>
+            <label for="add-rep-res">Screen</label>
+            <div class="form-row">
+                <select id="add-rep-res">
+                    <option value="800x600" selected>800 × 600</option>
+                    <option value="1024x768">1024 × 768</option>
+                    <option value="1280x720">1280 × 720</option>
+                    <option value="1600x900">1600 × 900</option>
+                    <option value="1920x1080">1920 × 1080</option>
+                </select>
+                <span class="host-info">the size its XFCE desktop comes up in</span>
+            </div>
             <label id="add-rep-patch-label" for="add-rep-patch">QEMU</label>
             <div class="form-row checks" id="add-rep-patch-row">
                 <label class="check" title="Build QEMU 8.2.2 with the identity patches first (~10 min, once). Without it the ACPI / SMBIOS / drive / CPUID strings of the profile are ignored."><input type="checkbox" id="add-rep-patch"> Build the identity-patched QEMU first (~10 min, once)</label>
