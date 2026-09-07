@@ -26,6 +26,30 @@ September 2026 (sapuan kedua, 60-an brand lain): hasil cek langsung ke
 server yang ada, dan dokumentasi resmi provider (tautan di bagian
 akhir). Harga dan kebijakan bisa berubah; cek ulang sebelum membeli.
 
+## Ringkasan
+
+Peringkat lengkap 16 plan ada di [Peringkat akhir](#peringkat-akhir);
+rumus ukurannya di [Menerjemahkan beban](#menerjemahkan-beban-yang-mau-dijalankan-ke-ukuran-vps).
+Intinya, per 7 September 2026:
+
+| # | Plan | $/bulan | Core / RAM | Replica | Kenapa |
+|---|---|---|---|---|---|
+| 1 | **Onidel HF-4, EPYC Turin, Singapura** | 38,70 | 6 / 12 GB | 2 | Core tercepat (Geekbench 6 satu core 2976), nested resmi di KB, refund 14 hari, tagihan per jam. **Stok sering habis** |
+| 2 | Onidel HF-2 / HF-3 | 12,90 / 25,80 | 2 / 4 GB, 4 / 8 GB | 1 | Sama seperti di atas, untuk satu replica |
+| 3 | **OVHcloud VPS-3** | 12,32 | 6 / 12 GB | 2 | Termurah per replica, nested terbukti sendiri, stok selalu ada. Kelemahan: Haswell 2013 |
+| 4 | Onidel HF-5 | 86,40 | 8 / 32 GB | 7 | Kalau butuh banyak replica |
+| 5 | OVHcloud VPS-4 | 23,37 | 8 / 24 GB | 5 | Banyak replica dengan biaya terkecil |
+| 6 | GreenCloud RyzenKVM-4, Singapura DC2 | 40 | 4 / 8 GB | 1 | Ryzen 9950X, stok ada, nested terbukti pengguna |
+| — | Advin Servers EPYC Genoa 8 vCPU | 20 | 8 / 16 GB | 3 | Nilai terbaik di atas kertas, tapi **habis**; pasang "Get Notified" |
+
+Enam replica headless butuh **minimal 12 GB RAM** (6 GB dan 8 GB tidak
+cukup); yang paling pas: Onidel HF-4 atau OVHcloud VPS-3. Cloud besar
+(GCE, AWS, OCI) resmi mendukung nested dan punya ukuran 12-16 GB, tetapi
+$76-117 per bulan untuk 2 vCPU. Sapuan 60-an brand lain tidak menemukan
+pesaing baru yang nested-nya resmi dan berlokasi di Asia; cadangannya
+V.PS Osaka Edge dan DMIT Hong Kong (bukti pengguna), dan untuk Jakarta
+uji LightNode per jam dulu.
+
 ## Hasil cek langsung
 
 | Server | Provider | Spek | `/dev/kvm` | Replica? |
