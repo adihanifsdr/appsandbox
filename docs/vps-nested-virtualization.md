@@ -68,9 +68,9 @@ rupiah.
 
 | Provider | Cara mengaktifkan | Batasan penting | Region terdekat | Perkiraan biaya |
 |---|---|---|---|---|
-| Google Compute Engine | Set `enableNestedVirtualization` saat membuat VM, atau pada VM yang sudah ada; tanpa biaya tambahan | Bukan E2, bukan memory-optimized, bukan Arm, dan bukan AMD kecuali N4D; CPU Intel minimal Haswell; hypervisor di dalam VM hanya boleh KVM Linux (Hyper-V tidak didukung); performa CPU turun sekitar 10% atau lebih | **Jakarta (asia-southeast2)**, Singapura (asia-southeast1) | di Jakarta n1-standard-1 sekitar $32.64/bulan, n2-standard-2 sekitar $76.28/bulan on-demand; Spot jauh lebih murah untuk uji coba |
-| Amazon EC2 | Sejak 12 Februari 2026 nested tersedia di instance biasa, bukan hanya bare metal: `--cpu-options "NestedVirtualization=enabled"` saat launch, atau ubah CPU options saat instance stopped; tanpa biaya tambahan | Hanya keluarga M7i/M8i, C7i/C8i, R7i/R8i/X8i, I7i/I7ie (varian -flex dan -d ikut); Graviton/Arm tidak; ketersediaan tipe berbeda per region | **Jakarta (ap-southeast-3)**, Singapura (ap-southeast-1) | tagihan per detik; cek dulu tipe mana yang ada di Jakarta dengan `aws ec2 describe-instance-types --region ap-southeast-3 --filters "Name=processor-info.supported-features,Values=nested-virtualization"` |
-| Oracle Cloud (OCI) | Pakai shape VM Intel, misalnya `VM.Standard3.Flex`; `/dev/kvm` tersedia di dalam VM | Shape AMD dan Ampere (Arm) tidak mendukung nested, jadi Always Free tier tidak bisa dipakai untuk ini | Singapura (ap-singapore-1 / -2); tidak ada Jakarta | sekitar $0.04 per OCPU-jam ditambah biaya memori |
+| Google Compute Engine | Set `enableNestedVirtualization` saat membuat VM, atau pada VM yang sudah ada; tanpa biaya tambahan | Bukan E2, bukan memory-optimized, bukan Arm, dan bukan AMD kecuali N4D; CPU Intel minimal Haswell; hypervisor di dalam VM hanya boleh KVM Linux (Hyper-V tidak didukung); performa CPU turun sekitar 10% atau lebih | **Jakarta (asia-southeast2)**, Singapura (asia-southeast1) | di Jakarta n1-standard-1 sekitar $32.64/bulan, n2-standard-2 sekitar $76.28/bulan, n4-highmem-2 (2 vCPU / 16 GB) $116.83/bulan on-demand; Spot jauh lebih murah untuk uji coba (n4-highmem-2 ~$34) |
+| Amazon EC2 | Sejak 12 Februari 2026 nested tersedia di instance biasa, bukan hanya bare metal: `--cpu-options "NestedVirtualization=enabled"` saat launch, atau ubah CPU options saat instance stopped; tanpa biaya tambahan | Hanya keluarga M7i/M8i, C7i/C8i, R7i/R8i/X8i, I7i/I7ie (varian -flex dan -d ikut); Graviton/Arm tidak; ketersediaan tipe berbeda per region | **Jakarta (ap-southeast-3)**, Singapura (ap-southeast-1) | tagihan per detik; di Jakarta m7i.large (2 vCPU / 8 GB) $0.126/jam ≈ $92/bulan, r7i.large (2 vCPU / 16 GB) $0.160/jam ≈ $117/bulan; cek dulu tipe mana yang ada di Jakarta dengan `aws ec2 describe-instance-types --region ap-southeast-3 --filters "Name=processor-info.supported-features,Values=nested-virtualization"` |
+| Oracle Cloud (OCI) | Pakai shape VM Intel, misalnya `VM.Standard3.Flex`; `/dev/kvm` tersedia di dalam VM | Shape AMD dan Ampere (Arm) tidak mendukung nested, jadi Always Free tier tidak bisa dipakai untuk ini | Singapura (ap-singapore-1 / -2); tidak ada Jakarta | $0.04 per OCPU-jam + $0.0015 per GB-jam: 1 OCPU / 12 GB ≈ $42/bulan, 2 OCPU / 16 GB ≈ $76/bulan |
 | Alibaba Cloud ECS | Nested aktif default, **tapi hanya di ECS Bare Metal** (keluarga `ebm`) | ECS VM biasa, termasuk tipe murah yang dijual di region Jakarta, tidak mengekspos vmx/svm | Jakarta (ap-southeast-5), Singapura | harga bare metal, jauh di atas VPS |
 
 ## Perbandingan spek: berapa replica yang muat, dan berapa harganya
@@ -100,17 +100,22 @@ di Ryzen 7 5800H** (8 core / 16 thread, Geekbench 6 satu core sekitar
 
 ```
 RAM per replica = proses + OS Ubuntu + ruang cache
-                = 300 MB + ~400 MB + sisanya  →  1024 MB minimum,
-                                                 1536 MB nyaman,
+                = 300 MB + ~400 MB + sisanya  →  1536 MB batas bawah,
                                                  2048 MB kalau pakai XFCE
 RAM host        = (RAM per replica + ~150 MB overhead QEMU) x jumlah replica
                   + ~1 GB untuk OS host + Nestbox
 ```
 
+Jangan tergoda menurunkan replica ke 1024 MB supaya muat di plan 8 GB:
+setelah kernel, systemd, dan proses 300 MB itu, yang tersisa untuk page
+cache tinggal 200-300 MB, replica mulai swap, dan proses yang tadinya
+memakai 5% CPU jadi menunggu disk. Pengalaman di lapangan sama: **6 GB
+tidak cukup, 8 GB pun tidak cukup** untuk enam replica.
+
 Enam replica headless di 1536 MB berarti `6 x 1686 MB + 1 GB ≈ 11 GB`,
-jadi plan 12 GB pas dan plan 8 GB tidak cukup. Kalau keenamnya memakai
-desktop XFCE, angkanya naik ke sekitar 13,5 GB dan perlu plan 16 GB atau
-lebih.
+jadi **minimum praktisnya 10-12 GB**, dan plan 12 GB adalah ukuran
+terkecil yang dijual di angka itu. Kalau keenamnya memakai desktop XFCE,
+angkanya naik ke sekitar 13,5 GB dan perlu plan 16 GB atau lebih.
 
 **CPU** — perhatikan dulu 5% itu diukur dari mana, karena bedanya 16 kali:
 
@@ -148,6 +153,32 @@ Kesimpulan contoh ini bergantung pada pembacaan tadi, dan bedanya besar:
   atau 8 vCPU yang dijual OVHcloud, dan juga di atas 8 core EPYC Milan.
   Dengan beban seberat itu hanya CPU cepat yang masuk akal: GreenCloud
   Ryzen 9950X 8 core / 16 GB ($80) atau Onidel HF-4 kalau stoknya kembali.
+- Kalau harus cloud besar (server di Jakarta, atau butuh tagihan per
+  jam), ukuran 12-16 GB-nya ada, hanya saja 3-10x lebih mahal daripada
+  VPS dengan RAM sama. Tipe termurah yang mendukung nested per RAM-nya:
+
+  | Cloud | Tipe (nested resmi) | vCPU / RAM | $/bulan on-demand | Spot/preemptible |
+  |---|---|---|---|---|
+  | GCE Jakarta | n4-highmem-2 (Emerald Rapids) | 2 / 16 GB | 116,83 + disk | ~34 ($0,0464/jam) |
+  | GCE Jakarta | n2-highmem-2 (Cascade/Ice Lake) | 2 / 16 GB | 102,90 + disk | ~77 |
+  | GCE Jakarta | n4-standard-4 | 4 / 16 GB | 178,07 + disk | ~52 |
+  | GCE Jakarta | n4-custom-2-12288 (2 vCPU / 12 GB, custom) | 2 / 12 GB | ~105 + disk | — |
+  | AWS Jakarta | r7i.large (Sapphire Rapids) | 2 / 16 GB | ~117 ($0,160/jam) + EBS | tidak tercatat di Jakarta |
+  | AWS Jakarta | m7i-flex.xlarge | 4 / 16 GB | ~174 ($0,239/jam) + EBS | ~25 ($0,034/jam) |
+  | AWS Jakarta | m7i.xlarge | 4 / 16 GB | ~184 ($0,252/jam) + EBS | — |
+  | OCI Singapura | VM.Standard3.Flex 1 OCPU / 12 GB | 2 thread / 12 GB | ~42 + volume | — |
+  | OCI Singapura | VM.Standard3.Flex 2 OCPU / 16 GB | 4 thread / 16 GB | ~76 + volume | — |
+
+  Disk dihitung terpisah: persistent disk GCE dan EBS gp3 sekitar $0,10
+  per GB per bulan di Jakarta, jadi 40 GB menambah ~$4; block volume OCI
+  sekitar $0,0255 per GB. Singapura di GCE sekitar 8% lebih murah
+  daripada Jakarta untuk tipe yang sama, di AWS harganya sama. OCI
+  paling murah di antara cloud besar karena RAM dihargai $0,0015 per
+  GB-jam, tetapi hanya ada Singapura, dan shape Intel-nya wajib (AMD
+  E-series dan Ampere tidak mengekspos KVM). Semua opsi ini cukup untuk
+  pembacaan `top` (CPU-nya tidak jadi soal); untuk pembacaan Task
+  Manager perlu 6-7 vCPU Emerald Rapids, artinya n4-standard-8 (8 vCPU /
+  32 GB, ~$356/bulan) — jauh di atas GreenCloud Ryzen $80.
 
 Cara memastikannya di mesin 5800H: jalankan `top` lalu lihat kolom %CPU
 proses itu (100% = satu core), atau di Task Manager buka tab Details dan
@@ -195,6 +226,9 @@ virtualisasi.
 | GCE Jakarta n2-standard-2 | 76,28 + disk | Cascade/Ice Lake (2019-21) | ~900-1300 | 2 | 8 GB / disk terpisah | 1-2 | 40-76 | ~2,2 |
 | AWS Jakarta m7i.large | ~75-90 + EBS | Sapphire Rapids (2023) | ~1050-1500 | 2 | 8 GB / EBS terpisah | 1-2 | 40-90 | ~2,5 |
 | OCI Singapura VM.Standard3.Flex 1 OCPU | ~38 + volume | Ice Lake (2021) | ~1100 | 2 thread | 8 GB / terpisah | 1 | 38 | 2,2 |
+| GCE Jakarta n4-highmem-2 | 116,83 + disk | Emerald Rapids (2024) | ~2000 | 2 | 16 GB / disk terpisah | 3 | 39 | 1,3 |
+| AWS Jakarta r7i.large | ~117 + EBS | Sapphire Rapids (2023) | ~1050-1500 | 2 | 16 GB / EBS terpisah | 3 | 39 | ~0,8 |
+| OCI Singapura VM.Standard3.Flex 2 OCPU / 16 GB | ~76 + volume | Ice Lake (2021) | ~1100 | 4 thread | 16 GB / terpisah | 3 | 25 | 1,5 |
 
 Angka Geekbench 6 satu core diambil dari uji nyata: OVHcloud VPS-1 2027
 terukur 848 dengan CPU yang dilaporkan sebagai "Intel Core Processor
@@ -315,7 +349,14 @@ replica dipakai bergantian, bukan serentak.
 
 **Peringkat 12-16 — hanya untuk alasan khusus:** server benar-benar di
 Jakarta, atau tagihan per jam untuk uji coba beberapa jam. Untuk dipakai
-24/7 semuanya kalah telak.
+24/7 semuanya kalah telak. Ukuran 12-16 GB-nya bukan tidak ada — GCE
+n4-highmem-2, AWS r7i.large, dan OCI 2 OCPU / 16 GB semuanya memuat 3
+replica default atau 6 replica headless 1536 MB — tetapi $76-117 per
+bulan untuk 2 vCPU, dibanding $12,32 (OVHcloud VPS-3) atau $38,70
+(Onidel HF-4) untuk 6 core dan RAM yang sama. Spot GCE Jakarta
+(n4-highmem-2 ~$34) dan Spot AWS m7i-flex.xlarge (~$25) mendekati harga
+VPS, tetapi bisa dimatikan Google/Amazon kapan saja, jadi cocok untuk
+uji coba, bukan replica yang harus hidup terus.
 
 **Belum bisa dipastikan, tanyakan dulu:** WebHorizon (Ryzen 9700X/9900X
 Singapura, menulis "Nested Virtualization Supported" di penawarannya),
@@ -348,7 +389,10 @@ Untuk server yang benar-benar berada di Jakarta, jawaban yang pasti saat
 ini adalah cloud besar: **Google Compute Engine region asia-southeast2**
 dan **AWS ap-southeast-3**, keduanya dengan nested virtualization resmi
 (lihat tabel di atas). Alibaba Cloud juga ada di Jakarta, tetapi nested-nya
-hanya di bare metal.
+hanya di bare metal. Untuk enam replica headless (butuh 10-12 GB), tipe
+termurahnya n4-highmem-2 di GCE (~$117/bulan) atau r7i.large di AWS
+(~$117/bulan); rinciannya ada di tabel cloud besar pada bagian
+[Menerjemahkan beban](#menerjemahkan-beban-yang-mau-dijalankan-ke-ukuran-vps).
 
 Di kalangan VPS murah, belum ditemukan penyedia di Jakarta atau Malaysia
 yang menyatakan nested virtualization secara eksplisit. Perwira Cloud
@@ -368,6 +412,10 @@ lokal untuk layar replica lewat browser.
 - Urutan lengkap 16 plan ada di [Peringkat akhir](#peringkat-akhir) di
   atas. Tiga teratas: Advin Servers EPYC Genoa $20, Advin $6 untuk satu
   replica, lalu OVHcloud VPS-3 sebagai pilihan yang stoknya selalu ada.
+- RAM tidak bisa dijual berlebih: untuk enam replica headless ambil
+  minimal 12 GB (6 GB dan 8 GB terbukti tidak cukup), untuk enam replica
+  XFCE 16 GB. Di cloud besar ukuran itu ada (GCE n4-highmem-2, AWS
+  r7i.large, OCI 2 OCPU / 16 GB) tetapi $76-117/bulan.
 - Latensi dari Indonesia ke Singapura sekitar 13-30 ms, cukup untuk
   layar replica lewat browser.
 - Sisakan disk: satu replica memakai 20 GB (thin, tumbuh sesuai isi)
@@ -427,10 +475,18 @@ lokal untuk layar replica lewat browser.
   [managing orders / right of withdrawal](https://help.ovhcloud.com/csm/en-gb-billing-managing-ovh-orders?id=kb_article_view&sysparm_article=KB0042881)
 - Google Cloud: [nested virtualization overview](https://docs.cloud.google.com/compute/docs/instances/nested-virtualization/overview),
   [enable nested virtualization](https://docs.cloud.google.com/compute/docs/instances/nested-virtualization/enabling),
-  [tipe mesin dan harga di asia-southeast2](https://gcloud-compute.com/asia-southeast2.html)
+  [tipe mesin dan harga di asia-southeast2](https://gcloud-compute.com/asia-southeast2.html),
+  harga per tipe termasuk Spot: [n4-highmem-2](https://gcloud-compute.com/n4-highmem-2.html),
+  [n4-standard-4](https://gcloud-compute.com/n4-standard-4.html),
+  [n2-highmem-2](https://gcloud-compute.com/n2-highmem-2.html)
 - AWS: [nested virtualization di EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/amazon-ec2-nested-virtualization.html),
-  [region Jakarta](https://aws.amazon.com/blogs/aws/now-open-aws-asia-pacific-jakarta-region)
-- Oracle Cloud: [KVM nested virtualization di OCI](https://blogs.oracle.com/linux/kvm-nested-virtualization-in-oci)
+  [region Jakarta](https://aws.amazon.com/blogs/aws/now-open-aws-asia-pacific-jakarta-region),
+  harga per region (termasuk ap-southeast-3): [m7i.large](https://www.devzero.io/instances/aws/m7i.large),
+  [r7i.large](https://www.devzero.io/instances/aws/r7i.large),
+  [m7i-flex.xlarge](https://www.devzero.io/instances/aws/m7i-flex.xlarge),
+  [m7i.xlarge](https://www.devzero.io/instances/aws/m7i.xlarge)
+- Oracle Cloud: [KVM nested virtualization di OCI](https://blogs.oracle.com/linux/kvm-nested-virtualization-in-oci),
+  [daftar harga (Standard3 $0.04/OCPU-jam, $0.0015/GB-jam)](https://www.oracle.com/cloud/price-list/)
 - Alibaba Cloud: [ECS Bare Metal](https://www.alibabacloud.com/help/en/ecs/user-guide/elastic-bare-metal-server-overview)
 - Hetzner Cloud: [FAQ](https://docs.hetzner.com/cloud/servers/faq/)
 - Hostinger: [Is nested virtualization supported?](https://www.hostinger.com/support/10429687-is-nested-virtualization-supported)
