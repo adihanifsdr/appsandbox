@@ -557,9 +557,11 @@ cmd_ip() {
 }
 
 ssh_run() {
-    # run a command in the replica and return (cmd_ssh execs, for the interactive case)
-    local ip; ip=$(cmd_ip)
-    [ -n "$ip" ] || die "replica has no IP yet (is it running? try again in a moment)"
+    # run a command in the replica and return (cmd_ssh execs, for the interactive case).
+    # No IP yet is a plain failure, not die: cmd_desktop retries this while the
+    # guest boots, and die would exit the whole script on the first attempt.
+    local ip; ip=$(cmd_ip || true)
+    [ -n "$ip" ] || { echo "appsandbox-replica: replica has no IP yet (is it running? try again in a moment)" >&2; return 1; }
     ssh -i "$DIR/id_ed25519" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 "user@$ip" "$@"
 }
