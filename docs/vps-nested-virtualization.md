@@ -21,9 +21,10 @@ Kalau `/dev/kvm` ada dan hitungan flag-nya lebih dari nol, Nestbox bisa
 membuat replica di sana. Kalau salah satunya tidak ada, baris PC di UI
 Nestbox menampilkan "no /dev/kvm" dan tombol "+" tidak akan berhasil.
 
-Data di bawah dikumpulkan 5 September 2026: hasil cek langsung ke server
-yang ada, dan dokumentasi resmi provider (tautan di bagian akhir). Harga
-dan kebijakan bisa berubah; cek ulang sebelum membeli.
+Data di bawah dikumpulkan 5 September 2026 (sapuan pertama) dan 7
+September 2026 (sapuan kedua, 60-an brand lain): hasil cek langsung ke
+server yang ada, dan dokumentasi resmi provider (tautan di bagian
+akhir). Harga dan kebijakan bisa berubah; cek ulang sebelum membeli.
 
 ## Hasil cek langsung
 
@@ -56,6 +57,67 @@ menolak diambil otomatis, jadi tanyakan dulu lewat tiket. **HostHatch**
 pernyataan resmi. **V.PS** (Singapura, Tokyo, Osaka, Qemu/KVM di atas
 Proxmox VE) tidak menyebut nested sama sekali di FAQ-nya. **Bloom.host**
 (Singapura, Ryzen 9 9950X, core dedicated) juga tidak menyebutnya.
+
+## Sapuan kedua, 7 September 2026: brand lain
+
+Empat puluh lebih provider lain diperiksa dengan cara yang sama (situs
+resmi, ToS, halaman order, dan output YABS pengguna; baris
+`VM-x/AMD-V: Enabled` di YABS membuktikan flag vmx/svm sampai ke guest).
+Hasil kerasnya: **tidak satu pun brand baru yang menulis nested "ya"
+secara resmi *dan* punya lokasi Asia**. Yang ada adalah bukti pengguna,
+kebijakan yang tidak melarang, atau lokasi yang tepat tanpa pernyataan.
+Tabel pertama adalah yang layak dicoba, dengan syarat tanya tiket dulu
+atau uji `grep -c vmx /proc/cpuinfo` di masa refund.
+
+| Provider | Bukti nested | Lokasi Asia | Harga yang relevan | Refund | Catatan |
+|---|---|---|---|---|---|
+| **V.PS (xTom)** | Pengguna: YABS Tokyo Performance, EPYC 7763, `VM-x/AMD-V: Enabled`, Geekbench 6 satu core 1653. FAQ 45 butir tidak menyebut nested | Singapura, Tokyo, Osaka, Hong Kong, Sydney | Singapura mahal: Performance 2 core / 2 GB / 30 GB €46,95, 8 core / 16 GB / 240 GB €329,95; Edge Singapura hanya 1 core / 2 GB €15,95. Yang masuk akal **Osaka Edge**: 4 core / 8 GB / 80 GB / 4 TB €35,95; 8 core / 16 GB / 160 GB / 8 TB €65,95. Tokyo Cloud dari €6,95 | 14 hari untuk VPS; sekali per akun; batal kalau trafik >10 GB; kripto, transfer bank, renewal, flash sale tidak refund | KVM di atas Proxmox VE, jaringan xTom AS8888. Halaman cart di balik Cloudflare, stok tidak bisa dicek |
+| **DMIT** | Pengguna: review LAX Pro dan HKG mencatat `VirtReady: Yes (Nested Virtualization)`, EPYC 7402P. **AUP resmi hanya melarang "secondary virtualization for commercial purposes"**, jadi pemakaian sendiri tidak dilarang | Hong Kong (Equinix HK2), Tokyo; **tidak ada Singapura** | HKG.AS3.T1: 4 vCPU / 4 GB / 80 GB / 16 TB $32,90; 4 vCPU / 8 GB / 160 GB / 32 TB $49,90; 8 vCPU / 16 GB / 320 GB / 64 TB $99,90. Tokyo harga sama tapi sering sold out | Penuh ≤3 hari (order baru, trafik ≤30 GB, dipotong fee gateway); pro-rata ≤30 hari; maks 3x per seri | EPYC 7402P Geekbench 6 satu core 851; AUP hanya menjamin 50% CPU. Stok HKG ada, TYO habis |
+| **UpCloud** | **Mati default**: YABS Singapura General Purpose `VM-x/AMD-V: Disabled`. Satu komentar LowEndTalk 2026 menyebut support bisa mengaktifkan nested; belum terverifikasi | Singapura (Equinix SIN1), Sydney | Starter EPYC 7542: 4 vCPU / 8 GB / 40 GB €20; 4 vCPU / 16 GB / 50 GB €28. Premium EPYC 9575F (Zen 5): 4 vCPU / 8 GB / 100 GB €52, 8 vCPU / 16 GB / 200 GB €148. Tagihan per jam, egress gratis | 30 hari money-back untuk pembayaran pertama (maks €500); trial gratis 7 hari | Disk Starter tipis (40-50 GB). Geekbench 6 satu core 1175 (Starter), ~3000 (Premium). Pakai trial untuk tanya dan uji |
+| **LightNode** | Campuran per node: YABS Dubai `Enabled` (Haswell), YABS Hong Kong `Disabled` (CPU "QEMU Virtual"). Materi pemasaran lini **VDS** menulis "run Docker, KVM-based nested virtualization"; halaman VPS tidak menyebutnya | **Jakarta**, Singapura, Kuala Lumpur, Tokyo, Hong Kong, Bangkok, Hanoi, Manila, dan belasan kota Asia lain | 2 vCPU / 4 GB / 50 GB / 2 TB $14,70; 4 vCPU / 8 GB / 50 GB / 3 TB $27,70; 8 vCPU / 16 GB / 50-150 GB / 4 TB $52,70-54,11; tagihan per jam, top-up minimum $10 | ToS: **semua pembayaran tidak dapat dikembalikan** | Satu-satunya VPS murah dengan Jakarta. Port 100 Mbps, disk 50 GB, CPU Xeon lama (Geekbench 6 satu core ~640-1190). Deploy satu jam, cek `/proc/cpuinfo`, hancurkan kalau tidak ada vmx |
+| MassiveGRID | Pengguna: YABS VDS New York dan Frankfurt `VM-x/AMD-V: Enabled`; blog resmi: "hardware virtualization extensions are available to guest VMs". Tapi VPS promo murah mencatat "Nested Virt.? No" | Singapura (Equinix), New York, London, Frankfurt | VDS Starter 2 vCPU / 4 GB / 64 GB $14,99; Growth 4 / 8 GB / 128 GB $29,99; Professional 8 / 16 GB / 256 GB $59,99 | 15 hari money-back | Xeon Gold 6130 / E5-2683 v4 (Geekbench 6 satu core 650-790). Reputasi LowEndTalk buruk: downtime, CPU steal tinggi. Hanya untuk uji coba di masa refund |
+| Virtono | Pengguna: YABS Tokyo dan Milan `VM-x/AMD-V: Enabled`, Xeon Gold 5218. Tidak ada pernyataan resmi | Singapura, Tokyo, Hong Kong | KVM 4G 2 vCPU / 4 GB / 80 GB / 3 TB €20,95; 8G 4 / 8 GB / 160 GB €42,95; 16G 8 / 16 GB / 320 GB €89,95 | ToS: hak pembatalan 14 hari **gugur begitu layanan disediakan** (kecuali web hosting); ada keluhan refund ditolak | Geekbench 6 satu core 940; harga 2-4x pesaing. Hanya menarik saat flash sale |
+
+Punya Singapura, tetapi tidak menyebut nested sama sekali di situs, KB,
+maupun ToS (tanya tiket sebelum bayar; sebagian tanpa refund):
+
+| Provider | Lokasi | CPU dan harga | Refund |
+|---|---|---|---|
+| LayerStack | Singapura, Hong Kong, Tokyo, Taipei | Xeon Scalable / EPYC Genoa; R208 4 vCPU / 12 GiB / 250 GiB $34,49; R308 8 / 16 GiB / 350 GiB $50; PRO300 EPYC 9745 Turin 8 vCPU / 16 GB / 300 GB $64 (tarif kontrak; bulanan lebih mahal). Trafik unlimited | **Tidak ada**; ada trial gratis |
+| HostUS | Singapura, Sydney (Hong Kong menyusul) | KVM-4 4 core / 4 GB / 90 GB / 4 TB $22,95; KVM-8 6 / 8 GB / 150 GB $49,95; KVM-12 8 / 12 GB / 200 GB $69,95; KVM-16 8 / 16 GB / 250 GB $89,95. ToS hanya melarang nested di OpenVZ, jadi di KVM secara kebijakan boleh | 3 hari untuk pelanggan baru, gugur kalau >10% kuota terpakai |
+| Regxa | Singapura, Mumbai, Sydney | Klaim EPYC 9354; x3 2 vCPU / 4 GB / 120 GB $15; x4 4 / 8 GB / 240 GB $30; x5 8 / 16 GB / 350 GB $69,99. Kuota trafik Asia tidak dipublikasikan | Pro-rata ke kredit akun saja |
+| Vodien | Singapura (perusahaan lokal) | Klaim EPYC 9004; NVME 200 4 vCPU / 8 GB / 200 GB / 4 TB S$34,77 (~$27); NVME 300 4 / 12 GB / 300 GB S$49,68 (~$39); NVME 400 6 / 16 GB / 400 GB S$69,54 (~$54). **Port 200 Mbps** | Pro-rata dalam 30 hari pertama |
+| BigCloudy | Singapura | "Intel"; Business 4 vCPU / 6 GB / 100 GB $14,99; Premium 6 / 12 GB / 200 GB $20,99 (harga tahunan) | 30 hari menurut pihak ketiga, tidak terverifikasi |
+| Serverwala | Singapura | 4 vCPU / 4 GB / 100 GB / 500 GB $40; 6 / 6 GB / 150 GB $50 | 7 hari, kredit saja |
+| Evolution Host | Singapura (harga 2x lokasi lain, **port 200 Mbps**) | 4 vCPU / 4 GB / 80 GB €80; 8 / 8 GB / 120 GB €120; 12 / 12 GB / 160 GB €160 di Singapura | Refund jadi saldo akun |
+| ZgoVPS | Hong Kong, Tokyo, Osaka (tidak ada Singapura) | Osaka EPYC 9354P: 3 vCPU / 4 GB / 80 GB $128/tahun; 6 vCPU / 8 GB / 120 GB $198/tahun. Bukti nested hanya di LA. Tidak ada plan 12-16 GB di Asia | ≤3 hari, trafik <10 GB; plan Osaka **tidak bisa refund** |
+| Vmiss | Hong Kong, Tokyo, Osaka, Seoul | Tokyo TRI 4 vCPU / 8 GB / 80 GB CAD 120 (~$88); tier bawah disk 10-20 GB. Bukti nested hanya di LA | tidak ditemukan |
+| Hyonix | Singapura, Tokyo | Hyper-V dan **Windows saja**, tidak cocok untuk guest Linux | 7 hari |
+| Servers.com | Singapura, Hong Kong | Cloud OpenStack/KVM, harga lewat sales | — |
+
+Yang terbukti mengekspos nested tetapi tidak punya lokasi Asia, dicatat
+supaya tidak dicek ulang: **Webdock** (Denmark; resmi "supported on all
+Webdock KVM servers"), **Katapult / Krystal** (Amsterdam, London, New
+York, Phoenix; YABS `Enabled`, EPYC Milan, refund 60 hari), **Terabit**
+(AS; YABS `Enabled`, EPYC 7742, 4 vCPU / 16 GB $14,99), **Servarica**
+(Montreal; resmi "supports nested virtualization" di lini KVM V2/V3,
+tetapi stok 0), **HostEONS** (AS/Eropa; YABS `Enabled` di VDS Ryzen),
+**AlphaVPS** (Eropa/AS; ambigu), **Crunchbits** yang kini bernama Synteq
+HPC (AS/Bulgaria; FAQ lama "enabled by default", dokumen baru tidak
+menyebut), dan **HostKey** (Eropa). WebHorizon tetap satu-satunya offer
+Asia di LowEndTalk yang menulis nested secara eksplisit.
+
+Tambahan untuk daftar "jelas tidak bisa" (semua punya lokasi Asia, itu
+sebabnya sering muncul di pencarian):
+
+| Provider | Alasan |
+|---|---|
+| Netcup | Singapura dibuka Desember 2025, tetapi FAQ resmi: "the SVM flag is therefore disabled on our systems and cannot be activated" |
+| Leaseweb VPS | Singapura dan Tokyo, 6 vCPU / 16 GB hanya €8,99, tetapi YABS Singapura Januari 2025, November 2025, dan Agustus 2026 semuanya `VM-x/AMD-V: Disabled` |
+| BandwagonHost | ToS melarang "Nested virtualization (e.g. running Qemu)"; YABS Hong Kong dan Singapura `Disabled` |
+| RackNerd | ToS melarang nested "unless expressly approved in writing"; KVM VPS-nya pun tidak dijual di Singapura |
+| Hostwinds | Tutorial resmi: "on our VPSs, it cannot be supported"; tidak ada Asia |
+| Alibaba, Tencent, Huawei Cloud | Jakarta ada, nested hanya di bare metal |
 
 ## Cloud besar: nested resmi, dua di antaranya punya region Jakarta
 
@@ -229,6 +291,10 @@ virtualisasi.
 | GCE Jakarta n4-highmem-2 | 116,83 + disk | Emerald Rapids (2024) | ~2000 | 2 | 16 GB / disk terpisah | 3 | 39 | 1,3 |
 | AWS Jakarta r7i.large | ~117 + EBS | Sapphire Rapids (2023) | ~1050-1500 | 2 | 16 GB / EBS terpisah | 3 | 39 | ~0,8 |
 | OCI Singapura VM.Standard3.Flex 2 OCPU / 16 GB | ~76 + volume | Ice Lake (2021) | ~1100 | 4 thread | 16 GB / terpisah | 3 | 25 | 1,5 |
+| V.PS Osaka Edge Orange (nested: bukti pengguna) | €65,95 (~72) | EPYC 7763 Milan (2021) | 1653 (terukur, Tokyo) | 8 | 16 GB / 160 GB, 8 TB | 3 | 24 | 4,4 |
+| V.PS Osaka Edge Yellow (nested: bukti pengguna) | €35,95 (~39) | EPYC 7763 Milan (2021) | 1653 | 4 | 8 GB / 80 GB, 4 TB | 1 (2 kalau RAM 3 GB) | 39 | 6,6 |
+| DMIT HKG.AS3.T1 MEDIUM (nested: bukti pengguna) | 49,90 | EPYC 7402P Rome (2019) | 851 (terukur) | 4 | 8 GB / 160 GB, 32 TB | 1 | 49,90 | 3,4 (AUP hanya menjamin 50% CPU) |
+| UpCloud Singapura Starter 4 / 16 GB (nested: mati default, tanya support) | €28 (~30) | EPYC 7542 Rome (2019) | 1175 (terukur) | 4 | 16 GB / 50 GB | 2 (disk yang membatasi) | 15 | 2,4 |
 
 Angka Geekbench 6 satu core diambil dari uji nyata: OVHcloud VPS-1 2027
 terukur 848 dengan CPU yang dilaporkan sebagai "Intel Core Processor
@@ -347,6 +413,13 @@ promo tahunan punya nilai tertinggi di tabel tapi tidak bisa refund dan
 stoknya musiman. SSD Nodes dan Contabo VDS S hanya masuk akal kalau
 replica dipakai bergantian, bukan serentak.
 
+**Dari sapuan kedua, belum masuk peringkat** karena nested-nya baru bukti
+pengguna, bukan pernyataan resmi: V.PS Osaka Edge Orange (nilai 0,18,
+tetapi Osaka, bukan Singapura, dan refund 14 hari untuk membuktikannya)
+dan DMIT Hong Kong (nilai 0,07). Keduanya kalah dari Onidel HF dan
+OVHcloud VPS-3 di semua sumbu kecuali kuota trafik, jadi hanya berguna
+kalau Onidel dan Advin habis dan Haswell OVHcloud terlalu lambat.
+
 **Peringkat 12-16 — hanya untuk alasan khusus:** server benar-benar di
 Jakarta, atau tagihan per jam untuk uji coba beberapa jam. Untuk dipakai
 24/7 semuanya kalah telak. Ukuran 12-16 GB-nya bukan tidak ada — GCE
@@ -403,6 +476,32 @@ Tanyakan langsung apakah VPS-nya mengekspos vmx/svm ke tamu. Provider
 yang memakai panel SolusVM bisa mengaktifkan nested per VPS kalau
 diminta, jadi menanyakan itu sering membuahkan hasil.
 
+Sapuan 7 September 2026 memeriksa 19 penyedia lokal lagi. Hasilnya sama:
+tidak ada yang menulis nested di halaman produk, KB, atau ToS. Alasannya
+tergambar di satu-satunya diskusi hoster lokal yang ditemukan
+(DiskusiWebHosting): sebagian hypervisor mereka mendukung nested, tetapi
+"sengaja tidak diinfokan agar tidak sembarangan orang pakai", dan VM
+klien yang meminta dipindah ke node yang mendukung. Jadi untuk penyedia
+lokal, tiket dulu, minta bukti `grep -c vmx /proc/cpuinfo`, baru bayar.
+Yang layak ditanya, urut dari yang risikonya paling kecil:
+
+| Provider | Lokasi | CPU | Harga (Rp/bulan, ≈ US$) | Refund | Catatan |
+|---|---|---|---|---|---|
+| **LightNode** | Jakarta (id-jakarta-1) | Xeon Skylake/Haswell | VPS 2 vCPU / 4 GB / 50 GB $14,70; 4 / 8 GB $27,70; 8 / 16 GB $52,70. VDS (CPU dedicated) 2 / 4 GB $40,70; 4 / 8 GB $80,70; 8 / 16 GB $158,70 | Tidak ada, tetapi tagihan per jam | Satu-satunya dengan indikasi resmi (materi VDS) dan bukti YABS `Enabled` di lokasi lain. Deploy VPS satu jam (~$0,02) untuk cek vmx dulu |
+| **Nevacloud** | Jakarta (jkt-2) | Nevalite: Xeon Platinum Skylake; NVMe: EPYC Genoa | Nevalite 8 GB 4c / 100 GB Rp457.600 ($28); 12 GB 4c / 150 GB Rp624.800 ($38); 16 GB 6c / 200 GB Rp853.600 ($52). NVMe Genoa 8 GB Rp598.400 ($37); 16 GB Rp1.126.400 ($69) | Pro-rata ke saldo, saldo tidak bisa dicairkan; tagihan per jam | Kebijakan melarang VPS jadi router/VPN/MikroTik CHR, hati-hati kalau replica dipakai NAT |
+| **DewaVPS / Dewaweb** | Jakarta (NEX), Singapura | High Performance: EPYC Genoa 9654; General: Xeon Gold 5218 | Kalkulator per jam: 1 vCPU Rp30.000, 1 GB Rp30.000, NVMe ~Rp1.250/GB. Perkiraan shared 4 vCPU / 8 GB / 100 GB ≈ Rp485.000 ($30); 8 / 16 GB / 200 GB ≈ Rp970.000 ($60) | Garansi 90 hari **tidak berlaku untuk cloud server**; tagihan per jam | CPU terbaik di daftar lokal |
+| **Jagoan Hosting** | Indonesia (tidak spesifik) | EPYC / Xeon | Galaxy 4c / 4 GB / 100 GB Rp200.000 ($12); Universe 6c / 6 GB / 100 GB Rp300.000 ($18); Multiverse custom sampai 24c / 128 GB | **30 hari uang kembali**, gugur kalau trafik >10 GB atau pernah refund | Uji kvm-ok lalu refund kalau gagal; ToS melarang game server dan streaming |
+| Herza Cloud | Jakarta, Depok, Surabaya, Cibitung (DCI Tier 4); juga SG, KL, HK, Manila | **Xeon E5-2697 v2 (2013)**; Tier 4: E5-2690 v4 | 4 vCPU / 8 GB / 100 GB Rp247.500 ($15); 8 / 12 GB / 150 GB Rp450.000 ($28); 8 / 16 GB / 200 GB Rp637.500 ($39); trafik unlimited | Halaman menyebut 30 hari, syarat tidak ditemukan | Termurah per GB RAM, tetapi single-core Ivy Bridge terlalu lemah untuk desktop di dalam replica |
+| CloudKilat | Jakarta (NEX) | Xeon Gold 6230 | S 4c / 4 GB / 70 GB Rp360.000 ($22); M 8c / 8 GB / 120 GB Rp720.000 ($44); L 16c / 16 GB / 200 GB Rp1.440.000 ($88) | tidak ditemukan | Mahal untuk CPU 2019 |
+| Rumahweb | Bogor, DCI Bekasi | tidak disebut | XL 4c / 8 GB / 160 GB Rp500.000 ($31, promo Rp250.000); X2L 8c / 16 GB / 300 GB Rp937.500 ($58) | **Tidak ada** ("VPS yang sudah aktif tidak dapat dibatalkan") | Disk besar, tetapi tanpa refund dan CPU tidak diketahui |
+| Exabytes Indonesia / Malaysia | Indonesia (tidak spesifik); Malaysia Tier-3 | ID: kontradiktif ("AMD 64 core" dan "Xeon Hexa-Core"); MY: EPYC | ID C2 4c / 8 GB / 200 GB Rp493.000 ($30); M3 4c / 16 GB Rp659.000 ($40). MY C4 4c / 8 GB / 200 GB RM114 ($27); C6 8c / 16 GB / 400 GB RM222 ($53) | **Tidak ada** untuk VPS di keduanya ("biaya terminasi 100%") | Jangan tanpa konfirmasi tertulis |
+| IP ServerOne (Malaysia) | Kuala Lumpur, juga SG, HK | tidak disebut | C4 4c / 15 GB RM161 ($38), disk hanya 10 GiB, SSD tambahan RM0,60/GiB | **Tidak ada** ("non-refund policy"); tagihan per jam | — |
+| Casbay (Malaysia) | Cyberjaya | "Intel" tanpa model | VPS 8 8c / 8 GB / 160 GB $54,59-102,59 tergantung durasi | VPS dikecualikan; 30 hari hanya kalau masalah teknis dari Casbay, potongan $15 | — |
+| Cloudmatika | Jakarta (NTT) | tidak disebut | Linux 8G Rp429.000 ($26) | trial 7 hari | **Lini Linux adalah container Virtuozzo**, bukan VM; tidak bisa KVM sama sekali. Hanya lini Windows yang VM |
+| Datacomm DCloud | Jabodetabek | tidak disebut | GP4C8G 4c / 8 GB / 50 GB Rp920.000 ($56); GP8C16G Rp1.840.000 ($113) | tidak ditemukan | Mahal, disk kecil |
+| Wowrack, Indonesian Cloud, Lintasarta Cloudeka, Telkomsigma Flou | Jakarta/Surabaya | — | Harga lewat sales atau kalkulator; hypervisor tidak disebut | — | Enterprise, bukan beli-coba |
+| Tencent Cloud CVM, Huawei Cloud ECS | Jakarta | — | — | — | **Resmi melarang**: Tencent "Virtualized software cannot be installed or re-virtualized"; Huawei "Do not install virtualization software on ECSs for nested virtualization" |
+
 Alternatif yang sering sudah cukup: GreenCloudVPS Singapura DC2 terukur
 13,68 ms dari Jakarta pada review di atas, praktis sama dengan server
 lokal untuk layar replica lewat browser.
@@ -416,6 +515,11 @@ lokal untuk layar replica lewat browser.
   minimal 12 GB (6 GB dan 8 GB terbukti tidak cukup), untuk enam replica
   XFCE 16 GB. Di cloud besar ukuran itu ada (GCE n4-highmem-2, AWS
   r7i.large, OCI 2 OCPU / 16 GB) tetapi $76-117/bulan.
+- Sapuan brand lain (7 September 2026, 60-an provider) tidak menemukan
+  pesaing baru yang nested-nya resmi dan berlokasi di Asia. Cadangan
+  kalau Onidel dan Advin habis: V.PS Osaka Edge (EPYC 7763, bukti YABS,
+  refund 14 hari) dan DMIT Hong Kong (AUP hanya melarang komersial,
+  refund 3 hari). Untuk Jakarta, uji LightNode per jam dulu.
 - Latensi dari Indonesia ke Singapura sekitar 13-30 ms, cukup untuk
   layar replica lewat browser.
 - Sisakan disk: satu replica memakai 20 GB (thin, tumbuh sesuai isi)
@@ -499,3 +603,54 @@ lokal untuk layar replica lewat browser.
 - WebHorizon: [virtual servers](https://webhorizon.net/virtual-server.html);
   HostHatch: [diskusi nested di LowEndTalk](https://lowendtalk.com/discussion/182484/how-good-is-nested-virt-on-the-providers-here)
 - SolusVM: [enable nested virtualization](https://support.solusvm.com/hc/en-us/articles/13267974631447-How-to-enable-the-Nested-virtualization-for-KVM-VPS-in-SolusVM)
+- Sapuan kedua, internasional: V.PS [plan per kota](https://v.ps/vps/),
+  [Singapura](https://v.ps/locations/singapore/),
+  [Edge KVM](https://v.ps/products/edge-kvm-vps/),
+  [YABS Tokyo Performance dengan VM-x Enabled](https://vps.dance/xtom-tyo-perf.html);
+  DMIT [harga](https://www.dmit.io/pages/pricing), [AUP](https://www.dmit.io/pages/aup),
+  [ToS refund](https://www.dmit.io/pages/tos),
+  [review VirtReady Yes](https://www.daniao.org/11004.html);
+  UpCloud [harga](https://upcloud.com/pricing/),
+  [YABS Singapura VM-x Disabled](https://www.letshosting.com/13669.html),
+  [komentar LowEndTalk soal nested via support](https://lowendtalk.com/discussion/141719/list-of-vps-providers-with-nested-kvm-and-hourly-pricing);
+  LightNode [harga](https://go.lightnode.com/), [ToS](https://www.lightnode.com/en-US/termsService),
+  [YABS Dubai Enabled](https://www.vpsbenchmarks.com/yabs/lightnode_com-1c-2gb-906e76),
+  [VDS vs VPS yang menyebut nested](https://go.lightnode.com/tech/vds-vs-vps);
+  MassiveGRID [VDS](https://massivegrid.com/vds/), [Windows VDS soal nested](https://massivegrid.com/windows-vds/),
+  [review LowEndTalk](https://lowendtalk.com/discussion/198672/a-quick-review-benchmark-of-massivegrid-promo-vps);
+  Virtono [Cloud VPS](https://www.virtono.com/cloud-vps/), [ToS](https://www.virtono.com/terms-of-service.php),
+  [YABS Tokyo](https://www.letshosting.com/12896.html);
+  LayerStack [harga](https://www.layerstack.com/en/general-cloud-server), [ToS](https://www.layerstack.com/docs/legal/TOS.php);
+  HostUS [KVM](https://hostus.us/kvm-vps.php), [ToS](https://hostus.us/terms-and-conditions.php);
+  Regxa [KVM](https://regxa.com/kvm-vps), [refund](https://regxa.com/legal/refund-policy);
+  Vodien [Linux VPS](https://www.vodien.com/linux-vps-hosting/);
+  ZgoVPS [ToS](https://zgovps.com/terms-of-service/), [hardware](https://zgovps.com/data-center-hardware/);
+  Netcup [FAQ SVM disabled](https://netcup.com/en/helpcenter/faq),
+  [Singapura dibuka](https://lowendtalk.com/discussion/212942/netcup-launches-singapore-location);
+  Leaseweb [YABS Singapura Disabled 2026](https://www.vpsbenchmarks.com/yabs/leaseweb-6c-16gb-20260831-d59511),
+  [thread Singapura](https://lowendtalk.com/discussion/202576/leaseweb-singapore-vps-amd-epyc-25tb-bandwidth-10gbit);
+  BandwagonHost [ToS](https://bandwagonhost.com/terms-of-service.php);
+  RackNerd [ToS](https://www.racknerd.com/terms-of-service);
+  Hostwinds [tutorial virtualisasi](https://www.hostwinds.com/tutorials/virtualization-on-hostwinds-servers-dedicated);
+  Webdock [FAQ nested](https://docs.webdock.io/faq/is-nested-virtualization-supported);
+  Katapult [YABS London](https://www.letshosting.com/12254.html), [harga](https://krystalhosting.com/cloud/pricing);
+  Terabit [YABS AMD-V Enabled](https://lowendtalk.com/discussion/205553/transfer-terabit-silvercreek-8-8-88-vps);
+  Servarica [plan KVM Slim yang menyebut nested](https://servarica.com/plan/613/);
+  diskusi [seberapa umum nested di VPS](https://lowendtalk.com/discussion/207763/how-common-is-nested-virtualization-in-vps-plans-should-i-expect-proxmox-ve-to-work-on-a-vps)
+- Sapuan kedua, Indonesia dan Malaysia:
+  [DiskusiWebHosting: nested sengaja tidak diumumkan](https://www.diskusiwebhosting.com/threads/nested-virtualization-di-hypervisor.24552/);
+  LightNode [Jakarta VPS](https://go.lightnode.com/indonesia-vps), [Jakarta VDS](https://go.lightnode.com/jakarta-vds);
+  Nevacloud [harga](https://nevacloud.com/harga/), [kebijakan](https://nevacloud.com/kebijakan-layanan/);
+  DewaVPS [harga](https://www.dewavps.com/cloud-vps-server-murah-indonesia/), [SLA](https://www.dewaweb.com/service-level-agreement);
+  Jagoan Hosting [VPS](https://www.jagoanhosting.com/vps-indonesia/), [aturan layanan](https://www.jagoanhosting.com/aturan-layanan/);
+  Herza [VPS murah](https://herza.id/vps-murah/);
+  CloudKilat [Kilat VM](https://vm.cloudkilat.com/);
+  Rumahweb [VPS](https://www.rumahweb.com/vps-murah/);
+  Exabytes [Indonesia](https://www.exabytes.co.id/server/vps-linux-ssd), [Malaysia](https://www.exabytes.my/servers/nvme-vps),
+  [money-back Malaysia](https://www.exabytes.my/money-back-guarantee);
+  IP ServerOne [harga](https://www.ipserverone.com/pricing/), [syarat](https://www.ipserverone.com/terms-and-conditions/);
+  Casbay [plan](https://www.casbay.com/vps-hosting-malaysia/plans), [ToS](https://www.casbay.com.my/terms);
+  Cloudmatika [store](https://cloudmatika.com/store/index.php?NAME_PATH=VPS_LINUX);
+  Datacomm [harga](http://dcloud.co.id/en/pricing.html);
+  Tencent Cloud [batasan CVM](https://www.tencentcloud.com/document/product/213/15379);
+  Huawei Cloud [batasan ECS](https://support.huaweicloud.com/intl/en-us/productdesc-ecs/ecs_01_0004.html)
