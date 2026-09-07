@@ -187,6 +187,15 @@ function vncSendCad() {
     var r = grid ? (focusedTile && focusedTile.rfb) : rfb;
     if (r) r.sendCtrlAltDel();
 }
+function vncSendAltTab() {
+    var r = grid ? (focusedTile && focusedTile.rfb) : rfb;
+    if (!r) return;
+    /* Alt down, Tab down and up, Alt up: the guest's WM switches to its next window */
+    r.sendKey(0xFFE9, 'AltLeft', true);
+    r.sendKey(0xFF09, 'Tab', true);
+    r.sendKey(0xFF09, 'Tab', false);
+    r.sendKey(0xFFE9, 'AltLeft', false);
+}
 function vncToggleScale() {
     scaled = !scaled;
     if (rfb) rfb.scaleViewport = scaled;

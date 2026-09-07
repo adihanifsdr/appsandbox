@@ -27,12 +27,12 @@
     <span id="vnc-status" class="mono"></span>
     <span class="vnc-spacer"></span>
     <button onclick="vncSendCad()" title="Send Ctrl+Alt+Del to the guest (in the grid: to the highlighted tile)">Ctrl+Alt+Del</button>
+    <button onclick="vncSendAltTab()" title="Send Alt+Tab to the guest (in the grid: to the highlighted tile): its window manager switches to the next window, e.g. between the game and the bot panel">Alt+Tab</button>
     <button onclick="vncToggleScale()" id="vnc-scale-btn" title="Fit the screen to this window or show it 1:1">Fit</button>
     <button onclick="vncReconnect()" title="Connect again (after the replica restarted, or when the connection was lost)">Reconnect</button>
     <button onclick="vncExternal()" id="vnc-external-btn" title="Open the same screen in an installed VNC viewer (TigerVNC, RealVNC, ...)">External viewer</button>
     <button onclick="vncReplica('Restart')" id="vnc-restart-btn" title="Restart the nested replica (stop + start)">Restart replica</button>
     <button class="danger" onclick="vncReplica('Stop')" id="vnc-stop-btn" title="Shut the nested replica down">Stop replica</button>
-    <button class="primary" onclick="vncClose()">Close</button>
 </div>
 <div id="vnc-screen">
     <div class="screen-target" id="vnc-target"></div>
