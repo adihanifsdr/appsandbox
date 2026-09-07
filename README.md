@@ -37,6 +37,13 @@ macOS support are his work and stay MIT-licensed under his copyright (see
 |---|---|
 | ![New sandbox](docs/screenshots/nestbox-new-sandbox.png) | ![Light theme](docs/screenshots/nestbox-light.png) |
 
+| Adding a seat | While the host works |
+|---|---|
+| ![Add a seat](docs/screenshots/nestbox-add-seat.png) | ![Pending states](docs/screenshots/nestbox-pending.png) |
+
+The structure of the panel (what is a row, what the Add dialog asks, every waiting state) is
+written down in [docs/information-architecture.md](docs/information-architecture.md).
+
 Every running replica of a sandbox in one window, from the grid button on the first replica's row:
 
 ![Replica grid](docs/screenshots/nestbox-grid.png)

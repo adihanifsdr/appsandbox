@@ -65,7 +65,9 @@ DEMO_JS = r"""
               { name: 'steam-2', state: 'running', vnc: 5901, desktop: true,
                 cpus: 2, ram: 4096, disk: 32 },
               { name: 'build-3', state: 'stopped', vnc: 5902, desktop: false,
-                cpus: 2, ram: 2048, disk: 20 }
+                cpus: 2, ram: 2048, disk: 20 },
+              { name: 'seat', state: 'running', vnc: 5903, desktop: true,
+                kind: 'seat', res: '1600x900', steamApp: '2081880' }
           ]) },
 
         { name: 'win11-test', osType: 'Windows', running: true, agentOnline: true,
@@ -94,7 +96,8 @@ DEMO_JS = r"""
         'SSH proxy listening on 127.0.0.1:35413 for "myappsandbox".',
         '[myappsandbox] VNC server listening on guest port 5900.',
         '[myappsandbox] Nested replica "replica": running.',
-        '[myappsandbox] Nested replica "steam-2": running.'
+        '[myappsandbox] Nested replica "steam-2": running.',
+        '[myappsandbox] Steam seat "seat": running.'
     ];
 
     function pose() {
@@ -107,6 +110,21 @@ DEMO_JS = r"""
         var logSection = document.getElementById('log-section');
         if (logSection) logSection.classList.toggle('collapsed', shot === 'light');
 
+        if (shot === 'add-seat') {
+            openAddModal(1);
+            document.getElementById('add-kind-seat').checked = true;
+            applyAddKind();
+            document.getElementById('add-seat-name').focus();
+        }
+        if (shot === 'pending') {
+            /* what the list looks like while the host works: a seat being
+               created, a replica restarting, a sandbox shutting down */
+            setPending('create:rep:myappsandbox/seat2', { label: 'Creating', name: 'seat2', kind: 'seat', ttl: 600000 });
+            pending['create:rep:myappsandbox/seat2'].since -= 47000;
+            pendRep('myappsandbox', 'steam-2', 'Restarting', 600000, null);
+            pendVm('kathana-lab', 'Shutting down', 600000, null);
+            renderVmTable();
+        }
         if (shot === 'new-sandbox') {
             openCreateModal();
             /* Linux, so the fields that make Nestbox what it is are on screen:
@@ -228,6 +246,8 @@ SHOTS = [
     ("nestbox-main.png", "index.html?shot=main", WIDTH, HEIGHT),
     ("nestbox-light.png", "index.html?shot=light", WIDTH, HEIGHT),
     ("nestbox-new-sandbox.png", "index.html?shot=new-sandbox", WIDTH, HEIGHT),
+    ("nestbox-add-seat.png", "index.html?shot=add-seat", WIDTH, HEIGHT),
+    ("nestbox-pending.png", "index.html?shot=pending", WIDTH, HEIGHT),
     ("nestbox-grid.png",
      "viewer.html?grid=1&vm=1&vmName=myappsandbox"
      "&tiles=replica:5901:5900,steam-2:5902:5900,build-3:5903:5900,ci-runner:5904:5900",

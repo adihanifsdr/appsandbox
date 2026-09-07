@@ -34,7 +34,11 @@
     <button class="danger" onclick="vncReplica('Stop')" id="vnc-stop-btn" title="Shut the nested replica down">Stop replica</button>
     <button class="primary" onclick="vncClose()">Close</button>
 </div>
-<div id="vnc-screen"></div>
+<div id="vnc-screen">
+    <div class="screen-target" id="vnc-target"></div>
+    <!-- connecting / lost / stopping: an overlay over the console -->
+    <div class="screen-state" id="vnc-state" hidden></div>
+</div>
 <div id="vnc-grid" hidden></div>
 
 <script src="viewer.js"></script>

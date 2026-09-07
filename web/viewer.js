@@ -68,20 +68,44 @@ function sendCmd(action, data) {
 }
 function setStatus(s) { document.getElementById('vnc-status').textContent = s; }
 
+/* The overlay over a console: a spinner while connecting, the reason and a
+   Reconnect button when the link is gone, a note while the host restarts
+   the replica or seat. `null` hides it. */
+function showState(el, state) {
+    if (!el) return;
+    if (!state) { el.hidden = true; el.innerHTML = ''; return; }
+    el.innerHTML = '';
+    if (state.spin) { var sp = document.createElement('span'); sp.className = 'spinner'; el.appendChild(sp); }
+    if (state.error) { var lamp = document.createElement('span'); lamp.className = 'lamp-err'; el.appendChild(lamp); }
+    var t = document.createElement('div'); t.className = 'state-title'; t.textContent = state.title; el.appendChild(t);
+    if (state.text) { var x = document.createElement('div'); x.className = 'state-text'; x.textContent = state.text; el.appendChild(x); }
+    if (state.action) {
+        var b = document.createElement('button');
+        b.textContent = state.action;
+        b.onclick = function(e) { e.stopPropagation(); state.onAction(); };
+        el.appendChild(b);
+    }
+    el.hidden = false;
+}
+
 /* One RFB into `container` on bridge port `port`; `onStatus` gets the state
-   text. Returns a promise for the RFB. */
-function makeRfb(container, port, onStatus, lostText) {
+   text, `stateEl` the overlay. Returns a promise for the RFB. */
+function makeRfb(container, port, onStatus, lostText, stateEl, retry, what) {
     container.innerHTML = '';
     onStatus('connecting…');
+    showState(stateEl, { spin: true, title: 'Connecting to ' + what + '…' });
     return window.NoVNC.then(function(RFB) {
         var r = new RFB(container, wsUrl(port), { wsProtocols: ['binary'] });
         r.scaleViewport = scaled;
         r.resizeSession = false;
         r.background = '#000';
-        r.addEventListener('connect', function() { onStatus('connected'); });
+        r.addEventListener('connect', function() { onStatus('connected', r); showState(stateEl, null); });
         r.addEventListener('disconnect', function(e) {
             var clean = e && e.detail && e.detail.clean;
             onStatus(clean ? 'disconnected' : lostText, r);
+            showState(stateEl, { error: true, title: clean ? 'Disconnected' : 'Connection lost',
+                                 text: clean ? 'The console closed the connection.' : lostText,
+                                 action: 'Reconnect', onAction: retry });
         });
         r.addEventListener('credentialsrequired', function() {
             var pw = prompt('VNC password');
@@ -94,23 +118,32 @@ function makeRfb(container, port, onStatus, lostText) {
 /* ---- single console ---- */
 function connect() {
     if (rfb) { try { rfb.disconnect(); } catch (e) {} rfb = null; }
-    makeRfb(document.getElementById('vnc-screen'), wsPort, function(s, from) {
+    var stateEl = document.getElementById('vnc-state');
+    makeRfb(document.getElementById('vnc-target'), wsPort, function(s, from) {
         if (from && rfb && from !== rfb) return;   /* superseded by a reconnect */
         setStatus(s);
-    }, nested ? 'connection lost (is the replica running?)' : 'connection lost')
+    }, nested ? 'Is the ' + kind + ' running? Start it from the Nestbox window, then reconnect.' : 'The guest\'s VNC server went away.',
+    stateEl, connect, nested ? replicaName : vmName)
     .then(function(r) { rfb = r; r.focus(); })
-    .catch(function(e) { setStatus('viewer failed to load: ' + e); });
+    .catch(function(e) {
+        setStatus('viewer failed to load: ' + e);
+        showState(stateEl, { error: true, title: 'The viewer failed to load', text: String(e), action: 'Try again', onAction: connect });
+    });
 }
 
 /* ---- grid ---- */
 function tileConnect(t) {
     if (t.rfb) { try { t.rfb.disconnect(); } catch (e) {} t.rfb = null; }
-    makeRfb(t.el.querySelector('.tile-screen'), t.ws, function(s, from) {
+    var stateEl = t.el.querySelector('.screen-state');
+    makeRfb(t.el.querySelector('.screen-target'), t.ws, function(s, from) {
         if (from && t.rfb && from !== t.rfb) return;
         t.el.querySelector('.tile-status').textContent = s;
-    }, 'connection lost')
+    }, 'Is the ' + t.kind + ' still running?', stateEl, function() { tileConnect(t); }, t.name)
     .then(function(r) { t.rfb = r; })
-    .catch(function(e) { t.el.querySelector('.tile-status').textContent = 'viewer failed to load: ' + e; });
+    .catch(function(e) {
+        t.el.querySelector('.tile-status').textContent = 'viewer failed to load: ' + e;
+        showState(stateEl, { error: true, title: 'The viewer failed to load', text: String(e), action: 'Try again', onAction: function() { tileConnect(t); } });
+    });
 }
 function focusTile(t) {
     focusedTile = t;
@@ -129,7 +162,7 @@ function buildGrid() {
                        '<span class="tile-name"></span><span class="tile-status mono"></span><span class="vnc-spacer"></span>' +
                        '<button class="t-own" title="Open this ' + t.kind + ' in its own window">Own window</button>' +
                        '<button class="t-reconnect" title="Connect this tile again">Reconnect</button></div>' +
-                       '<div class="tile-screen"></div>';
+                       '<div class="tile-screen"><div class="screen-target"></div><div class="screen-state" hidden></div></div>';
         el.querySelector('.tile-name').textContent = t.name;
         el.querySelector('.t-own').onclick = function(e) { e.stopPropagation(); sendCmd('vncOpen', { vmIndex: vmIndex, port: t.port, name: t.name, kind: t.kind }); };
         el.querySelector('.t-reconnect').onclick = function(e) { e.stopPropagation(); tileConnect(t); };
@@ -167,6 +200,9 @@ function vncReplica(what) {   /* 'Stop' | 'Restart' -> replicaStop / seatRestart
     sendCmd(kind + what, { vmIndex: vmIndex, name: replicaName });
     setStatus(what === 'Stop' ? 'stopping the ' + kind + '…'
                               : 'restarting the ' + kind + '… (Reconnect once it is back up)');
+    showState(document.getElementById('vnc-state'), what === 'Stop'
+        ? { spin: true, title: 'Stopping ' + replicaName + '…', text: 'The ' + kind + ' is shutting down; this window can be closed.', action: 'Close', onAction: vncClose }
+        : { spin: true, title: 'Restarting ' + replicaName + '…', text: 'Reconnect once the ' + kind + ' is back up (a seat in seconds, a replica in about a minute).', action: 'Reconnect', onAction: connect });
 }
 function vncClose() {
     if (rfb) { try { rfb.disconnect(); } catch (e) {} rfb = null; }

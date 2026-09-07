@@ -36,6 +36,9 @@
   <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
   <symbol id="i-restart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></symbol>
   <symbol id="i-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 2.5 20h19L12 3Z"/><path d="M12 10v4M12 17.5v.5"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 12 4l9 4.5v8L12 21l-9-4.5v-8Z"/><path d="M3 8.5 12 13l9-4.5M12 13v8"/></symbol>
   <symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
 </svg>
 
@@ -52,6 +55,9 @@
         <button class="icon" id="btn-theme" onclick="toggleTheme()" title="Switch theme"><svg class="ic" id="theme-icon"><use href="#i-sun"/></svg></button>
     </div>
 </header>
+<!-- Linux host only: the page talks to nestbox over a WebSocket; while that
+     socket is down nothing on the page is live, so say so. -->
+<div id="conn-banner" class="conn-banner" hidden><span class="spinner"></span><span id="conn-text">Reconnecting to nestbox…</span></div>
 
 <main>
 <!-- Virtual Machines -->
@@ -66,23 +72,21 @@
                 <th>Name</th>
                 <th>OS</th>
                 <th>Status</th>
-                <th>Agent</th>
                 <th class="num">CPU</th>
                 <th class="num">RAM</th>
-                <th class="num">HDD</th>
+                <th class="num">Disk</th>
                 <th>GPU</th>
                 <th>Network</th>
-                <th class="win-only">Snapshot</th>
-                <th class="icon-col" title="Start"><svg class="ic"><use href="#i-play"/></svg></th>
-                <th class="icon-col" title="Display"><svg class="ic"><use href="#i-monitor"/></svg></th>
-                <th class="icon-col" title="SSH"><span class="mono">&gt;_</span></th>
-                <th class="icon-col" title="Nested replica (appsandbox-replica inside the guest): start it, then open its screen here"><svg class="ic"><use href="#i-nest"/></svg></th>
-                <th class="icon-col" title="VM identity"><svg class="ic"><use href="#i-id"/></svg></th>
-                <th class="icon-col" title="Shut down"><svg class="ic"><use href="#i-power"/></svg></th>
-                <th class="icon-col" title="Force stop"><svg class="ic"><use href="#i-x"/></svg></th>
-                <th class="icon-col" title="Delete"><svg class="ic"><use href="#i-trash"/></svg></th>
-                <th class="icon-col" title="Edit"><svg class="ic"><use href="#i-pencil"/></svg></th>
+                <th class="snap-col">Snapshot</th>
+                <th class="actions-col">Actions</th>
             </tr></thead>
+            <!-- Until the host's first state message the list is unknown:
+                 three placeholder rows instead of an empty box. -->
+            <tbody id="vm-skeleton" class="skeleton" aria-hidden="true">
+                <tr><td><span class="sk sk-w2"></span></td><td><span class="sk sk-w1"></span></td><td><span class="sk sk-w2"></span></td><td class="num"><span class="sk sk-w0"></span></td><td class="num"><span class="sk sk-w1"></span></td><td class="num"><span class="sk sk-w1"></span></td><td><span class="sk sk-w2"></span></td><td><span class="sk sk-w1"></span></td><td class="snap-col"><span class="sk sk-w2"></span></td><td class="actions-col"><span class="sk sk-w3"></span></td></tr>
+                <tr><td><span class="sk sk-w2"></span></td><td><span class="sk sk-w1"></span></td><td><span class="sk sk-w2"></span></td><td class="num"><span class="sk sk-w0"></span></td><td class="num"><span class="sk sk-w1"></span></td><td class="num"><span class="sk sk-w1"></span></td><td><span class="sk sk-w2"></span></td><td><span class="sk sk-w1"></span></td><td class="snap-col"><span class="sk sk-w2"></span></td><td class="actions-col"><span class="sk sk-w3"></span></td></tr>
+                <tr><td><span class="sk sk-w2"></span></td><td><span class="sk sk-w1"></span></td><td><span class="sk sk-w2"></span></td><td class="num"><span class="sk sk-w0"></span></td><td class="num"><span class="sk sk-w1"></span></td><td class="num"><span class="sk sk-w1"></span></td><td><span class="sk sk-w2"></span></td><td><span class="sk sk-w1"></span></td><td class="snap-col"><span class="sk sk-w2"></span></td><td class="actions-col"><span class="sk sk-w3"></span></td></tr>
+            </tbody>
         </table>
     </div>
 </section>
@@ -245,6 +249,98 @@
 
 <!-- Screens (the nested replica's console, the guest's VNC server) open in
      their own windows: web/viewer.html, one WebView2 each. -->
+
+<!-- Add a nested replica or a Steam seat to a sandbox (or to this PC).
+     Two different things, so two different forms: the kind is picked first
+     and only that kind's fields are shown - a seat has no size. -->
+<div class="modal-overlay" id="add-overlay">
+    <div class="modal wide add-modal">
+        <span class="eyebrow" id="add-eyebrow">add to sandbox</span>
+        <h3 id="add-title">Add to myappsandbox</h3>
+        <div class="kind-picker" role="radiogroup" aria-label="What to add">
+            <label class="kind-card" for="add-kind-replica">
+                <input type="radio" name="add-kind" id="add-kind-replica" value="replica" checked onchange="applyAddKind()">
+                <span class="kind-head"><svg class="ic"><use href="#i-nest"/></svg><span class="kind-name">Nested replica</span></span>
+                <span class="kind-desc">A KVM guest with a machine identity of its own: DMI, disks, ACPI and CPUID from the profile.</span>
+                <span class="kind-meta mono" id="add-replica-meta">10–20 min · reserves cores, RAM and disk · looks like another PC</span>
+            </label>
+            <label class="kind-card" for="add-kind-seat">
+                <input type="radio" name="add-kind" id="add-kind-seat" value="seat" onchange="applyAddKind()">
+                <span class="kind-head"><svg class="ic"><use href="#i-user"/></svg><span class="kind-name">Steam seat</span></span>
+                <span class="kind-desc">A Linux user with an Xvnc display, XFCE and Steam at login. No VM, nothing reserved.</span>
+                <span class="kind-meta mono" id="add-seat-meta">seconds · uses only what its programs take · shows this machine's identity</span>
+            </label>
+        </div>
+
+        <!-- replica form -->
+        <div class="form-grid add-form" id="add-form-replica">
+            <label for="add-rep-name">Name</label>
+            <div class="form-row">
+                <input type="text" id="add-rep-name" class="input-md" autocorrect="off" autocapitalize="off" spellcheck="false">
+                <span class="field-warn" id="add-rep-warn"></span>
+            </div>
+            <label for="add-rep-cpus">Cores</label>
+            <div class="form-row">
+                <input type="number" id="add-rep-cpus" class="input-sm" min="1">
+                <span class="host-info" id="add-rep-cpus-info"></span>
+            </div>
+            <label for="add-rep-ram">Memory</label>
+            <div class="form-row">
+                <input type="number" id="add-rep-ram" class="input-sm" min="512" step="256"><span class="unit-label">MB</span>
+                <span class="host-info" id="add-rep-ram-info"></span>
+            </div>
+            <label for="add-rep-disk">Disk</label>
+            <div class="form-row">
+                <input type="number" id="add-rep-disk" class="input-sm" min="5" max="2048" value="20"><span class="unit-label">GB</span>
+                <span class="host-info">grows only; changed later from the row</span>
+            </div>
+            <label id="add-rep-patch-label" for="add-rep-patch">QEMU</label>
+            <div class="form-row checks" id="add-rep-patch-row">
+                <label class="check" title="Build QEMU 8.2.2 with the identity patches first (~10 min, once). Without it the ACPI / SMBIOS / drive / CPUID strings of the profile are ignored."><input type="checkbox" id="add-rep-patch"> Build the identity-patched QEMU first (~10 min, once)</label>
+            </div>
+            <label></label>
+            <p class="form-note" id="add-rep-note"></p>
+        </div>
+
+        <!-- seat form -->
+        <div class="form-grid add-form" id="add-form-seat" hidden>
+            <label for="add-seat-name">User name</label>
+            <div class="form-row">
+                <input type="text" id="add-seat-name" class="input-md" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="seat2">
+                <span class="field-warn" id="add-seat-warn"></span>
+            </div>
+            <label for="add-seat-res">Screen</label>
+            <div class="form-row">
+                <select id="add-seat-res">
+                    <option value="1280x720">1280 × 720</option>
+                    <option value="1600x900" selected>1600 × 900</option>
+                    <option value="1920x1080">1920 × 1080</option>
+                </select>
+                <span class="host-info">the size of the seat's Xvnc display</span>
+            </div>
+            <label for="add-seat-app" class="seat-host-only">Steam game</label>
+            <div class="form-row seat-host-only">
+                <input type="text" id="add-seat-app" class="input-md" placeholder="app id, e.g. 2081880" inputmode="numeric" autocorrect="off" spellcheck="false">
+                <span class="host-info">opened at login; empty = Steam only</span>
+            </div>
+            <label class="seat-host-only"></label>
+            <div class="form-row checks seat-host-only">
+                <label class="check" title="Take the game's files from this PC's Steam library (snap or apt Steam) instead of downloading them again"><input type="checkbox" id="add-seat-copy" checked> Copy the game from this PC's Steam library</label>
+            </div>
+            <label for="add-seat-auto" class="seat-host-only">Also start</label>
+            <div class="form-row seat-host-only">
+                <input type="text" id="add-seat-auto" placeholder="/usr/local/bin/auto-kathana (optional)" autocorrect="off" spellcheck="false">
+            </div>
+            <label></label>
+            <p class="form-note" id="add-seat-note"></p>
+        </div>
+
+        <div class="modal-buttons">
+            <button onclick="closeAddModal()">Cancel</button>
+            <button id="btn-add" class="primary" onclick="onAddConfirm()">Create replica</button>
+        </div>
+    </div>
+</div>
 
 <!-- Confirm modal -->
 <div class="modal-overlay" id="modal-overlay">

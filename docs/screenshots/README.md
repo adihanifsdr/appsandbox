@@ -5,9 +5,11 @@
 | `nestbox-main.png` | The sandbox list, dark theme: four sandboxes, nested replicas as rows under theirs, the log. |
 | `nestbox-light.png` | The same list in the light theme, log collapsed. |
 | `nestbox-new-sandbox.png` | New Sandbox on a Linux guest: the nested-replica option and the identity profile. |
+| `nestbox-add-seat.png` | The Add dialog on its seat side: the kind picked first, only the seat's fields shown. |
+| `nestbox-pending.png` | The list while the host works: a seat being created, a replica restarting, a sandbox shutting down. |
 | `nestbox-grid.png` | The viewer in grid mode — every running replica of a sandbox tiled in one window. |
 
-All four are rendered by `python tools/brand/make-screenshots.py`, which loads the real
+All of them are rendered by `python tools/brand/make-screenshots.py`, which loads the real
 pages from `web/` in headless Edge and feeds them the `fullState` message the native host
 would send. The interface in the images is therefore the interface that ships — the CSS,
 the markup and `app.js` are the real ones, so a screenshot cannot drift from the UI the

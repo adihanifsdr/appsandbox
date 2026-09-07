@@ -13,6 +13,105 @@ let lastHostInfo = null;
 let rowCache = {};          /* vm.name -> <tr> — persistent rows so the status spinner doesn't reset on every update */
 let rowSigCache = {};       /* vm.name -> last render signature; skip rebuild when unchanged */
 
+let firstStateSeen = false;   /* the host's first state message: drops the skeleton rows */
+
+/* ---- Pending: what the page is waiting on ----
+   Every command goes to the host and comes back as a state change some time
+   later - a Start, seconds; a seat create, a minute; a replica create,
+   twenty. Until then the row has to say what is happening. An entry is
+   keyed by what it is about ('vm:<name>', 'rep:<vm>/<name>',
+   'create:rep:<vm>/<name>', 'create:vm:<name>', 'ident:<vm>', 'snap:<vm>',
+   'edit:<vm>', 'tpl:<name>'), carries the label to show, and clears itself
+   when expect() sees the state it waited for, on a log line that says the
+   step failed (kept visible as "failed" for a moment), or at `until` at the
+   latest. */
+var pending = {};
+var pendingTimer = null;
+
+function setPending(key, opts) {
+    var now = Date.now();
+    pending[key] = { label: opts.label, name: opts.name || '', since: now,
+                     until: now + (opts.ttl || 90000), expect: opts.expect || null,
+                     col: opts.col, kind: opts.kind || '', doneOnLog: !!opts.doneOnLog, failed: '' };
+    renderVmTable();
+    schedulePendingTick();
+}
+function pendingFor(key) {
+    var p = pending[key];
+    if (!p) return null;
+    if (Date.now() > p.until) { delete pending[key]; return null; }
+    return p;
+}
+function clearPending(key) { if (pending[key]) { delete pending[key]; renderVmTable(); } }
+/* drop what has arrived or timed out; true when something changed */
+function resolvePending() {
+    var now = Date.now(), changed = false;
+    Object.keys(pending).forEach(function(k) {
+        var p = pending[k];
+        if (now > p.until || (!p.failed && p.expect && p.expect())) { delete pending[k]; changed = true; }
+    });
+    return changed;
+}
+/* one tick a second while something is pending: the elapsed counters on the
+   placeholder rows update in place, expired entries go away */
+function schedulePendingTick() {
+    if (pendingTimer) return;
+    pendingTimer = setInterval(function() {
+        var keys = Object.keys(pending);
+        if (!keys.length) { clearInterval(pendingTimer); pendingTimer = null; return; }
+        var now = Date.now(), expired = false;
+        keys.forEach(function(k) { if (now > pending[k].until) expired = true; });
+        if (expired) { renderVmTable(); return; }
+        document.querySelectorAll('[data-pending-elapsed]').forEach(function(el) {
+            var p = pending[el.getAttribute('data-pending-elapsed')];
+            if (p) el.textContent = elapsedText(now - p.since);
+        });
+    }, 1000);
+}
+function elapsedText(ms) {
+    var s = Math.max(0, Math.floor(ms / 1000)), m = Math.floor(s / 60);
+    return m ? m + ':' + (s % 60 < 10 ? '0' : '') + (s % 60) : s + 's';
+}
+/* the pending entries that touch one VM (its own, its replicas and seats),
+   for the row's render signature */
+function pendingSig(vmName) {
+    return Object.keys(pending).filter(function(k) {
+        return k.slice(-vmName.length - 1) === ':' + vmName || k.indexOf(':' + vmName + '/') >= 0;
+    }).map(function(k) { return k + '=' + pending[k].label + (pending[k].failed ? '!' : ''); }).join(';');
+}
+/* A log line that names a pending thing and says it failed ends the wait:
+   the hosts report failures only in the log ("…:create:failed.", "[seat2]
+   creating the Steam seat failed (rc=1).", "busy, try again", "already
+   exists"). A line that says a step is done ("…:restart:ok.", "[seat2]
+   done.") ends the waits that have no state to look for (a restart). */
+function pendingFromLog(msg) {
+    var hit = false;
+    Object.keys(pending).forEach(function(k) {
+        var p = pending[k];
+        if (!p.name || p.failed || msg.indexOf(p.name) < 0) return;
+        if (/failed|busy, try again|already exists|not installed|is not online|cannot|error/i.test(msg)) {
+            p.failed = msg; p.until = Date.now() + 8000; hit = true;
+        } else if (p.doneOnLog && /:ok\.|\] done\./.test(msg)) {
+            delete pending[k]; hit = true;
+        }
+    });
+    if (hit) renderVmTable();
+}
+function findVm(name) { for (var i = 0; i < vms.length; i++) if (vms[i].name === name) return vms[i]; return null; }
+function findRep(vmName, name) {
+    var vm = findVm(vmName); if (!vm) return null;
+    var reps = parseReplicas(vm.replicas);
+    for (var i = 0; i < reps.length; i++) if (reps[i].name === name) return reps[i];
+    return null;
+}
+/* Linux host: the WebSocket to nestbox is the page's only link to anything */
+function setConnBanner(text) {
+    var b = document.getElementById('conn-banner');
+    if (!b) return;
+    b.hidden = !text;
+    if (text) document.getElementById('conn-text').textContent = text;
+}
+
 /* ---- Collapsible sections ---- */
 /* ---- Theme: dark by default, remembered per machine ---- */
 function applyTheme(theme) {
@@ -71,6 +170,7 @@ var hostBridge = (function() {
     function wsConnect() {
         ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
         ws.onopen = function() {
+            if (window.setConnBanner) setConnBanner(null);
             var q = wsQueue; wsQueue = [];
             q.forEach(function(s) { ws.send(s); });
         };
@@ -82,6 +182,7 @@ var hostBridge = (function() {
         ws.onclose = function() {
             ws = null;
             if (window.appendLog) appendLog('Lost the connection to nestbox; reconnecting...');
+            if (window.setConnBanner) setConnBanner('Lost the connection to nestbox. Reconnecting…');
             setTimeout(function() { wsConnect(); send('uiReady'); }, 2000);
         };
     }
@@ -117,7 +218,7 @@ function sendCmd(action, data) { hostBridge.send(action, data); }
  * Per-OS field visibility — including the .needs-iso picker — is driven by
  * applyOsTypeUI(), which runs on both hosts. */
 if (hostBridge.isMac) {
-    var hide = document.querySelectorAll('.win-only, .needs-linux-version');
+    var hide = document.querySelectorAll('.win-only, .needs-linux-version, .snap-col');
     for (var i = 0; i < hide.length; i++) hide[i].style.display = 'none';
 }
 
@@ -125,7 +226,7 @@ if (hostBridge.isMac) {
  * the replicas run on it directly, so New Sandbox and the Windows-host
  * columns go away. */
 if (hostBridge.isLinux) {
-    var hideL = document.querySelectorAll('.win-only, .needs-linux-version, #btn-new-sandbox');
+    var hideL = document.querySelectorAll('.win-only, .needs-linux-version, .snap-col, #btn-new-sandbox');
     for (var li = 0; li < hideL.length; li++) hideL[li].style.display = 'none';
     document.title = 'Nestbox';
 }
@@ -192,17 +293,17 @@ function applyOsTypeUI() {
 window.onHostMessage = function(msg) {
     if (!msg || typeof msg !== 'object') return;
     switch (msg.type) {
-        case 'fullState':     onFullState(msg); break;
-        case 'vmListChanged': vms = msg.vms; renderVmTable(); updateHostInfo(msg.hostInfo); revalidateVmName(); break;
-        case 'vmStateChanged': onVmStateChanged(msg); break;
+        case 'fullState':     firstStateSeen = true; onFullState(msg); break;
+        case 'vmListChanged': firstStateSeen = true; vms = msg.vms; renderVmTable(); updateHostInfo(msg.hostInfo); revalidateVmName(); break;
+        case 'vmStateChanged': firstStateSeen = true; onVmStateChanged(msg); break;
         case 'snapListChanged': break; /* snapshots now inline in vmListChanged */
-        case 'log':           appendLog(msg.message); break;
+        case 'log':           appendLog(msg.message); pendingFromLog(msg.message); break;
         case 'hostInfo':      updateHostInfo(msg); break;
         case 'browseResult':  onBrowseResult(msg.path); break;
         case 'confirmResult': if (pendingConfirm) pendingConfirm.resolve(msg.confirmed); break;
         case 'adapters':      populateAdapters(msg.adapters, msg.defaultIndex); break;
         case 'templates':     populateTemplates(msg.templates); break;
-        case 'identity':      openIdentityModal(msg.vmIndex, msg.vmIdentity); break;
+        case 'identity':      if (vms[msg.vmIndex]) delete pending['ident:' + vms[msg.vmIndex].name]; openIdentityModal(msg.vmIndex, msg.vmIdentity); break;
         case 'alert':         showModal('Error', msg.message, 'OK'); break;
         case 'openWindow':    openHostWindow(msg); break;
         case 'prereqRequired': onPrereqRequired(); break;
@@ -269,7 +370,7 @@ function updateHostInfo(info) {
     el = document.getElementById('host-hdd');
     if (el) el.textContent = 'Free: ' + info.freeGb + ' GB | VMs allocated: ' + info.vmHddGb + ' GB';
     el = document.getElementById('host-strip');
-    if (el) el.textContent = 'host  ' + info.hostCores + ' cores  ' + Math.round(info.hostRamMb / 1024) + ' GB ram  ' + info.freeGb + ' GB free';
+    if (el) el.textContent = info.hostCores + ' cores · ' + Math.round(info.hostRamMb / 1024) + ' GB RAM · ' + info.freeGb + ' GB free';
 }
 
 /* ---- Adapters ---- */
@@ -329,9 +430,19 @@ function populateTemplates(templates) {
         nameSpan.textContent = t.name + ' [' + t.osType + ']';
         item.appendChild(nameSpan);
 
+        var tp = pendingFor('tpl:' + t.name);
+        if (tp) {
+            item.classList.add('pending');
+            var sp = document.createElement('span');
+            sp.className = 'spinner';
+            sp.title = 'Deleting…';
+            item.appendChild(sp);
+            list.appendChild(item);
+            return;
+        }
         var delBtn = document.createElement('span');
         delBtn.className = 'tpl-delete';
-        delBtn.textContent = '\uD83D\uDDD1\uFE0F';
+        delBtn.innerHTML = '<svg class="ic"><use href="#i-trash"/></svg>';
         delBtn.title = 'Delete template';
         delBtn.addEventListener('click', function(e) {
             e.stopPropagation();
@@ -388,6 +499,9 @@ function onDeleteTemplate(name) {
         'Delete'
     ).then(function(confirmed) {
         if (confirmed) {
+            setPending('tpl:' + name, { label: 'Deleting', name: name, ttl: 60000, expect: function() {
+                return !currentTemplates.some(function(t) { return t.name === name; });
+            } });
             sendCmd('deleteTemplate', { name: name });
         }
     });
@@ -605,6 +719,10 @@ function saveIdentity(clear) {
     var compact;
     try { compact = compactIdentity(text); }
     catch (e) { showModal('VM identity', e.message, 'OK', { confirmClass: 'primary' }); return; }
+    var vmName = vms[idx] && vms[idx].name;
+    if (vmName) pendVm(vmName, clear ? 'Clearing the identity' : 'Saving the identity', 15000, function() {
+        var v = findVm(vmName); return !v || v.hasIdentity === !!compact;
+    });
     sendCmd('setIdentity', { vmIndex: idx, vmIdentity: compact });
     closeIdentityModal();
 }
@@ -729,6 +847,8 @@ function onCreateVm() {
         sendCmd('log', { message: 'Passwords do not match.' });
         return;
     }
+    setPending('create:vm:' + cfg.name, { label: 'Creating', name: cfg.name, kind: cfg.osType, ttl: 10 * 60000,
+        expect: function() { return !!findVm(cfg.name); } });
     sendCmd('createVm', cfg);
     clearCreateForm();
     closeCreateModal();
@@ -743,6 +863,8 @@ function onCreateTemplate() {
         return;
     }
     cfg.isTemplate = true;
+    setPending('create:vm:' + cfg.name, { label: 'Creating', name: cfg.name, kind: cfg.osType + ' template', ttl: 10 * 60000,
+        expect: function() { return !!findVm(cfg.name); } });
     sendCmd('createVm', cfg);
     clearCreateForm();
     closeCreateModal();
@@ -809,79 +931,138 @@ document.addEventListener('keydown', function(e) {
     if (document.getElementById('create-vm-overlay').classList.contains('active')) {
         closeCreateModal();
     }
+    if (document.getElementById('add-overlay').classList.contains('active')) {
+        closeAddModal();
+    }
 });
 
 /* ---- VM Table ---- */
 
 /* Update the status <td> in place. Preserves the spinner element across
-   updates so its CSS animation doesn't restart on every staging-file tick. */
+   updates so its CSS animation doesn't restart on every staging-file tick.
+   The cell carries the lamp (through its class), the state word, a spinner
+   while something is in flight and, on a running VM, the agent's small dot. */
 function updateStatusCell(td, vm) {
-    var needsSpinner = false;
-    var label = '';
-    var className = '';
+    var needsSpinner = false, label = '', className = '', agent = null, title = '';
+    var p = pendingFor('vm:' + vm.name);
 
-    if (vm.buildingVhdx) {
+    if (p && p.failed) {
+        label = p.label + ' failed ';
+        className = 'status-failed';
+        title = p.failed;
+    } else if (p) {
+        needsSpinner = true;
+        label = p.label + '… ';
+        className = 'status-building';
+        title = 'Waiting for the host (' + elapsedText(Date.now() - p.since) + ')';
+    } else if (vm.buildingVhdx) {
         needsSpinner = true;
         /* vhdxStep names the current phase ("Downloading packages 42/182",
            "Building rootfs", ...); the prefetch downloads used to sit at
            "Building Disk (0%)" for minutes and look hung. */
-        if (vm.vhdxStaging)      label = 'Staging files... ';
+        if (vm.vhdxStaging)      label = 'Staging files… ';
         else if (vm.vhdxStep)    label = vm.vhdxStep + ' (' + (vm.vhdxProgress || 0) + '%) ';
-        else                     label = 'Building Disk (' + (vm.vhdxProgress || 0) + '%) ';
+        else                     label = 'Building disk (' + (vm.vhdxProgress || 0) + '%) ';
         className = 'status-building';
     } else if (vm.running && vm.shuttingDown) {
+        needsSpinner = true;
         className = 'status-shutting-down';
-        label = 'Shutting Down';
+        label = 'Shutting down… ';
     } else if (vm.running && vm.isTemplate) {
         needsSpinner = true;
-        label = 'Building Template ';
+        label = 'Building template ';
         className = 'status-building';
     } else if (vm.running && !vm.installComplete && !vm.isTemplate) {
         needsSpinner = true;
-        var defaultLabel;
-        if (vm.osType === 'macOS')      defaultLabel = 'Installing macOS ';
-        else if (vm.osType === 'Linux') defaultLabel = 'Installing Linux ';
-        else                            defaultLabel = 'Installing Windows ';
-        label = (vm.installStatus && vm.installStatus.length > 0)
-            ? (vm.installStatus + ' ')
-            : defaultLabel;
+        var defaultLabel = vm.osType === 'macOS' ? 'Installing macOS ' : vm.osType === 'Linux' ? 'Installing Linux ' : 'Installing Windows ';
+        label = (vm.installStatus && vm.installStatus.length > 0) ? (vm.installStatus + ' ') : defaultLabel;
         className = 'status-building';
     } else if (vm.running) {
         className = 'status-running';
-        label = 'Running';
+        label = vm.isHost ? 'Up' : 'Running';
     } else {
         className = 'status-stopped';
         label = 'Stopped';
     }
+    /* the in-VM agent is what lets the host manage the guest (and reach its
+       replicas and seats); it only means something while the VM runs */
+    if (vm.running && !vm.isTemplate && !vm.isHost && !vm.buildingVhdx) {
+        agent = { online: !!vm.agentOnline,
+                  title: vm.agentOnline ? 'In-VM agent connected: the host can manage the guest, its replicas and seats'
+                                        : 'In-VM agent not connected yet: SSH, replicas and seats wait for it' };
+    }
 
     td.className = className;
-
+    td.title = title;
     var existingSpinner = td.querySelector('.spinner');
-
-    if (needsSpinner) {
-        /* Drop any existing children except the spinner, then insert the new text
-           before it. The spinner stays in the document the whole time, so its
-           CSS animation clock isn't reset. */
-        if (existingSpinner) {
-            var child = td.firstChild;
-            while (child) {
-                var next = child.nextSibling;
-                if (child !== existingSpinner) td.removeChild(child);
-                child = next;
-            }
-            td.insertBefore(document.createTextNode(label), existingSpinner);
-        } else {
-            td.textContent = '';
-            td.appendChild(document.createTextNode(label));
-            var spin = document.createElement('span');
-            spin.className = 'spinner';
-            td.appendChild(spin);
-        }
-    } else {
-        /* No spinner needed — wipe and set plain text. Any existing spinner is
-           removed along with the old text. */
-        td.textContent = label;
+    var child = td.firstChild;
+    while (child) {
+        var next = child.nextSibling;
+        if (child !== existingSpinner) td.removeChild(child);
+        child = next;
     }
+    if (needsSpinner) {
+        if (!existingSpinner) {
+            existingSpinner = document.createElement('span');
+            existingSpinner.className = 'spinner';
+            td.appendChild(existingSpinner);
+        }
+        td.insertBefore(document.createTextNode(label), existingSpinner);
+    } else {
+        if (existingSpinner) td.removeChild(existingSpinner);
+        td.appendChild(document.createTextNode(label));
+    }
+    if (agent) {
+        var dot = document.createElement('span');
+        dot.className = 'agent-dot' + (agent.online ? ' online' : '');
+        dot.title = agent.title;
+        td.appendChild(dot);
+    }
+}
+
+/* ---- Actions: one cell per row, the buttons in groups ----
+     [start · display · ssh] [add · screens · identity] [shut down · force stop] [edit · delete]
+   The groups keep their order on every row, so the eye finds a button in the
+   same place; what a row cannot do is simply not there. */
+function actBtn(cls, glyph, active, handler, title, extra) {
+    var btn = document.createElement('button');
+    btn.className = 'icon-btn ' + cls + (active ? '' : ' inactive') + (extra ? ' ' + extra : '');
+    btn.innerHTML = iconMarkup(cls, glyph);
+    if (title) btn.title = title;
+    if (active) btn.onclick = function(e) { e.stopPropagation(); handler(); };
+    else btn.disabled = true;
+    return btn;
+}
+function actionsCell(groups) {
+    var td = document.createElement('td');
+    td.className = 'actions-col';
+    var wrap = document.createElement('div');
+    wrap.className = 'actions';
+    var first = true;
+    groups.forEach(function(g) {
+        g = g || [];
+        if (!g.length) return;
+        if (!first) { var sep = document.createElement('i'); sep.className = 'act-sep'; wrap.appendChild(sep); }
+        first = false;
+        var span = document.createElement('span');
+        span.className = 'act-group';
+        /* a slot stays a slot when its button is not there, so the same
+           button sits at the same x on every row of the same kind */
+        g.forEach(function(b) {
+            if (b) { span.appendChild(b); return; }
+            var slot = document.createElement('span');
+            slot.className = 'act-slot';
+            span.appendChild(slot);
+        });
+        wrap.appendChild(span);
+    });
+    td.appendChild(wrap);
+    return td;
+}
+
+/* a VM-level wait: the status cell shows `label…` until expect() holds */
+function pendVm(name, label, ttl, expect) {
+    setPending('vm:' + name, { label: label, name: name, ttl: ttl, expect: expect });
 }
 
 /* Build the list of <td> cells for a row. The status cell is passed in and
@@ -889,95 +1070,78 @@ function updateStatusCell(td, vm) {
 function buildRowCells(vm, i, statusTd) {
     updateStatusCell(statusTd, vm);
 
-    var agentTd = document.createElement('td');
-    var agentOff = !vm.running || vm.isTemplate;
-    var dotClass = 'agent-dot' + (vm.agentOnline ? ' online' : '') + (agentOff ? ' disabled' : '');
-    agentTd.innerHTML = '<span class="' + dotClass + '"></span>';
-    agentTd.title = vm.isTemplate
-        ? 'Templates do not run the in-VM agent'
-        : (!vm.running
-            ? 'VM is not running'
-            : (vm.agentOnline
-                ? 'In-VM agent is connected — host can manage the guest'
-                : 'In-VM agent is not connected'));
-
     var bld = vm.buildingVhdx;
+    var busy = !!pendingFor('vm:' + vm.name);       /* a command is in flight: no second one */
     var snapVal = selectedSnap[i] || 'current';
-
-    var sshActive = vm.sshEnabled && (vm.sshState === 2 || vm.sshState === 4) && vm.running && !bld;
-    var sshCell = makeIconCell('ssh', '>_', sshActive, (function(idx) { return function() { sendCmd('sshConnect', {vmIndex: idx}); }; })(i), !vm.sshEnabled ? 'hidden' : '');
-    if (vm.sshEnabled) {
-        var sshBtn = sshCell.querySelector('.icon-btn');
-        if (vm.sshState === 1) sshBtn.title = 'Installing OpenSSH in the guest...';
-        else if (vm.sshState === 4) sshBtn.title = 'Open an SSH terminal (localhost:' + vm.sshPort + '; AppSandbox key deployed — key auth works)';
-        else if (vm.sshState === 2) sshBtn.title = 'Open an SSH terminal to the VM (localhost:' + vm.sshPort + ', tunneled over HvSocket)';
-        else if (vm.sshState === 3) sshBtn.title = 'SSH install failed';
-        else sshBtn.title = 'SSH: waiting for the in-VM agent to come online';
-    }
-
-    /* Nested replica column. The agent reports the replica's state (none /
-       stopped / running) and whether a VNC server listens on guest port 5900
-       (the replica's console). stopped -> a start button; running -> its
-       screen (a window of its own) once the console is up; a foreign VNC
-       server (x11vnc, docker) shows as a plain screen too. */
-    var rep = vm.replica || '';
     var reps = parseReplicas(vm.replicas);
-    var vncCell;
-    if (vm.osType === 'Linux' && vm.running && vm.agentOnline && !bld && (reps.length || !vm.vncPort)) {
-        vncCell = makeIconCell('vnc', '+', true,
-            (function(idx) { return function() { addReplica(idx); }; })(i), '',
-            reps.length ? 'Add another nested replica, or a Steam seat'
-                        : 'Create a nested replica (KVM guest with the bare-metal identity; patched QEMU + XFCE + Steam) ' +
-                          'or a Steam seat (a user with its own XFCE + Steam desktop on this machine, no VM)');
-    } else if (rep === 'stopped' && vm.running && !bld) {
-        vncCell = makeIconCell('vnc', '\u25B6\uFE0F', vm.agentOnline,
-            (function(idx) { return function() { sendCmd('replicaStart', {vmIndex: idx}); }; })(i), '',
-            'Start the nested replica (sudo appsandbox-replica start); its screen can be opened once it is up');
-    } else if (rep === 'running' && !vm.vncPort && vm.running && !bld) {
-        vncCell = makeIconCell('vnc', '\u23F3', false, null, '', 'Nested replica is starting - waiting for its console');
-    } else {
-        var vncActive = !!vm.vncPort && vm.running && !bld;
-        vncCell = makeIconCell('vnc', '\uD83D\uDDA5\uFE0F', vncActive,
-            (function(idx) { return function() { sendCmd('vncOpen', {vmIndex: idx}); }; })(i),
-            vm.vncPort ? '' : 'hidden',
-            vm.vncPort ? (rep === 'running'
-                ? 'Open the nested replica\'s screen in its own window (VNC console on guest port ' + vm.vncPort + ', tunneled over HvSocket)'
-                : 'Open the guest\'s VNC server (port ' + vm.vncPort + ') in its own window') : '');
+    var live = reps.filter(function(r) { return r.state === 'running' && r.vnc; });
+    var tiles = live.map(function(r) { return r.name + ':' + r.vnc + (r.kind === 'seat' ? ':seat' : ''); }).join(',');
+    var isLinux = vm.osType === 'Linux';
+    var rep = vm.replica || '';
+
+    /* -- open: ssh -- */
+    var sshBtn = null;
+    if (vm.sshEnabled) {
+        var sshActive = (vm.sshState === 2 || vm.sshState === 4) && vm.running && !bld;
+        var sshTitle = vm.sshState === 1 ? 'Installing OpenSSH in the guest…'
+                     : vm.sshState === 4 ? 'Open an SSH terminal (localhost:' + vm.sshPort + '; the Nestbox key is deployed, key auth works)'
+                     : vm.sshState === 2 ? 'Open an SSH terminal to the VM (localhost:' + vm.sshPort + ', tunneled over HvSocket)'
+                     : vm.sshState === 3 ? 'SSH install failed'
+                     : 'SSH: waiting for the in-VM agent';
+        sshBtn = actBtn('ssh', '>_', sshActive, function() { sendCmd('sshConnect', {vmIndex: i}); }, sshTitle);
     }
 
-    /* VM identity editor (Linux): what the guest reports about its machine. */
-    var isLinux = vm.osType === 'Linux';
-    var identCell = makeIconCell('identity', '\uD83E\uDEAA', isLinux && !bld,
-        (function(idx) { return function() { sendCmd('getIdentity', {vmIndex: idx}); }; })(i),
-        isLinux ? '' : 'hidden',
-        'Edit the VM identity profile - what the guest reports about its machine (DMI strings, systemd-detect-virt, chipset; ACPI / SMBIOS / drive / CPUID strings for the nested VPS replica). Applies immediately on a running VM; a replica picks it up at its next boot.');
+    /* -- nested: add a replica or a seat, every running screen tiled, the
+          legacy single replica / a foreign VNC server, the identity -- */
+    var addBtn = null, screensBtn = null, legacyBtn = null;
+    if (isLinux && vm.running && vm.agentOnline && !bld && (reps.length || !vm.vncPort)) {
+        addBtn = actBtn('add', '+', true, function() { openAddModal(i); },
+            reps.length ? 'Add a nested replica or a Steam seat to ' + vm.name
+                        : 'Add a nested replica (a KVM guest with its own machine identity) or a Steam seat (a user with an XFCE + Steam desktop) to ' + vm.name);
+    } else if (rep === 'stopped' && vm.running && !bld) {
+        legacyBtn = actBtn('vnc', '▶️', vm.agentOnline && !busy,
+            function() { sendCmd('replicaStart', {vmIndex: i}); }, 'Start the nested replica');
+    } else if (rep === 'running' && !vm.vncPort && vm.running && !bld) {
+        legacyBtn = actBtn('vnc', 'spinner', false, null, 'Nested replica is starting: waiting for its console');
+    } else if (vm.vncPort && vm.running && !bld) {
+        legacyBtn = actBtn('vnc', '🖥️', true, function() { sendCmd('vncOpen', {vmIndex: i}); },
+            rep === 'running' ? 'Open the nested replica\'s screen in its own window'
+                              : 'Open the guest\'s VNC server (port ' + vm.vncPort + ') in its own window');
+    }
+    if (live.length)
+        screensBtn = actBtn('vnc', 'grid', true, function() { sendCmd('vncGrid', {vmIndex: i, tiles: tiles}); },
+            live.length === 1 ? 'Open the running screen in a grid window (more tiles appear as replicas and seats start)'
+                              : 'Open all ' + live.length + ' running screens side by side in one window');
+    var identPending = pendingFor('ident:' + vm.name);
+    var identBtn = isLinux ? actBtn('identity', identPending ? 'spinner' : 'id', !bld && !identPending, function() {
+            setPending('ident:' + vm.name, { label: 'identity', ttl: 10000 });
+            sendCmd('getIdentity', {vmIndex: i});
+        }, 'VM identity: what the guest reports about its machine (DMI strings, systemd-detect-virt, chipset; ACPI / SMBIOS / drive / CPUID strings for the replicas)') : null;
 
-    /* This PC (Linux host): the replicas run right here, so the row is the
-       machine itself - no start / stop / display / SSH / delete, only the
-       nested "+" and the identity profile the replicas are built from. */
+    /* This PC (Linux host): the machine itself. Nothing to start or stop:
+       the "+" for replicas and seats, their screens, and the identity
+       profile they are built from. */
     if (vm.isHost) {
-        var nameTd = makeCell(vm.name, i, 0, 'This PC: the replicas below run on it directly (libvirt / KVM)');
+        var nameTd = makeCell(vm.name, i, 0, 'This PC: the replicas and seats below run on it directly');
         var tag = document.createElement('span');
-        tag.className = 'hint mono';
-        tag.style.marginLeft = '8px';
+        tag.className = 'chip';
         tag.textContent = 'this PC';
         nameTd.appendChild(tag);
         /* The identity-patched QEMU (hypervisor-level identity strings for
            the replicas): built once on this PC, from here. */
         var qemu = document.createElement('span');
-        qemu.className = 'hint mono';
-        qemu.style.marginLeft = '10px';
+        qemu.className = 'hint mono qemu-state';
         if (vm.qemuPatched) {
             qemu.textContent = 'qemu: identity-patched ✔';
             qemu.title = 'The identity-patched QEMU is installed: ACPI / SMBIOS / drive / CPUID strings from the profile reach the replicas';
         } else if (vm.qemuBuilding) {
-            qemu.textContent = 'qemu: building the patch…';
+            qemu.innerHTML = 'qemu: building the patch <span class="spinner"></span>';
             qemu.title = 'appsandbox-replica qemu build is running (~10 min); progress is in the log';
         } else {
             qemu.textContent = 'qemu: stock ';
             var qb = document.createElement('button');
+            qb.className = 'mini';
             qb.textContent = 'Build patch';
-            qb.style.cssText = 'height:20px;padding:0 8px;font-size:11px;margin-left:4px';
             qb.title = 'Build QEMU 8.2.2 with the identity patches and install it over the distro binary (~10 min, once). ' +
                        'Without it the replicas run on the stock QEMU: DMI strings and the hidden hypervisor flag still work, ' +
                        'the ACPI / SMBIOS-manufacturer / drive / CPUID strings are ignored.';
@@ -995,101 +1159,124 @@ function buildRowCells(vm, i, statusTd) {
         nameTd.appendChild(qemu);
         if (vm.kvm === false) {
             var nokvm = document.createElement('span');
-            nokvm.className = 'hint mono';
-            nokvm.style.cssText = 'margin-left:10px;color:hsl(var(--lamp-warn))';
+            nokvm.className = 'chip warn';
             nokvm.textContent = 'no /dev/kvm';
-            nokvm.title = 'KVM is not available: enable virtualization (VT-x / AMD-V) in the firmware; replicas cannot run without it';
+            nokvm.title = 'KVM is not available: enable virtualization (VT-x / AMD-V) in the firmware; replicas cannot run without it (seats can)';
             nameTd.appendChild(nokvm);
         }
-        agentTd.title = 'nestbox is running on this PC';
         var hostCells = [
             nameTd,
             makeCell(vm.osName || 'Linux', i, 1),
             statusTd,
-            agentTd,
             makeCell(vm.cpuCores, i, 4, 'CPU cores of this PC'),
             makeCell(vm.ramMb + ' MB', i, 5, 'Memory of this PC'),
             makeCell(vm.hddGb + ' GB', i, 6, 'Size of the root filesystem'),
             makeCell(vm.gpuName || 'host GPU', i, 7, 'GPU of this PC'),
-            makeCell('host', i, 8, 'The replicas use libvirt\'s NAT network (virbr0)'),
+            makeCell('host', i, 8, 'The replicas use libvirt\'s NAT network (virbr0); a seat uses this PC\'s own network'),
         ];
         if (!hostBridge.noSnapshots) hostCells.push(makeCell('', i, 9));
-        hostCells.push(blankIconCell(), blankIconCell(), blankIconCell(), vncCell, identCell,
-                       blankIconCell(), blankIconCell(), blankIconCell(), blankIconCell());
+        hostCells.push(actionsCell([[addBtn || legacyBtn, screensBtn, identBtn]]));
         return hostCells;
     }
+
+    var startBtn = actBtn('start', '▶️', !vm.running && !bld && !busy, (function(vmIdx, sv, vmObj) { return function() {
+        var p = parseSnapValue(sv);
+        var go = function(extra) {
+            pendVm(vmObj.name, 'Starting', 120000, function() { var v = findVm(vmObj.name); return !v || v.running; });
+            sendCmd('startVm', Object.assign({ vmIndex: vmIdx, snapIndex: p.snapIndex, branchIndex: p.branchIndex }, extra || {}));
+        };
+        if ((p.snapIndex >= 0 || p.snapIndex === -2) && p.branchIndex < 0) {
+            /* Creating a new branch: prompt for its name */
+            var parentName = p.snapIndex === -2 ? 'Base' : ((vmObj.snapshots && vmObj.snapshots[p.snapIndex]) ? vmObj.snapshots[p.snapIndex].name : 'Snapshot');
+            var now = new Date();
+            var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
+            var defaultName = now.getFullYear() + '-' + pad(now.getMonth()+1) + '-' + pad(now.getDate()) + ' ' + pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
+            showModal('New branch', 'A new branch will be created from ' + parentName + '. Branches are independent working copies: changes in one branch do not affect the others or the base snapshot.', 'Boot', {
+                confirmClass: 'primary',
+                input: { label: 'Branch name:', value: defaultName }
+            }).then(function(result) {
+                if (result === false) return;
+                selectedSnap[vmIdx] = 'current';
+                go({ branchName: result });
+            });
+        } else {
+            go();
+        }
+    }; })(i, snapVal, vm), 'Start the VM (boots from the selected snapshot / branch)');
+    var displayBtn = actBtn('connect-idd', '📺', vm.running && !bld, function() { sendCmd('connectIddVm', {vmIndex: i}); }, 'Open the VM display window (IDD virtual monitor)');
+    var shutdownBtn = actBtn('shutdown', '⏻', vm.running && !bld && !busy && !vm.shuttingDown, function() {
+        pendVm(vm.name, 'Shutting down', 180000, function() { var v = findVm(vm.name); return !v || !v.running || v.shuttingDown; });
+        sendCmd('shutdownVm', {vmIndex: i});
+    }, 'Ask the guest OS to shut down');
+    var stopBtn = actBtn('stop', '✕️', vm.running && !bld && !busy, function() { onStopVm(i); }, 'Force power off the VM at once (may lose unsaved guest data)');
+    var deleteBtn = actBtn('delete', '🗑️', !bld && !busy, function() { onDeleteVm(i); }, 'Delete this VM and its virtual disks', vm.running ? 'running' : '');
+    var editBtn = actBtn('edit', editModeRow === i ? '✔️' : '✏️', !vm.running && !bld && !busy, function() { toggleEditMode(i); },
+        editModeRow === i ? 'Done editing' : 'Edit CPU, RAM, GPU and network (the VM must be stopped)');
 
     var cells = [
         makeCell(vm.name, i, 0),
         makeCell(vm.osType, i, 1),
         statusTd,
-        agentTd,
-        makeCell(vm.cpuCores, i, 4, 'Number of virtual CPU cores assigned to this VM'),
-        makeCell(vm.ramMb + ' MB', i, 5, 'Memory allocated to this VM, in megabytes'),
-        makeCell(vm.hddGb + ' GB', i, 6, 'Virtual disk size, in gigabytes'),
+        makeCell(vm.cpuCores, i, 4, 'Virtual CPU cores of this VM'),
+        makeCell(vm.ramMb + ' MB', i, 5, 'Memory reserved for this VM'),
+        makeCell(vm.hddGb + ' GB', i, 6, 'Virtual disk size'),
         makeCell(vm.gpuName || (vm.gpuMode === 2 ? 'Try all' : vm.gpuMode === 1 ? 'Default GPU' : 'None'), i, 7, 'GPU passed through to the VM via GPU-PV, or None'),
-        makeCell(netNames[vm.networkMode] || 'None', i, 8, 'Networking mode: NAT (shared), External (bridged), Internal (host-only), or None'),
+        makeCell(netNames[vm.networkMode] || 'None', i, 8, 'Networking: NAT (shared), External (bridged), Internal (host-only), or None'),
     ];
     if (!hostBridge.noSnapshots) cells.push(makeSnapCell(vm, i));
-    cells.push(
-        makeIconCell('start', '\u25B6\uFE0F', !vm.running && !bld, (function(vmIdx, sv, vmObj) { return function() {
-            var p = parseSnapValue(sv);
-            if ((p.snapIndex >= 0 || p.snapIndex === -2) && p.branchIndex < 0) {
-                /* Creating a new branch — prompt for name */
-                var parentName = p.snapIndex === -2 ? 'Base' : ((vmObj.snapshots && vmObj.snapshots[p.snapIndex]) ? vmObj.snapshots[p.snapIndex].name : 'Snapshot');
-                var now = new Date();
-                var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
-                var defaultName = now.getFullYear() + '-' + pad(now.getMonth()+1) + '-' + pad(now.getDate()) + ' ' + pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
-                showModal('New Branch', 'A new branch will be created from ' + parentName + '. Branches are independent working copies \u2014 changes in one branch don\u2019t affect others or modify the base snapshot.', 'Boot', {
-                    confirmClass: 'primary',
-                    input: { label: 'Branch name:', value: defaultName }
-                }).then(function(result) {
-                    if (result === false) return;
-                    selectedSnap[vmIdx] = 'current';
-                    sendCmd('startVm', { vmIndex: vmIdx, snapIndex: p.snapIndex, branchIndex: p.branchIndex, branchName: result });
-                });
-            } else {
-                sendCmd('startVm', { vmIndex: vmIdx, snapIndex: p.snapIndex, branchIndex: p.branchIndex });
-            }
-        }; })(i, snapVal, vm), '', 'Start the VM (boots from the selected snapshot/branch)'),
-        makeIconCell('connect-idd', '\uD83D\uDCFA', vm.running && !bld, function() { sendCmd('connectIddVm', {vmIndex: i}); }, '', 'Open the VM display window (IDD virtual monitor)'),
-        sshCell,
-        vncCell,
-        identCell,
-        makeIconCell('shutdown', '\u23FB', vm.running && !bld, function() { sendCmd('shutdownVm', {vmIndex: i}); }, '', 'Request a graceful shutdown from the guest OS'),
-        makeIconCell('stop', '\u2715\uFE0F', vm.running && !bld, function() { onStopVm(i); }, '', 'Force power off the VM immediately (may lose unsaved guest data)'),
-        makeIconCell('delete', '\uD83D\uDDD1\uFE0F', !bld, function() { onDeleteVm(i); }, vm.running ? 'running' : '', 'Delete this VM and its virtual disks'),
-        makeIconCell('edit', editModeRow === i ? '\u2714\uFE0F' : '\u270F\uFE0F', !vm.running && !bld, function() { toggleEditMode(i); }, '', 'Edit VM configuration (CPU, RAM, GPU, network) — VM must be stopped'),
-    );
+    cells.push(actionsCell([[startBtn, displayBtn, sshBtn], [addBtn || legacyBtn, screensBtn, identBtn], [shutdownBtn, stopBtn], [editBtn, deleteBtn]]));
     return cells;
 }
 
+/* the number of columns before Actions: colSpan of a replica / seat row */
+function dataColCount() { return 8 + (hostBridge.noSnapshots ? 0 : 1); }
+
 function renderVmTable() {
     var tbody = document.getElementById('vm-table');   /* one <tbody class="vm-group"> per VM (its row + replica rows) */
+    resolvePending();
+
+    /* the skeleton rows stand in until the host has said what exists */
+    var sk = document.getElementById('vm-skeleton');
+    if (!firstStateSeen) return;
+    if (sk && sk.parentNode) sk.parentNode.removeChild(sk);
+
     var vc = document.getElementById('vm-count');
     if (vc) {
-        if (hostBridge.isLinux) {
-            var nrep = vms.length ? parseReplicas(vms[0].replicas).length : 0;
-            vc.textContent = nrep ? nrep + (nrep === 1 ? ' replica' : ' replicas') + ' on this PC' : 'this PC';
-        } else {
-            vc.textContent = vms.length ? vms.length + (vms.length === 1 ? ' sandbox' : ' sandboxes') : '';
-        }
+        var nrep = 0, nseat = 0;
+        vms.forEach(function(vm) { parseReplicas(vm.replicas).forEach(function(r) { if (r.kind === 'seat') nseat++; else nrep++; }); });
+        var parts = [];
+        if (hostBridge.isLinux) parts.push('this PC');
+        else if (vms.length) parts.push(vms.length + (vms.length === 1 ? ' sandbox' : ' sandboxes'));
+        if (nrep) parts.push(nrep + (nrep === 1 ? ' replica' : ' replicas'));
+        if (nseat) parts.push(nseat + (nseat === 1 ? ' seat' : ' seats'));
+        vc.textContent = parts.join(' · ');
     }
 
-    if (vms.length === 0) {
+    /* sandboxes the host has not listed yet: a row each until it does */
+    var creating = Object.keys(pending).filter(function(k) {
+        return k.indexOf('create:vm:') === 0 && !findVm(k.slice(10));
+    });
+
+    if (vms.length === 0 && !creating.length) {
         rowCache = {};
         rowSigCache = {};
         Array.prototype.slice.call(tbody.children).forEach(function(c) { if (c.tagName !== 'THEAD') tbody.removeChild(c); });
         var grp0 = document.createElement('tbody');
         var tr = document.createElement('tr');
         var td = document.createElement('td');
-        td.colSpan = hostBridge.noSnapshots ? 16 : 17;
+        td.colSpan = dataColCount() + 1;
         td.className = 'empty-state';
+        td.innerHTML =
+            '<div class="empty">' +
+              '<svg class="ic empty-mark"><use href="#i-nestbox"/></svg>' +
+              '<div class="empty-title">No sandboxes yet</div>' +
+              '<div class="empty-text">A sandbox is a Windows or Linux VM on this PC. A Linux sandbox can hold nested replicas (KVM guests with their own machine identity) and Steam seats (extra Steam desktops, no VM).</div>' +
+            '</div>';
         var btn = document.createElement('button');
         btn.className = 'primary empty-state-btn';
-        btn.textContent = '+ Create your first sandbox';
+        btn.innerHTML = '<svg class="ic"><use href="#i-plus"/></svg>New sandbox';
         btn.onclick = openCreateModal;
-        td.appendChild(btn);
+        td.firstChild.appendChild(btn);
         tr.appendChild(td);
         grp0.appendChild(tr);
         tbody.appendChild(grp0);
@@ -1108,7 +1295,8 @@ function renderVmTable() {
         }
     });
 
-    /* Remove any non-cached tbody children (e.g. leftover empty-state row). */
+    /* Remove any non-cached tbody children (the empty-state row, the
+       placeholder groups of the previous render). */
     var kids = Array.prototype.slice.call(tbody.children);
     kids.forEach(function(c) {
         if (c.tagName === 'THEAD') return;
@@ -1142,6 +1330,7 @@ function renderVmTable() {
             vm.osType, vm.ramMb, vm.hddGb, vm.cpuCores, vm.isHost, vm.osName, vm.qemuPatched, vm.qemuBuilding, vm.kvm,
             vm.gpuMode, vm.gpuName, vm.networkMode,
             selectedSnap[i] || 'current',
+            pendingSig(vm.name),                                     /* what the page waits on for this VM */
             /* Snapshot tree: take/delete/rename/branch must trigger a row rebuild
                so makeSnapCell re-runs. These fields only change on user snapshot
                actions (never on install-progress ticks — a VM can't be snapshotted
@@ -1164,6 +1353,7 @@ function renderVmTable() {
             if (e.target.closest('.icon-btn')) return;
             if (e.target.closest('.editing')) return;
             if (e.target.closest('.snap-cell')) return;
+            if (e.target.closest('button')) return;
             selectVm(i);
         };
 
@@ -1184,119 +1374,207 @@ function renderVmTable() {
             tbody.insertBefore(grp, tbody.children[i + 1] || null);
         }
     });
+
+    creating.forEach(function(k) {
+        var p = pending[k], name = k.slice(10);
+        var grp = document.createElement('tbody');
+        grp.className = 'pending-group';
+        var tr = document.createElement('tr');
+        tr.className = 'pending-row';
+        var nameTd = document.createElement('td');
+        nameTd.textContent = name;
+        var osTd = document.createElement('td');
+        osTd.textContent = p.kind || '';
+        var st = document.createElement('td');
+        if (p.failed) {
+            st.className = 'status-failed';
+            st.textContent = 'Creating failed';
+            st.title = p.failed;
+        } else {
+            st.className = 'status-building';
+            st.innerHTML = 'Creating… <span class="spinner"></span>';
+        }
+        var rest = document.createElement('td');
+        rest.colSpan = dataColCount() - 3;
+        rest.className = 'hint';
+        rest.innerHTML = p.failed ? 'See the log below.' : 'Waiting for the host to list it <span class="mono" data-pending-elapsed="' + k + '">' + elapsedText(Date.now() - p.since) + '</span>';
+        var dismiss = actBtn('dismiss', 'x', true, function() { clearPending(k); }, 'Dismiss');
+        tr.appendChild(nameTd); tr.appendChild(osTd); tr.appendChild(st); tr.appendChild(rest);
+        tr.appendChild(actionsCell([[dismiss]]));
+        grp.appendChild(tr);
+        tbody.appendChild(grp);
+    });
 }
 
 /* ---- Nested replicas and Steam seats: rows under their VM ----
    vm.replicas is the agent's JSON list [{name, state, vnc, desktop[, kind,
-   res]}]: the nested replicas (KVM guests) and, with kind "seat", the Steam
-   seats (a Linux user with an Xvnc display + XFCE + Steam on the machine
-   itself). Each gets a row with its own start / screen / stop / restart /
-   destroy buttons in the same columns as the VM's; replicas also have the
-   pencil (size) and the desktop installer. */
+   res, cpus, ram, disk]}]: the nested replicas (KVM guests) and, with kind
+   "seat", the Steam seats (a Linux user with an Xvnc display + XFCE + Steam
+   on the machine itself). They are not VMs, so their rows do not borrow the
+   VM's columns: one cell with the name, the kind, the state and a spec line,
+   then the row's own actions. */
 function parseReplicas(str) {
     if (!str) return [];
     try { var v = JSON.parse(str); return Array.isArray(v) ? v : []; } catch (e) { return []; }
 }
 
-function blankIconCell() {
-    var td = document.createElement('td');
-    td.className = 'icon-col';
-    return td;
+function pendRep(vmName, name, label, ttl, expect) {
+    setPending('rep:' + vmName + '/' + name, { label: label, name: name, ttl: ttl, expect: expect, doneOnLog: true });
 }
 
 function buildReplicaRows(grp, vm, idx) {
     while (grp.children.length > 1) grp.removeChild(grp.lastChild);
     if (vm.osType !== 'Linux' || !vm.running || !vm.agentOnline || vm.buildingVhdx) return;
     var reps = parseReplicas(vm.replicas);
-    /* every running console, for the grid window (one window, all of them tiled) */
-    var live = reps.filter(function(r) { return r.state === 'running' && r.vnc; });
-    var tiles = live.map(function(r) { return r.name + ':' + r.vnc + (r.kind === 'seat' ? ':seat' : ''); }).join(',');
-    reps.forEach(function(r, ri) {
-        var running = r.state === 'running';
-        var seat = r.kind === 'seat';
-        var act = seat ? 'seat' : 'replica';   /* action prefix: seatStart / replicaStart ... */
-        var tr = document.createElement('tr');
-        tr.className = 'replica-row ' + (running ? 'running' : 'stopped');
-        /* one cell per column, under the same headers as the VM row */
-        var rc = function(text, title) {
-            var c = document.createElement('td');
-            c.className = 'replica-cell';
-            c.textContent = text == null ? '' : text;
-            if (title) c.title = title;
-            return c;
-        };
-        var td = rc('');
-        td.innerHTML = '<span class="replica-arm"></span><svg class="ic"><use href="#' + (seat ? 'i-screen' : 'i-nest') + '"/></svg><span class="replica-name"></span>';
-        td.querySelector('.replica-name').textContent = r.name;
-        td.title = seat
-            ? 'Steam seat: user "' + r.name + '" with its own Xvnc display, XFCE and Steam on ' + vm.name + ' itself (appsandbox-seat). ' +
-              'No VM: shares the machine\'s identity (DMI, machine-id, disks, MAC).'
-            : 'Nested replica: a KVM guest inside ' + vm.name + ' (appsandbox-replica)';
-        tr.appendChild(td);
-        if (seat)
-            tr.appendChild(rc('seat · xfce' + (r.res ? ' · ' + r.res : ''),
-                'A user account on ' + vm.name + ' (' + r.name + ' / test123) with an XFCE desktop on its own Xvnc display' + (r.res ? ' (' + r.res + ')' : '') + ' and Steam at login'));
-        else
-            tr.appendChild(rc(r.desktop ? 'Ubuntu · xfce' : 'Ubuntu', r.desktop ? 'Ubuntu cloud image with XFCE + Steam (autologin)' : 'Ubuntu cloud image, no desktop yet'));
-        var st = rc(running ? 'running' : (r.state || 'stopped'));
-        st.className = 'replica-cell ' + (running ? 'status-running' : 'status-stopped');   /* same lamp as the VM row */
-        tr.appendChild(st);
-        tr.appendChild(rc(''));                                                   /* agent */
-        if (seat) {
-            tr.appendChild(rc('', 'A seat shares the cores of ' + vm.name));
-            tr.appendChild(rc('', 'A seat uses only the memory its programs take'));
-            tr.appendChild(rc('', 'A seat lives in /home/' + r.name + ' on ' + vm.name + '\'s disk'));
-        } else {
-            tr.appendChild(rc(r.cpus || '', 'Virtual CPU cores of the replica'));
-            tr.appendChild(rc(r.ram ? r.ram + ' MB' : '', 'Memory of the replica'));
-            tr.appendChild(rc(r.disk ? r.disk + ' GB' : '', 'Disk of the replica (grows only)'));
-        }
-        tr.appendChild(rc(r.vnc ? 'vnc :' + r.vnc : '', (seat ? 'Display: Xvnc' : 'Console: VNC server') + ' on 127.0.0.1:' + (r.vnc || 5900) + ' inside ' + vm.name));
-        tr.appendChild(seat ? rc('host', 'The seat uses ' + vm.name + '\'s own network') : rc('NAT', 'libvirt NAT network (virbr0) inside ' + vm.name));
-        if (!hostBridge.noSnapshots) tr.appendChild(rc(''));                      /* snapshot */
-        var name = r.name;
-        var cells = [
-            makeIconCell('start', '\u25B6\uFE0F', !running,
-                function() { sendCmd(act + 'Start', {vmIndex: idx, name: name}); }, '', 'Start ' + act + ' "' + name + '"'),
-            makeIconCell('connect-idd', '\uD83D\uDDA5\uFE0F', running && !!r.vnc,
-                function() { sendCmd('vncOpen', {vmIndex: idx, port: r.vnc, name: name, kind: act}); }, '', 'Open the screen of ' + act + ' "' + name + '" in its own window'),
-            seat ? blankIconCell()
-                 : makeIconCell('edit', 'edit', true,
-                    function() { resizeReplica(idx, r); }, '', 'Cores, RAM and disk of replica "' + name + '"'),
-            seat ? blankIconCell()
-                 : makeIconCell('vnc', 'desktop', running && !r.desktop,
-                    function() { confirmReplica(idx, name, 'replicaDesktop', 'Install XFCE + Steam in "' + name + '"? Takes 10-20 minutes and restarts the replica.', 'Install'); },
-                    r.desktop ? 'hidden' : '', 'Install XFCE + Steam (autologin) in this replica'),
-            ri === 0 && live.length
-                ? makeIconCell('vnc', 'grid', true,
-                    function() { sendCmd('vncGrid', {vmIndex: idx, tiles: tiles}); }, '',
-                    live.length === 1 ? 'Open the running screen in a grid window (more tiles appear as replicas and seats start)'
-                                      : 'Open all ' + live.length + ' running screens side by side in one window')
-                : blankIconCell(),
-            makeIconCell('shutdown', '\u23FB', running,
-                function() { sendCmd(act + 'Stop', {vmIndex: idx, name: name}); }, '',
-                seat ? 'Stop this seat: its XFCE session and Steam end (the user account stays)' : 'Shut this replica down'),
-            makeIconCell('stop', '\u21BB', running,
-                function() { sendCmd(act + 'Restart', {vmIndex: idx, name: name}); }, '',
-                seat ? 'Restart this seat (a fresh XFCE session)' : 'Restart this replica (picks up a changed identity)'),
-            makeIconCell('delete', '\uD83D\uDDD1\uFE0F', true,
-                function() {
-                    confirmReplica(idx, name, act + 'Destroy',
-                        seat ? 'Delete seat "' + name + '"? Its user account and home directory (/home/' + name + ', with Steam\'s files) are removed. This cannot be undone.'
-                             : 'Delete replica "' + name + '" and its disk? This cannot be undone.', 'Delete');
-                },
-                running ? 'running' : '', 'Delete this ' + act),
-            blankIconCell()
-        ];
-        cells.forEach(function(c) { tr.appendChild(c); });
-        grp.appendChild(tr);
+    var cols = dataColCount();
+    reps.forEach(function(r) { grp.appendChild(replicaRow(vm, idx, r, cols)); });
+    /* what is being created: a row of its own until the host lists it */
+    var prefix = 'create:rep:' + vm.name + '/';
+    var placeholders = 0;
+    Object.keys(pending).forEach(function(k) {
+        if (k.indexOf(prefix) !== 0) return;
+        var name = k.slice(prefix.length);
+        if (reps.some(function(r) { return r.name === name; })) return;
+        grp.appendChild(pendingRepRow(vm, k, name, pending[k], cols));
+        placeholders++;
     });
+    /* this PC with nothing on it yet: say what the "+" is for */
+    if (vm.isHost && !reps.length && !placeholders) {
+        var tr = document.createElement('tr');
+        tr.className = 'replica-row hint-row';
+        var td = document.createElement('td');
+        td.colSpan = cols + 1;
+        td.className = 'replica-cell';
+        td.innerHTML = '<span class="replica-arm"></span><span class="hint">Nothing here yet. The <b>+</b> adds a nested replica or a Steam seat to this PC.</span>';
+        tr.appendChild(td);
+        grp.appendChild(tr);
+    }
 }
 
-function confirmReplica(idx, name, action, message, label) {
+function replicaRow(vm, idx, r, cols) {
+    var seat = r.kind === 'seat';
+    var act = seat ? 'seat' : 'replica';   /* action prefix: seatStart / replicaStart ... */
+    var running = r.state === 'running';
+    var name = r.name;
+    var key = 'rep:' + vm.name + '/' + name;
+    var p = pendingFor(key);
+    var busy = !!p;
+
+    var tr = document.createElement('tr');
+    tr.className = 'replica-row ' + (running ? 'running' : 'stopped') + (seat ? ' seat' : '');
+    var td = document.createElement('td');
+    td.colSpan = cols;
+    td.className = 'replica-cell';
+    td.innerHTML = '<span class="replica-arm"></span><svg class="ic"><use href="#' + (seat ? 'i-user' : 'i-nest') + '"/></svg>' +
+                   '<span class="replica-name"></span><span class="chip kind"></span>' +
+                   '<span class="replica-state"></span><span class="replica-spec mono"></span>';
+    td.querySelector('.replica-name').textContent = name;
+    td.querySelector('.chip').textContent = seat ? 'seat' : 'replica';
+    td.title = seat
+        ? 'Steam seat: user "' + name + '" (password test123) with its own Xvnc display, XFCE and Steam on ' + vm.name + ' itself (appsandbox-seat). ' +
+          'No VM: it shows the machine\'s identity (DMI, machine-id, disks, MAC) and uses only the memory its programs take.'
+        : 'Nested replica: a KVM guest inside ' + vm.name + ' (appsandbox-replica) with the identity profile\'s machine identity.';
+
+    var stEl = td.querySelector('.replica-state');
+    if (p && p.failed) {
+        stEl.className = 'replica-state failed';
+        stEl.innerHTML = '<span class="lamp err"></span>';
+        stEl.appendChild(document.createTextNode(p.label + ' failed'));
+        stEl.title = p.failed;
+    } else if (p) {
+        stEl.className = 'replica-state busy';
+        stEl.innerHTML = '<span class="lamp warn"></span>';
+        stEl.appendChild(document.createTextNode(p.label + '…'));
+        var sp = document.createElement('span'); sp.className = 'spinner'; stEl.appendChild(sp);
+    } else {
+        stEl.className = 'replica-state ' + (running ? 'run' : 'off');
+        stEl.innerHTML = '<span class="lamp' + (running ? ' run' : '') + '"></span>';
+        stEl.appendChild(document.createTextNode(running ? 'running' : (r.state || 'stopped')));
+    }
+
+    var spec = seat
+        ? ['xfce', r.res || '', r.steamApp ? 'steam app ' + r.steamApp : 'steam', r.vnc ? 'vnc :' + r.vnc : '']
+        : [r.cpus ? r.cpus + ' cores' : '', r.ram ? r.ram + ' MB' : '', r.disk ? r.disk + ' GB' : '',
+           r.desktop ? 'xfce' : 'no desktop', r.vnc ? 'vnc :' + r.vnc : ''];
+    var specEl = td.querySelector('.replica-spec');
+    specEl.textContent = spec.filter(Boolean).join('  ·  ');
+    specEl.title = seat
+        ? 'An XFCE desktop on an Xvnc display' + (r.res ? ' of ' + r.res : '') + ', Steam at login' + (r.steamApp ? ' opening app ' + r.steamApp : '') +
+          (r.vnc ? '; the display listens on 127.0.0.1:' + r.vnc + ' inside ' + vm.name : '') + '. Shares ' + vm.name + '\'s cores, memory, disk and network.'
+        : 'Cores, memory and disk reserved for the replica (the disk grows only)' + (r.desktop ? ', XFCE + Steam installed' : ', no desktop yet') +
+          (r.vnc ? '; its console listens on 127.0.0.1:' + r.vnc + ' inside ' + vm.name : '') + '. Network: libvirt NAT (virbr0).';
+    tr.appendChild(td);
+
+    var startBtn = actBtn('start', '▶️', !running && !busy, function() {
+        pendRep(vm.name, name, 'Starting', 90000, function() { var x = findRep(vm.name, name); return !x || x.state === 'running'; });
+        sendCmd(act + 'Start', {vmIndex: idx, name: name});
+    }, 'Start ' + act + ' "' + name + '"');
+    var screenBtn = actBtn('connect-idd', '🖥️', running && !!r.vnc,
+        function() { sendCmd('vncOpen', {vmIndex: idx, port: r.vnc, name: name, kind: act}); }, 'Open the screen of ' + act + ' "' + name + '" in its own window');
+    var sizeBtn = seat ? null : actBtn('edit', 'edit', !busy, function() { resizeReplica(idx, r); }, 'Cores, RAM and disk of replica "' + name + '"');
+    var desktopBtn = (seat || r.desktop) ? null : actBtn('vnc', 'desktop', running && !busy, function() {
+        confirmReplica(idx, name, 'replicaDesktop', 'Install XFCE + Steam in "' + name + '"? Takes 10-20 minutes and restarts the replica.', 'Install', function() {
+            pendRep(vm.name, name, 'Installing the desktop', 40 * 60000, function() { var x = findRep(vm.name, name); return !x || !!x.desktop; });
+        });
+    }, 'Install XFCE + Steam (autologin) in this replica');
+    var stopBtn = actBtn('shutdown', '⏻', running && !busy, function() {
+        pendRep(vm.name, name, 'Stopping', 90000, function() { var x = findRep(vm.name, name); return !x || x.state !== 'running'; });
+        sendCmd(act + 'Stop', {vmIndex: idx, name: name});
+    }, seat ? 'Stop this seat: its XFCE session and Steam end (the user account stays)' : 'Shut this replica down');
+    var restartBtn = actBtn('restart', '↻', running && !busy, function() {
+        pendRep(vm.name, name, 'Restarting', seat ? 60000 : 120000, null);
+        sendCmd(act + 'Restart', {vmIndex: idx, name: name});
+    }, seat ? 'Restart this seat (a fresh XFCE session)' : 'Restart this replica (picks up a changed identity)');
+    var deleteBtn = actBtn('delete', '🗑️', !busy, function() {
+        confirmReplica(idx, name, act + 'Destroy',
+            seat ? 'Delete seat "' + name + '"? Its user account and home directory (/home/' + name + ', with Steam\'s files) are removed. This cannot be undone.'
+                 : 'Delete replica "' + name + '" and its disk? This cannot be undone.', 'Delete', function() {
+            pendRep(vm.name, name, 'Deleting', 180000, function() { return !findRep(vm.name, name); });
+        });
+    }, 'Delete this ' + act, running ? 'running' : '');
+    tr.appendChild(actionsCell([[startBtn, screenBtn], [sizeBtn, desktopBtn], [stopBtn, restartBtn], [deleteBtn]]));
+    return tr;
+}
+
+/* a replica or seat that was asked for and is not listed yet */
+function pendingRepRow(vm, key, name, p, cols) {
+    var seat = p.kind === 'seat';
+    var tr = document.createElement('tr');
+    tr.className = 'replica-row pending-row' + (seat ? ' seat' : '');
+    var td = document.createElement('td');
+    td.colSpan = cols;
+    td.className = 'replica-cell';
+    td.innerHTML = '<span class="replica-arm"></span><svg class="ic"><use href="#' + (seat ? 'i-user' : 'i-nest') + '"/></svg>' +
+                   '<span class="replica-name"></span><span class="chip kind"></span><span class="replica-state"></span><span class="replica-spec"></span>';
+    td.querySelector('.replica-name').textContent = name;
+    td.querySelector('.chip').textContent = seat ? 'seat' : 'replica';
+    var stEl = td.querySelector('.replica-state'), specEl = td.querySelector('.replica-spec');
+    if (p.failed) {
+        stEl.className = 'replica-state failed';
+        stEl.innerHTML = '<span class="lamp err"></span>creating failed';
+        stEl.title = p.failed;
+        specEl.className = 'replica-spec hint';
+        specEl.textContent = 'See the log below.';
+    } else {
+        stEl.className = 'replica-state busy';
+        stEl.innerHTML = '<span class="lamp warn"></span>creating… <span class="spinner"></span>';
+        specEl.className = 'replica-spec hint';
+        specEl.innerHTML = (seat ? 'packages the first time (~1.5 GB), then seconds; the row appears when the seat is up'
+                                 : 'cloud image, then XFCE + Steam (10–20 min); the row appears when it boots') +
+                           ' · <span class="mono" data-pending-elapsed="' + key + '">' + elapsedText(Date.now() - p.since) + '</span>';
+    }
+    tr.appendChild(td);
+    var dismiss = actBtn('dismiss', 'x', true, function() { clearPending(key); }, p.failed ? 'Dismiss' : 'Stop waiting (the creation itself goes on; the row appears when the host lists it)');
+    tr.appendChild(actionsCell([[dismiss]]));
+    return tr;
+}
+
+function confirmReplica(idx, name, action, message, label, onOk) {
     var seat = action.indexOf('seat') === 0;
     showModal(seat ? 'Steam seat' : 'Nested replica', message, label, { confirmClass: /Destroy$/.test(action) ? 'danger' : 'primary' }).then(function(ok) {
-        if (ok) sendCmd(action, {vmIndex: idx, name: name});
+        if (!ok) return;
+        if (onOk) onOk();
+        sendCmd(action, {vmIndex: idx, name: name});
     });
 }
 
@@ -1308,91 +1586,189 @@ function replicaLimits(vm) {
     return { cores: cores, ram: Math.max(1024, ram - 2048), vmRam: ram };
 }
 
-/* "+" in the nested column: name and size a new replica; the agent then
-   installs the packages, builds the identity-patched QEMU (first time only),
-   creates the replica and installs XFCE + Steam, all in the background.
-   The same dialog makes a Steam seat instead: a Linux user with an Xvnc
-   display, XFCE and Steam on the machine itself (no VM, no size; shares the
-   machine's identity), ready in a minute once the packages are in. */
-function addReplica(idx) {
-    var all = parseReplicas(vms[idx] && vms[idx].replicas);
-    var existing = all.map(function(r) { return r.name; });
+/* ---- "+" on a sandbox (or this PC): the Add dialog ----
+   A nested replica and a Steam seat are different things, so the dialog
+   asks which first and shows only that kind's fields: a replica is sized
+   (cores, RAM, disk), a seat is not - it is a user with a display. */
+var addVmIndex = -1;
+
+function nextFreeName(base, taken, n) {
+    if (taken.indexOf(base) < 0) return base;
+    for (var i = Math.max(2, n + 1); ; i++) if (taken.indexOf(base + i) < 0) return base + i;
+}
+
+function addTakenNames(vm) {
+    var taken = parseReplicas(vm.replicas).map(function(r) { return r.name; });
+    var prefix = 'create:rep:' + vm.name + '/';
+    Object.keys(pending).forEach(function(k) { if (k.indexOf(prefix) === 0) taken.push(k.slice(prefix.length)); });
+    return taken;
+}
+
+function openAddModal(idx) {
+    var vm = vms[idx];
+    if (!vm) return;
+    addVmIndex = idx;
+    var taken = addTakenNames(vm);
+    var all = parseReplicas(vm.replicas);
     var nrep = all.filter(function(r) { return r.kind !== 'seat'; }).length;
     var nseat = all.length - nrep;
-    var def = existing.indexOf('replica') < 0 ? 'replica' : 'replica' + (nrep + 1);
-    var seatDef = existing.indexOf('seat') < 0 ? 'seat' : 'seat' + (nseat + 1);
-    var vm = vms[idx] || {};
     var lim = replicaLimits(vm);
     var onHost = !!vm.isHost;
-    var where = onHost ? 'this PC' : 'sandbox';
-    var fields = [
-        { key: 'kind', label: 'What to add', type: 'select', value: 'replica', options: [
-            { value: 'replica', label: 'Nested replica: a KVM guest with its own machine identity' },
-            { value: 'seat', label: 'Steam seat: a user + XFCE + Steam on ' + where + ' itself (no VM; cores / RAM / disk below do not apply)' } ] },
-        { key: 'name', label: 'Name (replica: letters, digits, - _ . ; seat: a Linux user name, lowercase)', type: 'text', value: def },
-        { key: 'cpus', label: 'Cores (' + where + ': ' + lim.cores + ')', type: 'number', value: Math.min(4, lim.cores), min: 1, max: lim.cores },
-        { key: 'ram', label: 'RAM in MB (' + where + ': ' + lim.vmRam + ')', type: 'number', value: Math.min(4096, lim.ram), min: 512, max: lim.ram, step: 256 },
-        { key: 'disk', label: 'Disk in GB', type: 'number', value: 20, min: 5, max: 2048 }
-    ];
-    /* Steam seat extras (a replica ignores them), remembered in this browser
-       so the next seat gets the same game and programs. */
+    var where = onHost ? 'this PC' : vm.name;
+    var g = function(id) { return document.getElementById(id); };
+
+    g('add-eyebrow').textContent = onHost ? 'add to this pc' : 'add to sandbox';
+    g('add-title').textContent = 'Add to ' + vm.name;
+    g('add-seat-meta').textContent = 'seconds · uses only what its programs take · shows ' + where + '\'s identity';
+    g('add-replica-meta').textContent = (onHost ? '10–20 min' : '10–30 min') + ' · reserves cores, RAM and disk · looks like another PC';
+
+    /* replica */
+    g('add-rep-name').value = nextFreeName('replica', taken, nrep);
+    g('add-rep-cpus').value = Math.min(4, lim.cores);
+    g('add-rep-cpus').max = lim.cores;
+    g('add-rep-cpus-info').textContent = where + ' has ' + lim.cores;
+    g('add-rep-ram').value = Math.min(4096, lim.ram);
+    g('add-rep-ram').max = lim.ram;
+    g('add-rep-ram-info').textContent = where + ' has ' + lim.vmRam + ' MB; up to ' + lim.ram + ' MB for a replica';
+    g('add-rep-disk').value = 20;
+    var patch = onHost && !vm.qemuPatched;
+    g('add-rep-patch-label').hidden = !patch;
+    g('add-rep-patch-row').hidden = !patch;
+    g('add-rep-patch').checked = false;
+    g('add-rep-note').textContent = onHost
+        ? 'Nestbox creates it from the Ubuntu cloud image and installs XFCE + Steam (10–20 min). Its row appears once it boots; every step is in the log.'
+        : 'Nestbox builds the identity-patched QEMU inside ' + vm.name + ' (the first time, ~10 min), creates the replica and installs XFCE + Steam (10–20 min). Its row appears once it boots; every step is in the log.';
+
+    /* seat */
     var last = {};
     try { last = JSON.parse(localStorage.getItem('nestbox.seat') || '{}') || {}; } catch (e) {}
-    fields.push(
-        { key: 'steamApp', label: 'Seat: Steam game to open at login (app id, e.g. 2081880 for Kathana; empty = Steam only)', type: 'text', value: last.steamApp || '' },
-        { key: 'copyGame', label: 'Seat: copy that game from this PC\'s Steam library instead of downloading it again', type: 'checkbox', value: last.copyGame !== false },
-        { key: 'autostart', label: 'Seat: also start at login (a command, e.g. /usr/local/bin/auto-kathana; optional)', type: 'text', value: last.autostart || '' });
-    /* Linux host: the patch is optional; the sandbox always builds it. */
-    if (onHost && !vm.qemuPatched)
-        fields.push({ key: 'patch', label: 'Build the identity-patched QEMU first (~10 min, once; hypervisor-level identity strings)', type: 'checkbox', value: false });
-    showModal('New nested replica or Steam seat',
-        (onHost
-            ? 'A replica is a KVM guest on this PC with the bare-metal identity from the profile. ' +
-              'Nestbox creates it from the Ubuntu cloud image and installs XFCE + Steam (10-20 min). '
-            : 'A replica is a KVM guest inside this sandbox with the bare-metal identity from the profile. ' +
-              'Nestbox builds the patched QEMU (first time, ~10 min), creates the replica and installs XFCE + Steam (10-20 min). ') +
-        'Progress shows in the log; the row appears once it boots. Its size can be changed later from the row. ' +
-        'A Steam seat is far lighter: a Linux user on ' + where + ' with an Xvnc display, XFCE and Steam at login ' +
-        '(packages once, ~1.5 GB; then seconds per seat), but every seat shows the same machine identity. ' +
-        'A seat can open a Steam game at login, take its files from this PC\'s library, and start other programs; the seat still signs in to Steam itself.',
-        'Create', { confirmClass: 'primary', fields: fields })
-    .then(function(f) {
-        if (!f) return;
-        if (f.kind === 'seat') {
-            var sname = String(f.name || '').trim().toLowerCase();
-            if (sname === def) sname = seatDef;                  /* the replica default was left in place */
-            sname = sname.replace(/[^a-z0-9_-]/g, '-').replace(/^[^a-z]+/, '').slice(0, 31);
-            if (!sname) { showModal('Steam seat', 'A seat name is a Linux user name: lowercase letters, digits, - and _, starting with a letter.', 'OK', { confirmClass: 'primary' }); return; }
-            if (existing.indexOf(sname) >= 0) { showModal('Steam seat', 'A replica or seat named "' + sname + '" already exists.', 'OK', { confirmClass: 'primary' }); return; }
-            var app = String(f.steamApp || '').replace(/\D/g, '');
-            var cmd = String(f.autostart || '').trim();
-            try { localStorage.setItem('nestbox.seat', JSON.stringify({ steamApp: app, copyGame: !!f.copyGame, autostart: cmd })); } catch (e) {}
-            var autostart = [];
-            if (cmd) {
-                /* the entry's name: the program's basename (the last path-like word) */
-                var toks = cmd.split(/\s+/), paths = toks.filter(function(t) { return t.indexOf('/') >= 0; });
-                autostart.push((paths.length ? paths[paths.length - 1] : toks[0]).split('/').pop() + '=' + cmd);
-            }
-            sendCmd('seatCreate', {vmIndex: idx, name: sname, res: '1600x900', steam: true, steamApp: app, copyGame: !!f.copyGame, autostart: autostart});
-            return;
-        }
-        var name = String(f.name || '').trim().replace(/[^A-Za-z0-9._-]/g, '-');
-        if (!name) return;
-        if (existing.indexOf(name) >= 0) { showModal('Nested replica', 'A replica or seat named "' + name + '" already exists.', 'OK', { confirmClass: 'primary' }); return; }
-        var cpus = parseInt(f.cpus, 10) || 4, ram = parseInt(f.ram, 10) || 4096, disk = parseInt(f.disk, 10) || 20;
-        sendCmd('replicaSetup', {vmIndex: idx, name: name, cpus: cpus, ram: ram, disk: disk, patch: !!f.patch});
-    });
+    g('add-seat-name').value = nextFreeName('seat', taken, nseat);
+    g('add-seat-res').value = last.res || '1600x900';
+    g('add-seat-app').value = last.steamApp || '';
+    g('add-seat-copy').checked = last.copyGame !== false;
+    g('add-seat-auto').value = last.autostart || '';
+    /* the game / copy / autostart words only reach a seat on a Linux host;
+       inside a sandbox the guest agent takes the screen size alone */
+    document.querySelectorAll('#add-form-seat .seat-host-only').forEach(function(el) { el.hidden = !onHost; });
+    g('add-seat-note').textContent = 'Packages once (~1.5 GB), then seconds per seat. The seat signs in to Steam itself; the user\'s password is test123. ' +
+        (onHost ? 'A game at login and extra programs can be changed later with "sudo appsandbox-seat -n <name> configure".'
+                : 'A game at login and extra programs are set inside ' + vm.name + ' with "sudo appsandbox-seat -n <name> configure".');
+
+    var kind = 'replica';
+    try { kind = localStorage.getItem('nestbox.addKind') || 'replica'; } catch (e) {}
+    g('add-kind-seat').checked = kind === 'seat';
+    g('add-kind-replica').checked = kind !== 'seat';
+    applyAddKind();
+    g('add-overlay').classList.add('active');
+    setTimeout(function() { var el = g(kind === 'seat' ? 'add-seat-name' : 'add-rep-name'); el.focus(); el.select(); }, 30);
 }
+
+function applyAddKind() {
+    var seat = document.getElementById('add-kind-seat').checked;
+    document.getElementById('add-form-replica').hidden = seat;
+    document.getElementById('add-form-seat').hidden = !seat;
+    document.getElementById('btn-add').textContent = seat ? 'Create seat' : 'Create replica';
+    document.querySelectorAll('.kind-card').forEach(function(c) { c.classList.toggle('selected', c.querySelector('input').checked); });
+    revalidateAdd();
+}
+
+function seatNameError(name, taken) {
+    if (!name) return 'A user name is required.';
+    if (!/^[a-z][a-z0-9_-]{0,30}$/.test(name)) return 'A Linux user name: lowercase letters, digits, - and _, starting with a letter.';
+    if (taken.indexOf(name) >= 0) return 'A replica or seat named "' + name + '" already exists.';
+    return null;
+}
+function replicaNameError(name, taken) {
+    if (!name) return 'A name is required.';
+    if (!/^[A-Za-z0-9._-]{1,48}$/.test(name)) return 'Letters, digits, - _ and . only.';
+    if (taken.indexOf(name) >= 0) return 'A replica or seat named "' + name + '" already exists.';
+    return null;
+}
+
+function revalidateAdd() {
+    var vm = vms[addVmIndex];
+    if (!vm) return;
+    var taken = addTakenNames(vm);
+    var seat = document.getElementById('add-kind-seat').checked;
+    var err;
+    if (seat) {
+        err = seatNameError(document.getElementById('add-seat-name').value.trim(), taken);
+        document.getElementById('add-seat-warn').textContent = err || '';
+    } else {
+        err = replicaNameError(document.getElementById('add-rep-name').value.trim(), taken);
+        document.getElementById('add-rep-warn').textContent = err || '';
+    }
+    document.getElementById('btn-add').disabled = !!err;
+}
+document.getElementById('add-seat-name').addEventListener('input', revalidateAdd);
+document.getElementById('add-rep-name').addEventListener('input', revalidateAdd);
+
+function closeAddModal() {
+    document.getElementById('add-overlay').classList.remove('active');
+    addVmIndex = -1;
+}
+
+function onAddConfirm() {
+    var idx = addVmIndex, vm = vms[idx];
+    if (!vm) return;
+    var taken = addTakenNames(vm);
+    var seat = document.getElementById('add-kind-seat').checked;
+    try { localStorage.setItem('nestbox.addKind', seat ? 'seat' : 'replica'); } catch (e) {}
+    if (seat) {
+        var sname = document.getElementById('add-seat-name').value.trim().toLowerCase();
+        if (seatNameError(sname, taken)) { revalidateAdd(); return; }
+        var res = document.getElementById('add-seat-res').value;
+        var app = document.getElementById('add-seat-app').value.replace(/\D/g, '');
+        var copy = document.getElementById('add-seat-copy').checked;
+        var cmd = document.getElementById('add-seat-auto').value.trim();
+        try { localStorage.setItem('nestbox.seat', JSON.stringify({ res: res, steamApp: app, copyGame: copy, autostart: cmd })); } catch (e) {}
+        var autostart = [];
+        if (cmd) {
+            /* the entry's name: the program's basename (the last path-like word) */
+            var toks = cmd.split(/\s+/), paths = toks.filter(function(t) { return t.indexOf('/') >= 0; });
+            autostart.push((paths.length ? paths[paths.length - 1] : toks[0]).split('/').pop() + '=' + cmd);
+        }
+        setPending('create:rep:' + vm.name + '/' + sname, { label: 'Creating', name: sname, kind: 'seat', ttl: 20 * 60000,
+            expect: function() { return !!findRep(vm.name, sname); } });
+        sendCmd('seatCreate', {vmIndex: idx, name: sname, res: res, steam: true, steamApp: app, copyGame: copy, autostart: autostart});
+    } else {
+        var name = document.getElementById('add-rep-name').value.trim();
+        if (replicaNameError(name, taken)) { revalidateAdd(); return; }
+        var lim = replicaLimits(vm);
+        var cpus = Math.min(lim.cores, Math.max(1, parseInt(document.getElementById('add-rep-cpus').value, 10) || 4));
+        var ram = Math.min(lim.ram, Math.max(512, parseInt(document.getElementById('add-rep-ram').value, 10) || 4096));
+        var disk = Math.min(2048, Math.max(5, parseInt(document.getElementById('add-rep-disk').value, 10) || 20));
+        var patch = !document.getElementById('add-rep-patch-row').hidden && document.getElementById('add-rep-patch').checked;
+        setPending('create:rep:' + vm.name + '/' + name, { label: 'Creating', name: name, kind: 'replica', ttl: 60 * 60000,
+            expect: function() { return !!findRep(vm.name, name); } });
+        sendCmd('replicaSetup', {vmIndex: idx, name: name, cpus: cpus, ram: ram, disk: disk, patch: patch});
+    }
+    closeAddModal();
+}
+
+(function() {
+    var press = false;
+    var ov = document.getElementById('add-overlay');
+    ov.addEventListener('mousedown', function(e) { press = (e.target === this); });
+    ov.addEventListener('click', function(e) { if (e.target === this && press) closeAddModal(); press = false; });
+    ov.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && e.target.tagName === 'INPUT' && e.target.type !== 'checkbox' && e.target.type !== 'radio') {
+            e.preventDefault();
+            if (!document.getElementById('btn-add').disabled) onAddConfirm();
+        }
+    });
+})();
 
 /* Pencil on a replica row: cores, RAM and disk. Cores and RAM are redefined
    in libvirt and apply when the replica next boots (now, with the restart
    box). The disk can only grow; cloud-init's growpart extends the root
    filesystem at the next boot. */
 function resizeReplica(idx, r) {
-    var lim = replicaLimits(vms[idx]);
+    var vm = vms[idx] || {};
+    var lim = replicaLimits(vm);
     var running = r.state === 'running';
-    showModal('Replica "' + r.name + '": resources',
-        'Limited by the sandbox (' + lim.cores + ' cores, ' + lim.vmRam + ' MB). Cores and RAM apply when the replica next boots; ' +
+    showModal('Replica "' + r.name + '": size',
+        'Limited by ' + (vm.isHost ? 'this PC' : 'the sandbox') + ' (' + lim.cores + ' cores, ' + lim.vmRam + ' MB). Cores and RAM apply when the replica next boots; ' +
         'the disk can only grow, and the root filesystem extends itself at the next boot.',
         'Apply', { confirmClass: 'primary', fields: [
             { key: 'cpus', label: 'Cores', type: 'number', value: r.cpus || 4, min: 1, max: lim.cores },
@@ -1405,6 +1781,10 @@ function resizeReplica(idx, r) {
         var cpus = parseInt(f.cpus, 10), ram = parseInt(f.ram, 10), disk = parseInt(f.disk, 10);
         if (!(cpus >= 1) || !(ram >= 256) || !(disk >= 1)) return;
         if (r.disk && disk < r.disk) { showModal('Nested replica', 'The disk can only grow (it is ' + r.disk + ' GB now).', 'OK', { confirmClass: 'primary' }); return; }
+        pendRep(vm.name, r.name, 'Resizing', 120000, function() {
+            var x = findRep(vm.name, r.name);
+            return !x || (x.cpus === cpus && x.ram === ram && x.disk === disk);
+        });
         sendCmd('replicaResize', {vmIndex: idx, name: r.name, cpus: cpus, ram: ram, disk: disk, restart: !!f.restart});
     });
 }
@@ -1413,12 +1793,23 @@ function makeCell(text, row, col, title) {
     var td = document.createElement('td');
     td.textContent = text;
     if (title) td.title = title;
-    /* GPU names from lspci run long: clip them so the icon columns stay in view */
+    if (col === 4 || col === 5 || col === 6) td.className = 'num';
+    /* GPU names from lspci run long: clip them so the actions stay in view */
     if (col === 7) { td.className = 'gpu-col'; if (!title) td.title = text; }
+
+    /* an edited value the host has not echoed back yet */
+    var vm = vms[row];
+    var ep = vm && pendingFor('edit:' + vm.name);
+    if (ep && ep.col === col) {
+        var sp = document.createElement('span');
+        sp.className = 'spinner';
+        sp.title = 'Saving…';
+        td.appendChild(sp);
+    }
 
     /* Editable columns: 4=CPU, 5=RAM, 7=GPU, 8=Network */
     if (editModeRow === row && (col === 4 || col === 5 || col === 7 || col === 8)) {
-        td.style.cursor = 'pointer';
+        td.classList.add('editable');
         td.title = 'Click to edit';
         td.onclick = function(e) {
             e.stopPropagation();
@@ -1428,33 +1819,21 @@ function makeCell(text, row, col, title) {
     return td;
 }
 
-/* Which glyph an icon cell shows: by the cell's kind, or by the legacy emoji
-   the caller passes for state variants (start / clock / screen / check). */
+/* Which glyph an icon button shows: by the button's kind, or by the legacy
+   emoji the caller passes for state variants (start / screen / check). */
 var ICON_BY_CLASS = {
-    start: 'i-play', 'connect-idd': 'i-monitor', vnc: 'i-nest', identity: 'i-id',
-    shutdown: 'i-power', stop: 'i-x', 'delete': 'i-trash', edit: 'i-pencil'
+    start: 'i-play', 'connect-idd': 'i-monitor', vnc: 'i-nest', identity: 'i-id', add: 'i-plus',
+    shutdown: 'i-power', stop: 'i-x', 'delete': 'i-trash', edit: 'i-pencil', restart: 'i-restart', dismiss: 'i-x'
 };
 var ICON_BY_GLYPH = {
-    '\u25B6\uFE0F': 'i-play', '\u23F3': 'i-clock', '\uD83D\uDDA5\uFE0F': 'i-screen', '\u2714\uFE0F': 'i-check',
-    '+': 'i-plus', 'desktop': 'i-monitor', '\u21BB': 'i-restart', 'grid': 'i-grid'
+    '▶️': 'i-play', '🖥️': 'i-screen', '✔️': 'i-check',
+    '+': 'i-plus', 'desktop': 'i-monitor', '↻': 'i-restart', 'grid': 'i-grid', 'x': 'i-x', 'id': 'i-id'
 };
 function iconMarkup(cls, icon) {
     if (cls === 'ssh') return '<span class="mono">&gt;_</span>';
+    if (icon === 'spinner') return '<span class="spinner"></span>';
     var id = ICON_BY_GLYPH[icon] || ICON_BY_CLASS[cls];
     return id ? '<svg class="ic" aria-hidden="true"><use href="#' + id + '"/></svg>' : icon;
-}
-
-function makeIconCell(cls, icon, active, handler, extraClass, title) {
-    var td = document.createElement('td');
-    td.className = 'icon-col';
-    var btn = document.createElement('button');
-    btn.className = 'icon-btn ' + cls + (active ? '' : ' inactive') + (extraClass ? ' ' + extraClass : '');
-    btn.innerHTML = iconMarkup(cls, icon);
-    if (title) btn.title = title;
-    if (active) btn.onclick = handler;
-    else btn.disabled = true;
-    td.appendChild(btn);
-    return td;
 }
 
 /* ---- VM Selection ---- */
@@ -1553,6 +1932,10 @@ function commitInlineEdit() {
     }
 
     if (field) {
+        var vmName = vms[row] && vms[row].name, want = value;
+        if (vmName) setPending('edit:' + vmName, { label: 'Saving', ttl: 8000, col: col, expect: function() {
+            var v = findVm(vmName); return !v || String(v[field]) === String(want);
+        } });
         sendCmd('editVm', { vmIndex: row, field: field, value: value });
         if (field === 'networkMode' && value === '2' && currentDefaultAdapter) {
             sendCmd('editVm', { vmIndex: row, field: 'netAdapter', value: currentDefaultAdapter });
@@ -1577,12 +1960,14 @@ function onStopVm(idx) {
             'Stop & Delete'
         ).then(function(confirmed) {
             if (confirmed) {
+                pendVm(vm.name, 'Deleting', 120000, function() { return !findVm(vm.name); });
                 sendCmd('stopVm', { vmIndex: idx });
                 sendCmd('deleteVm', { vmIndex: idx });
             }
         });
     } else {
         if (localStorage.getItem('suppress_force_stop_warn') === '1') {
+            pendVm(vm.name, 'Stopping', 60000, function() { var v = findVm(vm.name); return !v || !v.running; });
             sendCmd('stopVm', { vmIndex: idx });
         } else {
             showForceStopModal(idx);
@@ -1603,6 +1988,8 @@ function showForceStopModal(idx) {
     pendingConfirm = { resolve: function(confirmed) {
         if (confirmed) {
             if (cb && cb.checked) localStorage.setItem('suppress_force_stop_warn', '1');
+            var vn = vms[idx].name;
+            pendVm(vn, 'Stopping', 60000, function() { var v = findVm(vn); return !v || !v.running; });
             sendCmd('stopVm', { vmIndex: idx });
         }
         if (cb) cb.parentElement.style.display = 'none';
@@ -1620,6 +2007,7 @@ function onDeleteVm(idx) {
         'Delete'
     ).then(function(confirmed) {
         if (confirmed) {
+            pendVm(vm.name, 'Deleting', 180000, function() { return !findVm(vm.name); });
             sendCmd('deleteVm', { vmIndex: idx });
         }
     });
@@ -1646,6 +2034,21 @@ function makeSnapCell(vm, vmIdx) {
     var curBranch = vm.snapCurrentBranch; /* branch index or -1 */
     var hasSn = vm.hasSnapshots;
     var sel = selectedSnap[vmIdx] || 'current';
+
+    var snapPending = pendingFor('snap:' + vm.name);
+    if (snapPending) {
+        td.className = 'snap-cell busy';
+        td.innerHTML = '<span class="hint">' + snapPending.label + '…</span><span class="spinner"></span>';
+        return td;
+    }
+    /* what the tree looks like now: a snapshot action is done once it differs */
+    var treeNow = JSON.stringify([vm.snapshots || [], vm.baseBranches || [], vm.hasSnapshots]);
+    var snapPend = function(label) {
+        setPending('snap:' + vm.name, { label: label, ttl: 120000, expect: function() {
+            var v = findVm(vm.name);
+            return !v || JSON.stringify([v.snapshots || [], v.baseBranches || [], v.hasSnapshots]) !== treeNow;
+        } });
+    };
 
     var snapWrap = document.createElement('span');
     snapWrap.className = 'snap-wrap';
@@ -1754,7 +2157,7 @@ function makeSnapCell(vm, vmIdx) {
     /* Take snapshot button — only when stopped */
     var takeBtn = document.createElement('button');
     takeBtn.className = 'snap-btn';
-    takeBtn.textContent = '+';
+    takeBtn.innerHTML = '<svg class="ic"><use href="#i-plus"/></svg>';
     takeBtn.title = 'Take snapshot';
     takeBtn.disabled = vm.running;
     takeBtn.onclick = function(e) {
@@ -1765,6 +2168,7 @@ function makeSnapCell(vm, vmIdx) {
             input: { label: 'Snapshot name:', value: defaultName }
         }).then(function(result) {
             if (result === false) return;
+            snapPend('Taking the snapshot');
             sendCmd('snapTake', { vmIndex: vmIdx, name: result });
         });
     };
@@ -1775,7 +2179,7 @@ function makeSnapCell(vm, vmIdx) {
     if (!vm.running && parsed.snapIndex >= 0) {
         var delBtn = document.createElement('button');
         delBtn.className = 'snap-btn danger';
-        delBtn.textContent = '\u2715';
+        delBtn.innerHTML = '<svg class="ic"><use href="#i-x"/></svg>';
 
         if (parsed.branchIndex >= 0) {
             /* Delete a single branch */
@@ -1787,6 +2191,7 @@ function makeSnapCell(vm, vmIdx) {
                     'Delete'
                 ).then(function(confirmed) {
                     if (confirmed) {
+                        snapPend('Deleting the branch');
                         sendCmd('snapDeleteBranch', { vmIndex: vmIdx, snapIndex: parsed.snapIndex, branchIndex: parsed.branchIndex });
                         selectedSnap[vmIdx] = 'current';
                     }
@@ -1803,6 +2208,7 @@ function makeSnapCell(vm, vmIdx) {
                     'Delete'
                 ).then(function(confirmed) {
                     if (confirmed) {
+                        snapPend('Deleting the snapshot');
                         sendCmd('snapDelete', { vmIndex: vmIdx, snapIndex: parsed.snapIndex });
                         selectedSnap[vmIdx] = 'current';
                     }
@@ -1816,7 +2222,7 @@ function makeSnapCell(vm, vmIdx) {
     if (!vm.running && parsed.snapIndex === -2 && parsed.branchIndex >= 0) {
         var delBrBtn = document.createElement('button');
         delBrBtn.className = 'snap-btn danger';
-        delBrBtn.textContent = '\u2715';
+        delBrBtn.innerHTML = '<svg class="ic"><use href="#i-x"/></svg>';
         delBrBtn.title = 'Delete base branch';
         delBrBtn.onclick = function(e) {
             e.stopPropagation();
@@ -1825,6 +2231,7 @@ function makeSnapCell(vm, vmIdx) {
                 'Delete'
             ).then(function(confirmed) {
                 if (confirmed) {
+                    snapPend('Deleting the branch');
                     sendCmd('snapDeleteBranch', { vmIndex: vmIdx, snapIndex: -2, branchIndex: parsed.branchIndex });
                     selectedSnap[vmIdx] = 'current';
                 }
@@ -1849,7 +2256,7 @@ function makeSnapCell(vm, vmIdx) {
         if (currentName || parsed.snapIndex >= 0) {
             var renBtn = document.createElement('button');
             renBtn.className = 'snap-btn';
-            renBtn.textContent = '\u270F';
+            renBtn.innerHTML = '<svg class="ic"><use href="#i-pencil"/></svg>';
             renBtn.title = 'Rename';
             renBtn.onclick = function(e) {
                 e.stopPropagation();
@@ -1860,6 +2267,7 @@ function makeSnapCell(vm, vmIdx) {
                     if (result === false || result === currentName) return;
                     var cmd = { vmIndex: vmIdx, snapIndex: parsed.snapIndex, name: result };
                     if (parsed.branchIndex >= 0) cmd.branchIndex = parsed.branchIndex;
+                    snapPend('Renaming');
                     sendCmd('snapRename', cmd);
                 });
             };
