@@ -1552,6 +1552,12 @@ function replicaRow(vm, idx, r, cols) {
     /* a replica with a desktop can hold Steam seats of its own */
     var addSeatBtn = seat ? null : actBtn('add', '+', running && !!r.desktop && !busy, function() { openAddModal(idx, name); },
         r.desktop ? 'Add a Steam seat inside replica "' + name + '"' : 'Seats need the replica\'s desktop installed first');
+    /* the replica's set of screens: its running seats side by side (its own console has the screen button) */
+    var liveSeats = seat ? [] : seatsInside(vm, name).filter(function(x) { return x.state === 'running' && x.vnc; });
+    var seatTiles = liveSeats.map(function(x) { return name + '.' + x.name + ':' + x.vnc + ':seat:' + name; }).join(',');
+    var gridBtn = seat ? null : actBtn('vnc', 'grid', liveSeats.length > 0, function() { sendCmd('vncGrid', {vmIndex: idx, tiles: seatTiles, 'in': name}); },
+        liveSeats.length ? 'Open the ' + liveSeats.length + (liveSeats.length === 1 ? ' running seat' : ' running seats') + ' inside "' + name + '" side by side in one window'
+                         : 'The seats inside "' + name + '" open here once one runs');
     var stopBtn = actBtn('shutdown', '⏻', running && !busy, function() {
         pendRep(vm.name, name, 'Stopping', 90000, function() { var x = findRep(vm.name, name, inRep); return !x || x.state !== 'running'; }, inRep);
         sendCmd(act + 'Stop', msgFor());
@@ -1568,7 +1574,7 @@ function replicaRow(vm, idx, r, cols) {
             pendRep(vm.name, name, 'Deleting', 180000, function() { return !findRep(vm.name, name, inRep); }, inRep);
         }, inRep ? {'in': inRep} : null);
     }, 'Delete this ' + act, running ? 'running' : '');
-    tr.appendChild(actionsCell([[startBtn, screenBtn], [sizeBtn, desktopBtn, addSeatBtn], [stopBtn, restartBtn], [deleteBtn]]));
+    tr.appendChild(actionsCell([[startBtn, screenBtn], [sizeBtn, desktopBtn, addSeatBtn, gridBtn], [stopBtn, restartBtn], [deleteBtn]]));
     return tr;
 }
 

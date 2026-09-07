@@ -66,8 +66,11 @@ the data columns:
 - A seat **inside a replica** (a Linux host's replica with a desktop can hold
   several): the same row one arm deeper, under its replica, `vnc airbus:5901`
   in the spec. The replica row's second group has a `+` for it.
-- Actions: `[start · screen] [size · desktop · add seat] [stop · restart] [delete]`;
-  a seat keeps the three empty slots of the second group.
+- Actions: `[start · screen] [size · desktop · add seat · screens] [stop · restart] [delete]`;
+  a seat keeps the four empty slots of the second group. A replica's **screens**
+  (grid) button is its own set of screens: the running seats inside it, side by
+  side, in a window named after the replica (its console stays on its screen
+  button).
 - The **screens** (grid) button belongs to the sandbox row, not to the first
   replica row, because it is the sandbox's set of screens.
 

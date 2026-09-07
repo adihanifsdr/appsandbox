@@ -754,7 +754,9 @@ def handle(msg, ws):
             tiles.append("%s:%s:%d%s%s" % (urllib.parse.quote(clean_name(n)), urllib.parse.quote(vnc_bridge(p, host)), p, kind,
                                            (":" + urllib.parse.quote(rep)) if rep else ""))
         if tiles:
-            url = "viewer.html?grid=1&vm=0&vmName=%s&tiles=%s" % (urllib.parse.quote(HOSTNAME), ",".join(tiles))
+            # from a replica row: the seats inside that replica, the window named after it
+            owner = clean_name(msg.get("in")) if msg.get("in") else HOSTNAME
+            url = "viewer.html?grid=1&vm=0&vmName=%s&tiles=%s" % (urllib.parse.quote(owner), ",".join(tiles))
             ws.send(json.dumps({"type": "openWindow", "url": url, "width": 0, "height": 0}))
     elif action == "vncConnect":
         port = int(msg.get("port") or 5900)
