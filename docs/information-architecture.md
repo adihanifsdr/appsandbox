@@ -63,8 +63,11 @@ the data columns:
 
 - Spec, replica: `4 cores · 8192 MB · 40 GB · xfce · 800x600 | no desktop · vnc :5900`.
 - Spec, seat: `xfce · 1600x900 · steam app 2081880 | steam · vnc :5903`.
-- Actions: `[start · screen] [size · desktop] [stop · restart] [delete]`; a seat
-  keeps the two empty slots of the second group.
+- A seat **inside a replica** (a Linux host's replica with a desktop can hold
+  several): the same row one arm deeper, under its replica, `vnc airbus:5901`
+  in the spec. The replica row's second group has a `+` for it.
+- Actions: `[start · screen] [size · desktop · add seat] [stop · restart] [delete]`;
+  a seat keeps the three empty slots of the second group.
 - The **screens** (grid) button belongs to the sandbox row, not to the first
   replica row, because it is the sandbox's set of screens.
 
@@ -87,7 +90,8 @@ stops waiting without cancelling anything.
 
 "+" on a sandbox (or on this PC) opens **Add to \<name\>**. The first thing on
 it is the choice, as two cards side by side, because the two things are not
-variants of one form:
+variants of one form (the `+` of a replica row opens the same dialog with the
+seat card alone: only a seat fits inside a replica):
 
 | | Nested replica | Steam seat |
 |---|---|---|

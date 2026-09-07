@@ -24,6 +24,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 import shutil
 import socket
 import socketserver
@@ -193,27 +194,29 @@ def _pipe_tcp_to_ws(ws, tcp):
         ws.close()
 
 
-def bridge_vnc(ws, vnc_port):
-    """Pipe an accepted WebSocket to 127.0.0.1:<vnc_port> until either side closes."""
+def bridge_vnc(ws, vnc_port, host="127.0.0.1"):
+    """Pipe an accepted WebSocket to <host>:<vnc_port> until either side closes
+    (host: a replica's virbr0 address, for the Xvnc of a seat inside it)."""
     tcp = None
     try:
-        tcp = socket.create_connection(("127.0.0.1", vnc_port), timeout=5)
+        tcp = socket.create_connection((host, vnc_port), timeout=5)
         tcp.settimeout(None)
         t = threading.Thread(target=_pipe_tcp_to_ws, args=(ws, tcp), daemon=True)
         t.start()
         _pipe_ws_to_tcp(ws, tcp)
         t.join()
     except (OSError, ConnectionError) as e:
-        log("VNC bridge to 127.0.0.1:%d: %s" % (vnc_port, e))
+        log("VNC bridge to %s:%d: %s" % (host, vnc_port, e))
     finally:
         if tcp:
             tcp.close()
         ws.close()
 
 
-def vnc_bridge(vnc_port):
-    """The WebSocket path the viewer page uses for a console."""
-    return "/vnc/%d" % vnc_port
+def vnc_bridge(vnc_port, host=None):
+    """The WebSocket path the viewer page uses for a console (host: a replica's
+    address, for a seat inside it)."""
+    return "/vnc/%d" % vnc_port if not host else "/vnc/%s/%d" % (host, vnc_port)
 
 # -------------------------------------------------------------- UI clients
 
@@ -339,12 +342,95 @@ def _tool_list(tool):
         return []
 
 
+# ------------------------------------------------- seats inside a replica
+# A replica with a desktop can hold Steam seats of its own: this PC's
+# appsandbox-seat is copied into the guest and run there over "appsandbox-replica
+# ssh". The seat's Xvnc listens on the guest's virbr0 address (--interface
+# 0.0.0.0; no VNC auth, so private to this PC like the console) and its row
+# comes back with "in": <replica>.
+_rep_seats = {}          # replica -> {"t": when, "ip": address, "seats": [...]}
+_rep_seats_lock = threading.Lock()
+REP_SEATS_TTL = 15
+
+
+def replica_ip(name):
+    rc, out = run_tool(["-n", name, "ip"], timeout=15)
+    ip = out.strip().split("\n")[0].strip() if rc == 0 and out.strip() else ""
+    return ip if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip) else ""
+
+
+def in_replica(rep, remote):
+    """The tool args that run a shell line inside a replica: -n <rep> ssh '<remote>'."""
+    return ["-n", rep, "ssh", remote]
+
+
+def seat_line(sname, sub, args=()):
+    return " ".join(shlex.quote(a) for a in ["sudo", "appsandbox-seat", "-n", sname, sub] + list(args))
+
+
+def seats_in(rep, fresh=False):
+    """The seats inside a replica ("appsandbox-seat list" over ssh), cached REP_SEATS_TTL seconds."""
+    now = time.time()
+    with _rep_seats_lock:
+        c = _rep_seats.get(rep)
+        if c and not fresh and now - c["t"] < REP_SEATS_TTL:
+            return c["seats"]
+    seats, ip = [], replica_ip(rep)
+    if ip:
+        rc, out = run_tool(in_replica(rep, "sudo appsandbox-seat list 2>/dev/null || echo []"), timeout=25)
+        try:
+            v = json.loads(out) if rc == 0 else []
+        except ValueError:
+            v = []
+        seats = [dict(x, **{"in": rep}) for x in v if isinstance(x, dict) and x.get("name")]
+    with _rep_seats_lock:
+        _rep_seats[rep] = {"t": now, "ip": ip, "seats": seats}
+    return seats
+
+
+def replica_address(rep):
+    """The replica's virbr0 address (from the seats cache, filled on demand)."""
+    seats_in(rep)
+    with _rep_seats_lock:
+        return (_rep_seats.get(rep) or {}).get("ip") or ""
+
+
+def known_replica_ips():
+    with _rep_seats_lock:
+        return set(c["ip"] for c in _rep_seats.values() if c.get("ip"))
+
+
+def forget_seats(rep):
+    with _rep_seats_lock:
+        _rep_seats.pop(rep, None)
+
+
+def push_seat_tool(rep):
+    """Copy this PC's appsandbox-seat into the replica (its stdin over ssh); returns rc."""
+    try:
+        with open(SEAT_TOOL, "rb") as f:
+            body = f.read()
+        p = subprocess.run([REPLICA_TOOL] + in_replica(rep, "cat > /tmp/appsandbox-seat && sudo install -m 0755 /tmp/appsandbox-seat "
+                                                          "/usr/local/sbin/appsandbox-seat && rm -f /tmp/appsandbox-seat"),
+                           input=body, capture_output=True, timeout=120)
+        for line in (p.stdout + p.stderr).decode("utf-8", "replace").splitlines():
+            if line.strip():
+                log("[%s] %s" % (rep, line.rstrip()))
+        return p.returncode
+    except (OSError, subprocess.SubprocessError) as e:
+        log("[%s] %s" % (rep, e))
+        return 1
+
+
 def replica_list():
-    """The replicas [{name,state,vnc,desktop,cpus,ram,disk}, ...] (none without
-    libvirt) followed by the Steam seats [{name,state,vnc,desktop,kind:"seat",res}, ...]."""
+    """The replicas [{name,state,vnc,desktop,cpus,ram,disk,res}, ...] (none without
+    libvirt), each followed by the seats inside it [{..., kind:"seat", in:<replica>}],
+    then this PC's own Steam seats [{name,state,vnc,desktop,kind:"seat",res}, ...]."""
     out = []
     if os.path.exists(REPLICA_TOOL) and have("virsh"):
         out += _tool_list(REPLICA_TOOL)
+        for r in [x for x in out if x.get("desktop") and x.get("state") == "running"]:
+            out += seats_in(r["name"])
     if os.path.exists(SEAT_TOOL):
         out += _tool_list(SEAT_TOOL)
     return out
@@ -404,8 +490,9 @@ _busy = set()
 _busy_lock = threading.Lock()
 
 
-def run_replica_job(name, tag, steps, tool=REPLICA_TOOL):
-    """steps: [(args, description)]; stops at the first failure. Detached."""
+def run_replica_job(name, tag, steps, tool=REPLICA_TOOL, done=None):
+    """steps: [(args, description)], args a tool arg list or a callable returning
+    rc; stops at the first failure. done() runs at the end either way. Detached."""
     with _busy_lock:
         if name in _busy:
             log("[%s] busy, try again when the current step is done." % name)
@@ -416,12 +503,17 @@ def run_replica_job(name, tag, steps, tool=REPLICA_TOOL):
         try:
             for args, desc in steps:
                 log("[%s] %s ..." % (tag, desc))
-                rc = run_tool_streaming(args, tag, tool)
+                rc = args() if callable(args) else run_tool_streaming(args, tag, tool)
                 if rc != 0:
                     log("[%s] %s failed (rc=%d)." % (tag, desc, rc))
                     return
             log("[%s] done." % tag)
         finally:
+            if done:
+                try:
+                    done()
+                except Exception as e:  # a stale cache is not worth a dead thread
+                    log("[%s] %s" % (tag, e))
             with _busy_lock:
                 _busy.discard(name)
             push_state(force=True)
@@ -516,8 +608,50 @@ def handle(msg, ws):
         if not os.path.exists(SEAT_TOOL):
             log("[%s] appsandbox-seat is not installed (expected next to nestbox or in ../seat)." % sname)
             return
+        rep = clean_name(msg.get("in")) if msg.get("in") else ""
+        if rep:
+            # a seat inside a replica: the same tool, copied into and run in the guest
+            if not any(r.get("name") == rep and not r.get("kind") and r.get("state") == "running" and r.get("desktop")
+                       for r in replica_list()):
+                log("[%s/%s] replica '%s' is not running with a desktop." % (rep, sname, rep))
+                return
+            key = rep + "/" + sname
+            if action == "seatCreate":
+                if sname == "user" or any(x.get("name") == sname for x in seats_in(rep, fresh=True)):
+                    log("[%s] already exists in %s." % (sname, rep))
+                    return
+                args = ["--interface", "0.0.0.0"]
+                res = str(msg.get("res") or "")
+                if re.match(r"^\d{3,5}x\d{3,5}$", res):
+                    args += ["--resolution", res]
+                no_steam = msg.get("steam") is False
+                if no_steam:
+                    args.append("--no-steam")
+                app = str(msg.get("steamApp") or "").strip()
+                if app.isdigit():
+                    args += ["--steam-app", app]
+                    if msg.get("copyGame"):
+                        log("[%s] inside a replica the seat downloads app %s itself (this PC's library is not reachable there)." % (key, app))
+                for entry in msg.get("autostart") or []:
+                    entry = str(entry).strip()
+                    if re.match(r"^[^=\s][^=]*=\S", entry):
+                        args += ["--autostart", entry]
+                steps = [(lambda: push_seat_tool(rep), "copying appsandbox-seat into " + rep),
+                         (in_replica(rep, "sudo appsandbox-seat install" + (" --no-steam" if no_steam else "")),
+                          "installing the seat packages in " + rep + " (the first time)"),
+                         (in_replica(rep, seat_line(sname, "create", args)), "creating the Steam seat in " + rep)]
+                run_replica_job(key, key, steps, done=lambda: forget_seats(rep))
+            else:
+                # the guest's copy of the tool follows this PC's on every action (25 KB over ssh)
+                sub = action[4:].lower()
+                run_replica_job(key, key, [(lambda: push_seat_tool(rep), "copying appsandbox-seat into " + rep),
+                                           (in_replica(rep, seat_line(sname, sub)),
+                                            {"start": "starting", "stop": "stopping", "restart": "restarting",
+                                             "destroy": "deleting"}[sub] + " in " + rep)],
+                                done=lambda: forget_seats(rep))
+            return
         if action == "seatCreate":
-            if any(r.get("name") == sname for r in replica_list()):
+            if any(r.get("name") == sname and not r.get("in") for r in replica_list()):
                 log("[%s] already exists." % sname)
                 return
             args = ["-n", sname, "create"]
@@ -586,13 +720,18 @@ def handle(msg, ws):
         run_replica_job(name, name, steps)
     elif action == "vncOpen":
         port = int(msg.get("port") or 5900)
+        rep = clean_name(msg.get("in")) if msg.get("in") else ""
+        host = replica_address(rep) if rep else None
+        if rep and not host:
+            log("[%s/%s] replica '%s' has no address (is it running?)." % (rep, name, rep))
+            return
         url = "viewer.html?ws=%s&vm=0&port=%d&name=%s&vmName=%s&nested=1%s" % (
-            urllib.parse.quote(vnc_bridge(port)), port, urllib.parse.quote(name), urllib.parse.quote(HOSTNAME),
+            urllib.parse.quote(vnc_bridge(port, host)), port, urllib.parse.quote(name), urllib.parse.quote(rep or HOSTNAME),
             "&kind=seat" if msg.get("kind") == "seat" else "")
-        # the window: the screen at 1:1 plus the bar (a seat's resolution is known)
+        # the window: the screen at 1:1 plus the bar (a seat's or a desktop replica's resolution is known)
         width, height = 1640, 990
         for r in replica_list():
-            m = re.match(r"^(\d+)x(\d+)$", str(r.get("res") or "")) if r.get("name") == name else None
+            m = re.match(r"^(\d+)x(\d+)$", str(r.get("res") or "")) if r.get("name") == name and (r.get("in") or "") == rep else None
             if m:
                 width, height = int(m.group(1)) + 2, int(m.group(2)) + 42
         ws.send(json.dumps({"type": "openWindow", "url": url, "width": width, "height": height}))
@@ -603,12 +742,17 @@ def handle(msg, ws):
             if len(parts) < 2:
                 continue
             n, p = parts[0], parts[1]
-            kind = ":seat" if len(parts) > 2 and parts[2] == "seat" else ""   # "name:port:seat" marks a Steam seat
+            kind = ":seat" if len(parts) > 2 and parts[2] == "seat" else ":replica"   # "name:port:seat[:replica]"
+            rep = clean_name(parts[3]) if len(parts) > 3 and parts[3] else ""       # a seat inside that replica
+            host = replica_address(rep) if rep else None
+            if rep and not host:
+                continue
             try:
                 p = int(p)
             except ValueError:
                 continue
-            tiles.append("%s:%s:%d%s" % (urllib.parse.quote(clean_name(n)), urllib.parse.quote(vnc_bridge(p)), p, kind))
+            tiles.append("%s:%s:%d%s%s" % (urllib.parse.quote(clean_name(n)), urllib.parse.quote(vnc_bridge(p, host)), p, kind,
+                                           (":" + urllib.parse.quote(rep)) if rep else ""))
         if tiles:
             url = "viewer.html?grid=1&vm=0&vmName=%s&tiles=%s" % (urllib.parse.quote(HOSTNAME), ",".join(tiles))
             ws.send(json.dumps({"type": "openWindow", "url": url, "width": 0, "height": 0}))
@@ -688,11 +832,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         upgrade = "upgrade" in self.headers.get("Connection", "").lower()
-        m = re.match(r"^/vnc/(\d{1,5})$", self.path)
+        m = re.match(r"^/vnc/(?:(\d{1,3}(?:\.\d{1,3}){3})/)?(\d{1,5})$", self.path)
         if m and upgrade:
+            # only loopback, or the address of a replica this PC listed (its seats' Xvnc)
+            if m.group(1) and m.group(1) not in known_replica_ips():
+                self.send_error(404)
+                return
             ws = self._upgrade()
             if ws:
-                bridge_vnc(ws, int(m.group(1)))
+                bridge_vnc(ws, int(m.group(2)), m.group(1) or "127.0.0.1")
             return
         if self.path == "/ws" and upgrade:
             ws = self._upgrade()

@@ -486,6 +486,8 @@ tr.replica-row td.replica-cell { padding-top: 5px; padding-bottom: 5px; }
 td.replica-cell .chip { margin-left: 0; margin-right: 12px; }
 tr.replica-row.seat td.replica-cell .ic { color: hsl(var(--lamp-run)); }
 tr.replica-row.seat .chip.kind { color: hsl(var(--lamp-run)); background: hsl(var(--lamp-run) / 0.12); }
+/* a seat inside a replica: one level deeper than the replica's row */
+tr.replica-row.in-replica td.replica-cell .replica-arm { margin-left: 26px; }
 td.replica-cell .replica-state { display: inline-block; min-width: 92px; margin-right: 14px; color: hsl(var(--ink-muted)); }
 td.replica-cell .replica-state.run { color: hsl(var(--ink)); }
 td.replica-cell .replica-state.busy { color: hsl(var(--lamp-warn)); }

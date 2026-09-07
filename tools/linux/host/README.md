@@ -77,6 +77,11 @@ is exposed on the server's public address.
   Steam on this PC, no VM and no `/dev/kvm` needed
   ([../seat/](../seat/README.md)); its row has start, screen, stop, restart
   and delete.
+- `+` on a replica row (running, with its desktop): a **seat inside that
+  replica** - the same appsandbox-seat, copied into the guest and run there
+  over ssh, its Xvnc on the replica's virbr0 address (no VNC auth, reachable
+  from this PC only). Several seats share the replica's cores, RAM, disk and
+  identity; each is its own Linux user with its own display, session and Steam.
 - Replica rows: start, screen (browser window), pencil (cores / RAM / disk),
   desktop, shut down, restart, delete, and the grid button for every running
   replica in one window.

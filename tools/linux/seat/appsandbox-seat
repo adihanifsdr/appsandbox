@@ -17,7 +17,7 @@
 #
 # Usage:  appsandbox-seat [-n NAME] <command> ...
 #         appsandbox-seat install [--no-steam]          # packages (once): Xvnc, XFCE, Steam
-#         appsandbox-seat create [--vnc 5901] [--resolution 1600x900] [--no-steam]
+#         appsandbox-seat create [--vnc 5901] [--resolution 1600x900] [--no-steam] [--interface 127.0.0.1]
 #                                [--steam-app 2081880 [--copy-app-from /home/me/.local/share/Steam]]
 #                                [--autostart 'Auto Kathana=/usr/local/bin/auto-kathana'] ...
 #         appsandbox-seat configure <the same --steam-app / --copy-app-from / --autostart>   # on an existing seat
@@ -55,7 +55,7 @@ REPLICA_ROOT=${REPLICA_ROOT:-/var/lib/appsandbox/replica}
 UNIT=appsandbox-seat@$NAME
 UNIT_FILE=/etc/systemd/system/appsandbox-seat@.service
 SELF=/usr/local/sbin/appsandbox-seat
-VNC=5901; RES=1600x900; STEAM=1
+VNC=5901; RES=1600x900; STEAM=1; LISTEN=127.0.0.1
 TIGERVNC_DEB=tigervnc-standalone-server_1.15.0+dfsg-2build1_amd64.deb
 TIGERVNC_URL="http://archive.ubuntu.com/ubuntu/pool/universe/t/tigervnc/$TIGERVNC_DEB"
 TIGERVNC_OPT=/opt/tigervnc
@@ -137,8 +137,8 @@ apply_apps() {   # $1 = home
 
 write_conf() {
     install -d -m 0755 "$DIR"
-    printf "VNC='%s'\nRES='%s'\nSTEAM='%s'\nCREATED='%s'\nSTEAM_APP='%s'\nAUTOSTART='%s'\n" \
-        "$VNC" "$RES" "$STEAM" "$CREATED" "$STEAM_APP" "$(IFS=$'\t'; echo "${AUTOSTART[*]}")" > "$CONF"
+    printf "VNC='%s'\nRES='%s'\nSTEAM='%s'\nCREATED='%s'\nSTEAM_APP='%s'\nAUTOSTART='%s'\nLISTEN='%s'\n" \
+        "$VNC" "$RES" "$STEAM" "$CREATED" "$STEAM_APP" "$(IFS=$'\t'; echo "${AUTOSTART[*]}")" "$LISTEN" > "$CONF"
     chmod 0644 "$CONF"
 }
 
@@ -300,11 +300,16 @@ cmd_create() {
             --vnc) VNC=$2; shift 2 ;;
             --resolution) RES=$2; shift 2 ;;
             --no-steam) STEAM=0; shift ;;
+            # 0.0.0.0 (or one address): the display for another machine, e.g. the
+            # host of a replica this seat lives in; no VNC auth, so only on a
+            # network that is private to that host (libvirt's virbr0)
+            --interface) LISTEN=$2; shift 2 ;;
             *) if app_opt "$@"; then shift $REPLY; else die "unknown option $1"; fi ;;
         esac
     done
     check_res
     case "$VNC" in ''|*[!0-9]*) die "--vnc must be a port number" ;; esac
+    case "$LISTEN" in ''|*[!0-9.]*) die "--interface wants an IPv4 address (127.0.0.1 or 0.0.0.0)" ;; esac
     case "$STEAM_APP" in *[!0-9]*) die "--steam-app wants a Steam app id (digits)" ;; esac
     [ -f "$CONF" ] && die "seat '$NAME' already exists (appsandbox-seat -n $NAME destroy first)"
     if getent passwd "$NAME" >/dev/null; then
@@ -346,9 +351,10 @@ XML
 
     CREATED=$(date -u +%FT%TZ)
     write_conf
+    eac_lock_fix
     write_unit
     systemctl enable --now "$UNIT" >/dev/null
-    echo "OK: seat '$NAME' created and started (user $NAME / test123, vnc 127.0.0.1:$VNC, $RES$( [ $STEAM = 1 ] && echo ", Steam${STEAM_APP:+ app $STEAM_APP} at login")$( [ ${#AUTOSTART[@]} -gt 0 ] && echo ", ${#AUTOSTART[@]} autostart"))"
+    echo "OK: seat '$NAME' created and started (user $NAME / test123, vnc $LISTEN:$VNC, $RES$( [ $STEAM = 1 ] && echo ", Steam${STEAM_APP:+ app $STEAM_APP} at login")$( [ ${#AUTOSTART[@]} -gt 0 ] && echo ", ${#AUTOSTART[@]} autostart"))"
     echo "    open it with the screen button of its row; log: journalctl -u $UNIT"
 }
 
@@ -411,11 +417,16 @@ seat_down() {   # $1 = name
 # procedures, please run the system repair." A root-owned 0666 file serves
 # them all (fs.protected_regular lets anyone open it: root owns /tmp too).
 eac_lock_fix() {
-    local d=/tmp/snap-private-tmp/snap.steam/tmp f
-    [ -d "$d" ] || return 0
-    f=$d/EasyAntiCheatLauncherSemaphore
-    [ "$(stat -c '%u:%a' "$f" 2>/dev/null)" = "0:666" ] && return 0
-    rm -f "$f"; install -m 0666 -o root -g root /dev/null "$f"
+    # EasyAntiCheat's launcher opens one semaphore file for every user; the
+    # second seat cannot open the first one's. A root-owned 0666 file passes
+    # fs.protected_regular (root owns /tmp too). Snap Steam has its own /tmp.
+    local d f
+    for d in /tmp/snap-private-tmp/snap.steam/tmp /tmp; do
+        [ -d "$d" ] || continue
+        f=$d/EasyAntiCheatLauncherSemaphore
+        [ "$(stat -c '%u:%a' "$f" 2>/dev/null)" = "0:666" ] && continue
+        rm -f "$f"; install -m 0666 -o root -g root /dev/null "$f"
+    done
 }
 
 cmd_start()   { need_root; [ -f "$CONF" ] || die "no seat '$NAME' here"; eac_lock_fix; write_unit; systemctl start "$UNIT"; echo "OK: seat '$NAME' started"; }
@@ -460,8 +471,8 @@ cmd_list() {
 cmd_run() {
     [ -f "$CONF" ] || die "no seat '$NAME' here"
     [ "$(id -un)" = "$NAME" ] || die "run is started by systemd as user $NAME (appsandbox-seat -n $NAME start)"
-    local vnc res disp i
-    vnc=$(conf_get "$CONF" VNC); res=$(conf_get "$CONF" RES)
+    local vnc res disp i listen
+    vnc=$(conf_get "$CONF" VNC); res=$(conf_get "$CONF" RES); listen=$(conf_get "$CONF" LISTEN)
     # display numbers well above the machine's own (:0, :1 ...): 5901 -> :11
     disp=$((vnc - 5900 + 10))
     export DISPLAY=:$disp HOME USER=$NAME LOGNAME=$NAME
@@ -504,7 +515,9 @@ cmd_run() {
     if [ -e "/tmp/.X$disp-lock" ] && ! kill -0 "$(tr -d ' \n' < "/tmp/.X$disp-lock" 2>/dev/null)" 2>/dev/null; then
         rm -f "/tmp/.X$disp-lock" "/tmp/.X11-unix/X$disp"
     fi
-    "$xvnc" ":$disp" -geometry "$res" -depth 24 -rfbport "$vnc" -localhost yes -SecurityTypes None \
+    local bind=(-localhost yes)
+    case "${listen:-127.0.0.1}" in 127.0.0.1) ;; *) bind=(-localhost no -interface "$listen") ;; esac
+    "$xvnc" ":$disp" -geometry "$res" -depth 24 -rfbport "$vnc" "${bind[@]}" -SecurityTypes None \
          -AlwaysShared -desktop "$NAME" -pn -noreset -auth "$xauth" "${dri3[@]}" >/dev/null 2>&1 &
     local xpid=$!
     for i in $(seq 1 50); do [ -S "/tmp/.X11-unix/X$disp" ] && break; kill -0 $xpid 2>/dev/null || die "Xvnc exited (port $vnc or display :$disp taken?)"; sleep 0.2; done

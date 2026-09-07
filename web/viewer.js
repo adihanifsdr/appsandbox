@@ -155,7 +155,9 @@ function buildGrid() {
     var spec = (q.tiles || '').split(',').filter(Boolean);
     spec.forEach(function(s) {
         var p = s.split(':');
-        var t = { name: p[0] || 'replica', ws: p[1] || '', port: parseInt(p[2], 10) || 5900, kind: p[3] === 'seat' ? 'seat' : 'replica', rfb: null };
+        /* name:ws path:port:kind[:replica it lives in] */
+        var t = { name: p[0] || 'replica', ws: p[1] || '', port: parseInt(p[2], 10) || 5900, kind: p[3] === 'seat' ? 'seat' : 'replica',
+                  inRep: p[4] ? decodeURIComponent(p[4]) : '', rfb: null };
         var el = document.createElement('div');
         el.className = 'tile';
         el.innerHTML = '<div class="tile-bar"><svg class="ic"><use href="#' + (t.kind === 'seat' ? 'i-screen' : 'i-nest') + '"/></svg>' +
@@ -164,7 +166,7 @@ function buildGrid() {
                        '<button class="t-reconnect" title="Connect this tile again">Reconnect</button></div>' +
                        '<div class="tile-screen"><div class="screen-target"></div><div class="screen-state" hidden></div></div>';
         el.querySelector('.tile-name').textContent = t.name;
-        el.querySelector('.t-own').onclick = function(e) { e.stopPropagation(); sendCmd('vncOpen', { vmIndex: vmIndex, port: t.port, name: t.name, kind: t.kind }); };
+        el.querySelector('.t-own').onclick = function(e) { e.stopPropagation(); sendCmd('vncOpen', { vmIndex: vmIndex, port: t.port, name: t.inRep ? t.name.slice(t.inRep.length + 1) : t.name, kind: t.kind, 'in': t.inRep }); };
         el.querySelector('.t-reconnect').onclick = function(e) { e.stopPropagation(); tileConnect(t); };
         el.addEventListener('mousedown', function() { focusTile(t); });
         gridEl.appendChild(el);

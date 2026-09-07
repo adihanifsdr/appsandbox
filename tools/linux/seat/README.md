@@ -32,6 +32,7 @@ replicas when every instance has to look like a different PC.
 sudo appsandbox-seat install [--no-steam]              # packages once: Xvnc, XFCE, Steam
 sudo appsandbox-seat -n steam2 create                  # user steam2 (password test123), display, unit; starts it
 sudo appsandbox-seat -n steam2 create --resolution 1280x720 --vnc 5905
+sudo appsandbox-seat -n seat3 create --interface 0.0.0.0      # the display for another machine (a replica's host)
 sudo appsandbox-seat -n steam2 create --steam-app 2081880 \
      --copy-app-from /home/me/snap/steam/common/.local/share/Steam \
      --autostart 'Auto Kathana=/usr/local/bin/auto-kathana'   # Steam opens that game at login, its files

@@ -98,11 +98,15 @@ function pendingFromLog(msg) {
     if (hit) renderVmTable();
 }
 function findVm(name) { for (var i = 0; i < vms.length; i++) if (vms[i].name === name) return vms[i]; return null; }
-function findRep(vmName, name) {
+function findRep(vmName, name, inRep) {
     var vm = findVm(vmName); if (!vm) return null;
     var reps = parseReplicas(vm.replicas);
-    for (var i = 0; i < reps.length; i++) if (reps[i].name === name) return reps[i];
+    for (var i = 0; i < reps.length; i++) if (reps[i].name === name && (reps[i]['in'] || '') === (inRep || '')) return reps[i];
     return null;
+}
+/* the Steam seats inside a replica (rows with "in": that replica) */
+function seatsInside(vm, rep) {
+    return parseReplicas(vm.replicas).filter(function(r) { return r.kind === 'seat' && r['in'] === rep; });
 }
 /* Linux host: the WebSocket to nestbox is the page's only link to anything */
 function setConnBanner(text) {
@@ -1075,7 +1079,8 @@ function buildRowCells(vm, i, statusTd) {
     var snapVal = selectedSnap[i] || 'current';
     var reps = parseReplicas(vm.replicas);
     var live = reps.filter(function(r) { return r.state === 'running' && r.vnc; });
-    var tiles = live.map(function(r) { return r.name + ':' + r.vnc + (r.kind === 'seat' ? ':seat' : ''); }).join(',');
+    /* name:port:kind[:replica] - a seat inside a replica is named replica.seat on its tile */
+    var tiles = live.map(function(r) { return (r['in'] ? r['in'] + '.' + r.name : r.name) + ':' + r.vnc + (r.kind === 'seat' ? ':seat' : ':replica') + (r['in'] ? ':' + r['in'] : ''); }).join(',');
     var isLinux = vm.osType === 'Linux';
     var rep = vm.replica || '';
 
@@ -1418,8 +1423,8 @@ function parseReplicas(str) {
     try { var v = JSON.parse(str); return Array.isArray(v) ? v : []; } catch (e) { return []; }
 }
 
-function pendRep(vmName, name, label, ttl, expect) {
-    setPending('rep:' + vmName + '/' + name, { label: label, name: name, ttl: ttl, expect: expect, doneOnLog: true });
+function pendRep(vmName, name, label, ttl, expect, inRep) {
+    setPending('rep:' + vmName + '/' + (inRep ? inRep + '/' : '') + name, { label: label, name: name, ttl: ttl, expect: expect, doneOnLog: true });
 }
 
 function buildReplicaRows(grp, vm, idx) {
@@ -1427,14 +1432,21 @@ function buildReplicaRows(grp, vm, idx) {
     if (vm.osType !== 'Linux' || !vm.running || !vm.agentOnline || vm.buildingVhdx) return;
     var reps = parseReplicas(vm.replicas);
     var cols = dataColCount();
-    reps.forEach(function(r) { grp.appendChild(replicaRow(vm, idx, r, cols)); });
+    /* the replicas, each followed by the seats inside it, then this machine's own seats */
+    reps.filter(function(r) { return r.kind !== 'seat'; }).forEach(function(r) {
+        grp.appendChild(replicaRow(vm, idx, r, cols));
+        seatsInside(vm, r.name).forEach(function(x) { grp.appendChild(replicaRow(vm, idx, x, cols)); });
+        pendingSeatRows(grp, vm, r.name, cols);
+    });
+    reps.filter(function(r) { return r.kind === 'seat' && !r['in']; }).forEach(function(r) { grp.appendChild(replicaRow(vm, idx, r, cols)); });
     /* what is being created: a row of its own until the host lists it */
     var prefix = 'create:rep:' + vm.name + '/';
     var placeholders = 0;
     Object.keys(pending).forEach(function(k) {
         if (k.indexOf(prefix) !== 0) return;
         var name = k.slice(prefix.length);
-        if (reps.some(function(r) { return r.name === name; })) return;
+        if (name.indexOf('/') >= 0) return;   /* a seat inside a replica: its row is under that replica */
+        if (reps.some(function(r) { return r.name === name && !r['in']; })) return;
         grp.appendChild(pendingRepRow(vm, k, name, pending[k], cols));
         placeholders++;
     });
@@ -1451,17 +1463,32 @@ function buildReplicaRows(grp, vm, idx) {
     }
 }
 
+/* a seat being created inside a replica: a row under that replica until the host lists it */
+function pendingSeatRows(grp, vm, rep, cols) {
+    var prefix = 'create:rep:' + vm.name + '/' + rep + '/';
+    Object.keys(pending).forEach(function(k) {
+        if (k.indexOf(prefix) !== 0) return;
+        var name = k.slice(prefix.length);
+        if (!pendingFor(k) || findRep(vm.name, name, rep)) return;
+        var tr = pendingRepRow(vm, k, name, pending[k], cols);
+        tr.classList.add('in-replica');
+        grp.appendChild(tr);
+    });
+}
+
 function replicaRow(vm, idx, r, cols) {
     var seat = r.kind === 'seat';
     var act = seat ? 'seat' : 'replica';   /* action prefix: seatStart / replicaStart ... */
     var running = r.state === 'running';
     var name = r.name;
-    var key = 'rep:' + vm.name + '/' + name;
+    var inRep = r['in'] || '';   /* a seat inside that replica */
+    var key = 'rep:' + vm.name + '/' + (inRep ? inRep + '/' : '') + name;
+    var msgFor = function(extra) { var m = {vmIndex: idx, name: name}; if (inRep) m['in'] = inRep; if (extra) for (var k in extra) m[k] = extra[k]; return m; };
     var p = pendingFor(key);
     var busy = !!p;
 
     var tr = document.createElement('tr');
-    tr.className = 'replica-row ' + (running ? 'running' : 'stopped') + (seat ? ' seat' : '');
+    tr.className = 'replica-row ' + (running ? 'running' : 'stopped') + (seat ? ' seat' : '') + (inRep ? ' in-replica' : '');
     var td = document.createElement('td');
     td.colSpan = cols;
     td.className = 'replica-cell';
@@ -1471,8 +1498,11 @@ function replicaRow(vm, idx, r, cols) {
     td.querySelector('.replica-name').textContent = name;
     td.querySelector('.chip').textContent = seat ? 'seat' : 'replica';
     td.title = seat
-        ? 'Steam seat: user "' + name + '" (password test123) with its own Xvnc display, XFCE and Steam on ' + vm.name + ' itself (appsandbox-seat). ' +
-          'No VM: it shows the machine\'s identity (DMI, machine-id, disks, MAC) and uses only the memory its programs take.'
+        ? (inRep
+            ? 'Steam seat inside replica "' + inRep + '": user "' + name + '" (password test123) with its own Xvnc display, XFCE and Steam in that replica (appsandbox-seat over ssh). ' +
+              'It shares the replica\'s cores, memory, disk, network and identity.'
+            : 'Steam seat: user "' + name + '" (password test123) with its own Xvnc display, XFCE and Steam on ' + vm.name + ' itself (appsandbox-seat). ' +
+              'No VM: it shows the machine\'s identity (DMI, machine-id, disks, MAC) and uses only the memory its programs take.')
         : 'Nested replica: a KVM guest inside ' + vm.name + ' (appsandbox-replica) with the identity profile\'s machine identity.';
 
     var stEl = td.querySelector('.replica-state');
@@ -1493,46 +1523,52 @@ function replicaRow(vm, idx, r, cols) {
     }
 
     var spec = seat
-        ? ['xfce', r.res || '', r.steamApp ? 'steam app ' + r.steamApp : 'steam', r.vnc ? 'vnc :' + r.vnc : '']
+        ? ['xfce', r.res || '', r.steamApp ? 'steam app ' + r.steamApp : 'steam', r.vnc ? 'vnc ' + (inRep ? inRep + ':' : ':') + r.vnc : '']
         : [r.cpus ? r.cpus + ' cores' : '', r.ram ? r.ram + ' MB' : '', r.disk ? r.disk + ' GB' : '',
            r.desktop ? 'xfce' : 'no desktop', r.desktop && r.res ? r.res : '', r.vnc ? 'vnc :' + r.vnc : ''];
     var specEl = td.querySelector('.replica-spec');
     specEl.textContent = spec.filter(Boolean).join('  ·  ');
     specEl.title = seat
         ? 'An XFCE desktop on an Xvnc display' + (r.res ? ' of ' + r.res : '') + ', Steam at login' + (r.steamApp ? ' opening app ' + r.steamApp : '') +
-          (r.vnc ? '; the display listens on 127.0.0.1:' + r.vnc + ' inside ' + vm.name : '') + '. Shares ' + vm.name + '\'s cores, memory, disk and network.'
+          (r.vnc ? (inRep ? '; the display listens on ' + inRep + '\'s virbr0 address, port ' + r.vnc + ' (reachable from ' + vm.name + ' only)'
+                          : '; the display listens on 127.0.0.1:' + r.vnc + ' inside ' + vm.name) : '') +
+          '. Shares ' + (inRep || vm.name) + '\'s cores, memory, disk and network.'
         : 'Cores, memory and disk reserved for the replica (the disk grows only)' + (r.desktop ? ', XFCE + Steam installed' : ', no desktop yet') +
           (r.vnc ? '; its console listens on 127.0.0.1:' + r.vnc + ' inside ' + vm.name : '') + '. Network: libvirt NAT (virbr0).';
     tr.appendChild(td);
 
     var startBtn = actBtn('start', '▶️', !running && !busy, function() {
-        pendRep(vm.name, name, 'Starting', 90000, function() { var x = findRep(vm.name, name); return !x || x.state === 'running'; });
-        sendCmd(act + 'Start', {vmIndex: idx, name: name});
+        pendRep(vm.name, name, 'Starting', 90000, function() { var x = findRep(vm.name, name, inRep); return !x || x.state === 'running'; }, inRep);
+        sendCmd(act + 'Start', msgFor());
     }, 'Start ' + act + ' "' + name + '"');
     var screenBtn = actBtn('connect-idd', '🖥️', running && !!r.vnc,
-        function() { sendCmd('vncOpen', {vmIndex: idx, port: r.vnc, name: name, kind: act}); }, 'Open the screen of ' + act + ' "' + name + '" in its own window');
+        function() { sendCmd('vncOpen', msgFor({port: r.vnc, kind: act})); }, 'Open the screen of ' + act + ' "' + name + '" in its own window');
     var sizeBtn = seat ? null : actBtn('edit', 'edit', !busy, function() { resizeReplica(idx, r); }, 'Cores, RAM and disk of replica "' + name + '"');
     var desktopBtn = (seat || r.desktop) ? null : actBtn('vnc', 'desktop', running && !busy, function() {
         confirmReplica(idx, name, 'replicaDesktop', 'Install XFCE + Steam in "' + name + '"? Takes 10-20 minutes and restarts the replica.', 'Install', function() {
             pendRep(vm.name, name, 'Installing the desktop', 40 * 60000, function() { var x = findRep(vm.name, name); return !x || !!x.desktop; });
         });
     }, 'Install XFCE + Steam (autologin) in this replica');
+    /* a replica with a desktop can hold Steam seats of its own */
+    var addSeatBtn = seat ? null : actBtn('add', '+', running && !!r.desktop && !busy, function() { openAddModal(idx, name); },
+        r.desktop ? 'Add a Steam seat inside replica "' + name + '"' : 'Seats need the replica\'s desktop installed first');
     var stopBtn = actBtn('shutdown', '⏻', running && !busy, function() {
-        pendRep(vm.name, name, 'Stopping', 90000, function() { var x = findRep(vm.name, name); return !x || x.state !== 'running'; });
-        sendCmd(act + 'Stop', {vmIndex: idx, name: name});
+        pendRep(vm.name, name, 'Stopping', 90000, function() { var x = findRep(vm.name, name, inRep); return !x || x.state !== 'running'; }, inRep);
+        sendCmd(act + 'Stop', msgFor());
     }, seat ? 'Stop this seat: its XFCE session and Steam end (the user account stays)' : 'Shut this replica down');
     var restartBtn = actBtn('restart', '↻', running && !busy, function() {
-        pendRep(vm.name, name, 'Restarting', seat ? 60000 : 120000, null);
-        sendCmd(act + 'Restart', {vmIndex: idx, name: name});
+        pendRep(vm.name, name, 'Restarting', seat ? 60000 : 120000, null, inRep);
+        sendCmd(act + 'Restart', msgFor());
     }, seat ? 'Restart this seat (a fresh XFCE session)' : 'Restart this replica (picks up a changed identity)');
     var deleteBtn = actBtn('delete', '🗑️', !busy, function() {
+        var nIn = seat ? 0 : seatsInside(vm, name).length;
         confirmReplica(idx, name, act + 'Destroy',
-            seat ? 'Delete seat "' + name + '"? Its user account and home directory (/home/' + name + ', with Steam\'s files) are removed. This cannot be undone.'
-                 : 'Delete replica "' + name + '" and its disk? This cannot be undone.', 'Delete', function() {
-            pendRep(vm.name, name, 'Deleting', 180000, function() { return !findRep(vm.name, name); });
-        });
+            seat ? 'Delete seat "' + name + '"' + (inRep ? ' inside ' + inRep : '') + '? Its user account and home directory (/home/' + name + (inRep ? ' in the replica' : '') + ', with Steam\'s files) are removed. This cannot be undone.'
+                 : 'Delete replica "' + name + '" and its disk' + (nIn ? ' (with the ' + nIn + (nIn === 1 ? ' seat' : ' seats') + ' inside it)' : '') + '? This cannot be undone.', 'Delete', function() {
+            pendRep(vm.name, name, 'Deleting', 180000, function() { return !findRep(vm.name, name, inRep); }, inRep);
+        }, inRep ? {'in': inRep} : null);
     }, 'Delete this ' + act, running ? 'running' : '');
-    tr.appendChild(actionsCell([[startBtn, screenBtn], [sizeBtn, desktopBtn], [stopBtn, restartBtn], [deleteBtn]]));
+    tr.appendChild(actionsCell([[startBtn, screenBtn], [sizeBtn, desktopBtn, addSeatBtn], [stopBtn, restartBtn], [deleteBtn]]));
     return tr;
 }
 
@@ -1569,12 +1605,14 @@ function pendingRepRow(vm, key, name, p, cols) {
     return tr;
 }
 
-function confirmReplica(idx, name, action, message, label, onOk) {
+function confirmReplica(idx, name, action, message, label, onOk, extra) {
     var seat = action.indexOf('seat') === 0;
     showModal(seat ? 'Steam seat' : 'Nested replica', message, label, { confirmClass: /Destroy$/.test(action) ? 'danger' : 'primary' }).then(function(ok) {
         if (!ok) return;
         if (onOk) onOk();
-        sendCmd(action, {vmIndex: idx, name: name});
+        var m = {vmIndex: idx, name: name};
+        if (extra) for (var k in extra) m[k] = extra[k];
+        sendCmd(action, m);
     });
 }
 
@@ -1591,35 +1629,44 @@ function replicaLimits(vm) {
    asks which first and shows only that kind's fields: a replica is sized
    (cores, RAM, disk), a seat is not - it is a user with a display. */
 var addVmIndex = -1;
+var addInReplica = '';   /* the replica a seat is being added into, else '' */
 
 function nextFreeName(base, taken, n) {
     if (taken.indexOf(base) < 0) return base;
     for (var i = Math.max(2, n + 1); ; i++) if (taken.indexOf(base + i) < 0) return base + i;
 }
 
-function addTakenNames(vm) {
-    var taken = parseReplicas(vm.replicas).map(function(r) { return r.name; });
-    var prefix = 'create:rep:' + vm.name + '/';
-    Object.keys(pending).forEach(function(k) { if (k.indexOf(prefix) === 0) taken.push(k.slice(prefix.length)); });
+function addTakenNames(vm, inRep) {
+    inRep = inRep || '';
+    var taken = parseReplicas(vm.replicas).filter(function(r) { return (r['in'] || '') === inRep; }).map(function(r) { return r.name; });
+    if (inRep) taken.push('user');   /* the replica's own desktop user */
+    var prefix = 'create:rep:' + vm.name + '/' + (inRep ? inRep + '/' : '');
+    Object.keys(pending).forEach(function(k) {
+        if (k.indexOf(prefix) === 0 && k.slice(prefix.length).indexOf('/') < 0) taken.push(k.slice(prefix.length));
+    });
     return taken;
 }
 
-function openAddModal(idx) {
+function openAddModal(idx, inRep) {
     var vm = vms[idx];
     if (!vm) return;
     addVmIndex = idx;
-    var taken = addTakenNames(vm);
+    addInReplica = inRep || '';   /* from a replica row's "+": a seat inside that replica */
+    var taken = addTakenNames(vm, addInReplica);
     var all = parseReplicas(vm.replicas);
     var nrep = all.filter(function(r) { return r.kind !== 'seat'; }).length;
-    var nseat = all.length - nrep;
+    var nseat = all.filter(function(r) { return r.kind === 'seat' && (r['in'] || '') === addInReplica; }).length;
     var lim = replicaLimits(vm);
     var onHost = !!vm.isHost;
     var where = onHost ? 'this PC' : vm.name;
     var g = function(id) { return document.getElementById(id); };
 
-    g('add-eyebrow').textContent = onHost ? 'add to this pc' : 'add to sandbox';
-    g('add-title').textContent = 'Add to ' + vm.name;
-    g('add-seat-meta').textContent = 'seconds · uses only what its programs take · shows ' + where + '\'s identity';
+    g('add-eyebrow').textContent = inRep ? 'add to replica' : (onHost ? 'add to this pc' : 'add to sandbox');
+    g('add-title').textContent = 'Add to ' + (inRep || vm.name);
+    g('add-seat-meta').textContent = 'seconds · uses only what its programs take · shows ' + (inRep || where) + '\'s identity';
+    /* inside a replica only a seat fits: the replica card goes, the seat card stays */
+    var repCard = g('add-kind-replica').closest('.kind-card');
+    if (repCard) repCard.hidden = !!inRep;
     g('add-replica-meta').textContent = (onHost ? '10–20 min' : '10–30 min') + ' · reserves cores, RAM and disk · looks like another PC';
 
     /* replica */
@@ -1654,12 +1701,18 @@ function openAddModal(idx) {
     /* the game / copy / autostart words only reach a seat on a Linux host;
        inside a sandbox the guest agent takes the screen size alone */
     document.querySelectorAll('#add-form-seat .seat-host-only').forEach(function(el) { el.hidden = !onHost; });
+    /* a seat in a replica downloads its game itself: this PC's library is not reachable there */
+    var copyRow = g('add-seat-copy').closest('.form-row');
+    if (copyRow) { copyRow.hidden = !!inRep; var lb = copyRow.previousElementSibling; if (lb && lb.tagName === 'LABEL') lb.hidden = !!inRep; }
     g('add-seat-note').textContent = 'Packages once (~1.5 GB), then seconds per seat. The seat signs in to Steam itself; the user\'s password is test123. ' +
         (onHost ? 'A game at login and extra programs can be changed later with "sudo appsandbox-seat -n <name> configure".'
                 : 'A game at login and extra programs are set inside ' + vm.name + ' with "sudo appsandbox-seat -n <name> configure".');
+    if (inRep) g('add-seat-note').textContent = 'A user with an Xvnc display, XFCE and Steam inside ' + inRep + ' (packages the first time, ~1–2 min). The seat signs in to Steam itself; the user\'s password is test123. ' +
+        'It shares ' + inRep + '\'s cores, memory, disk and identity; its screen opens from its row.';
 
     var kind = 'replica';
     try { kind = localStorage.getItem('nestbox.addKind') || 'replica'; } catch (e) {}
+    if (inRep) kind = 'seat';
     g('add-kind-seat').checked = kind === 'seat';
     g('add-kind-replica').checked = kind !== 'seat';
     applyAddKind();
@@ -1692,7 +1745,7 @@ function replicaNameError(name, taken) {
 function revalidateAdd() {
     var vm = vms[addVmIndex];
     if (!vm) return;
-    var taken = addTakenNames(vm);
+    var taken = addTakenNames(vm, addInReplica);
     var seat = document.getElementById('add-kind-seat').checked;
     var err;
     if (seat) {
@@ -1715,7 +1768,7 @@ function closeAddModal() {
 function onAddConfirm() {
     var idx = addVmIndex, vm = vms[idx];
     if (!vm) return;
-    var taken = addTakenNames(vm);
+    var taken = addTakenNames(vm, addInReplica);
     var seat = document.getElementById('add-kind-seat').checked;
     try { localStorage.setItem('nestbox.addKind', seat ? 'seat' : 'replica'); } catch (e) {}
     if (seat) {
@@ -1732,9 +1785,12 @@ function onAddConfirm() {
             var toks = cmd.split(/\s+/), paths = toks.filter(function(t) { return t.indexOf('/') >= 0; });
             autostart.push((paths.length ? paths[paths.length - 1] : toks[0]).split('/').pop() + '=' + cmd);
         }
-        setPending('create:rep:' + vm.name + '/' + sname, { label: 'Creating', name: sname, kind: 'seat', ttl: 20 * 60000,
-            expect: function() { return !!findRep(vm.name, sname); } });
-        sendCmd('seatCreate', {vmIndex: idx, name: sname, res: res, steam: true, steamApp: app, copyGame: copy, autostart: autostart});
+        var inRep = addInReplica;
+        setPending('create:rep:' + vm.name + '/' + (inRep ? inRep + '/' : '') + sname, { label: 'Creating', name: sname, kind: 'seat', ttl: 20 * 60000,
+            expect: function() { return !!findRep(vm.name, sname, inRep); } });
+        var sm = {vmIndex: idx, name: sname, res: res, steam: true, steamApp: app, copyGame: copy && !inRep, autostart: autostart};
+        if (inRep) sm['in'] = inRep;
+        sendCmd('seatCreate', sm);
     } else {
         var name = document.getElementById('add-rep-name').value.trim();
         if (replicaNameError(name, taken)) { revalidateAdd(); return; }
