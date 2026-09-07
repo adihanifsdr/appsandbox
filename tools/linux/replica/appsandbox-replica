@@ -606,6 +606,11 @@ install -d /etc/lightdm/lightdm.conf.d
 printf '[Seat:*]\nautologin-user=user\nautologin-user-timeout=0\nautologin-session=xubuntu\nuser-session=xubuntu\n' > /etc/lightdm/lightdm.conf.d/50-appsandbox-autologin.conf
 systemctl set-default graphical.target
 systemctl enable lightdm >/dev/null 2>&1 || true
+# ssh ahead of the games: a game at full CPU (software rendering) must not
+# starve sshd, or the host's list / start / stop over ssh time out
+install -d /etc/systemd/system/ssh.service.d
+printf '[Service]\nNice=-10\nCPUWeight=1000\n' > /etc/systemd/system/ssh.service.d/50-appsandbox.conf
+systemctl daemon-reload; systemctl try-restart ssh 2>/dev/null || true
 if [ "$STEAM" = 1 ]; then
     dpkg --add-architecture i386
     apt-get update -q

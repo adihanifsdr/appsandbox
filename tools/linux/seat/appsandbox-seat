@@ -183,6 +183,15 @@ install_desktop() {
 # let members of nestbox-seat through.  Both formats: JS rules for polkit
 # >= 0.106 (Ubuntu 24.04+), .pkla for 0.105 (Ubuntu 22.04).
 SEAT_GROUP=nestbox-seat
+ssh_priority() {
+    # ssh ahead of the games: a seat's game at full CPU (software rendering)
+    # must not starve sshd, or Nestbox's list / start / stop over ssh time out.
+    # ssh.service and the seat units are separate cgroups, so CPUWeight is
+    # what decides under contention; the sessions inherit the nice value.
+    install -d /etc/systemd/system/ssh.service.d
+    printf '[Service]\nNice=-10\nCPUWeight=1000\n' > /etc/systemd/system/ssh.service.d/50-appsandbox.conf
+    systemctl daemon-reload; systemctl try-restart ssh 2>/dev/null || true
+}
 install_polkit() {
     groupadd -f "$SEAT_GROUP"
     install -d /etc/polkit-1/rules.d /etc/polkit-1/localauthority/50-local.d
@@ -226,6 +235,7 @@ cmd_install() {
     done
     install_desktop
     install_polkit
+    ssh_priority
     install_tigervnc
     [ $steam = 1 ] && install_steam
     echo "OK: seat packages installed (Xvnc$(xvnc_dri3 && echo ' with DRI3'), XFCE$( [ $steam = 1 ] && echo ', Steam'))"
@@ -318,6 +328,7 @@ cmd_create() {
     [ -x "$SELF" ] || die "$SELF is missing: install this script there first"
     install_desktop
     install_polkit
+    ssh_priority
     install_tigervnc
     [ $STEAM = 1 ] && install_steam
     pick_port

@@ -375,16 +375,24 @@ def seats_in(rep, fresh=False):
         c = _rep_seats.get(rep)
         if c and not fresh and now - c["t"] < REP_SEATS_TTL:
             return c["seats"]
-    seats, ip = [], replica_ip(rep)
+    # A poll that fails (ssh starved by a game at full CPU, a timeout) keeps the
+    # last good answer: the rows must not vanish and come back with the load.
+    old = c or {}
+    ip = replica_ip(rep) or old.get("ip") or ""
+    seats, ok = old.get("seats") or [], False
     if ip:
         rc, out = run_tool(in_replica(rep, "sudo appsandbox-seat list 2>/dev/null || echo []"), timeout=25)
-        try:
-            v = json.loads(out) if rc == 0 else []
-        except ValueError:
-            v = []
-        seats = [dict(x, **{"in": rep}) for x in v if isinstance(x, dict) and x.get("name")]
+        if rc == 0:
+            try:
+                v = json.loads(out)
+                seats = [dict(x, **{"in": rep}) for x in v if isinstance(x, dict) and x.get("name")]
+                ok = True
+            except ValueError:
+                pass
+    if not ok and not old.get("stale"):
+        log("[%s] not answering over ssh; its seats are shown as last seen." % rep)
     with _rep_seats_lock:
-        _rep_seats[rep] = {"t": now, "ip": ip, "seats": seats}
+        _rep_seats[rep] = {"t": now, "ip": ip, "seats": seats, "stale": not ok}
     return seats
 
 
