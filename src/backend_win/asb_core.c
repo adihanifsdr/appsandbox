@@ -25,7 +25,9 @@
 #include <shlobj.h>
 #include <stdarg.h>
 #include <virtdisk.h>
+#include <winhttp.h>
 #pragma comment(lib, "virtdisk.lib")
+#pragma comment(lib, "winhttp.lib")
 
 /* ---- DLL module handle (for locating iso-patch.exe, resources, etc.) ---- */
 
@@ -822,8 +824,26 @@ static double prefetch_cache_age_hours(const wchar_t *dir)
     return (double)(b.QuadPart - a.QuadPart) / 36000000000.0;   /* 100 ns -> h */
 }
 
-/* Satisfy a prefetch from the cache: copies the entry into dst. */
-static BOOL prefetch_cache_restore(const wchar_t *key, int max_age_hours,
+/* The entry's .cache-stamp (what the download was taken from, e.g. the
+   branch head SHA), "" when it has none. */
+static void prefetch_cache_read_stamp(const wchar_t *dir, char *out, size_t cap)
+{
+    wchar_t path[MAX_PATH];
+    FILE *f = NULL;
+    size_t n = 0;
+    out[0] = '\0';
+    swprintf_s(path, MAX_PATH, L"%s\\.cache-stamp", dir);
+    if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
+    n = fread(out, 1, cap - 1, f);
+    fclose(f);
+    out[n] = '\0';
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r' || out[n - 1] == ' ')) out[--n] = '\0';
+}
+
+/* Satisfy a prefetch from the cache: copies the entry into dst. With a
+   stamp, the entry must have been stored under the same stamp (a moved
+   branch misses at once instead of after max_age_hours). */
+static BOOL prefetch_cache_restore(const wchar_t *key, int max_age_hours, const char *stamp,
                                    const wchar_t *dst, const wchar_t *what)
 {
     wchar_t dir[MAX_PATH], marker[MAX_PATH];
@@ -833,21 +853,34 @@ static BOOL prefetch_cache_restore(const wchar_t *key, int max_age_hours,
     if (!prefetch_cache_path(key, dir, MAX_PATH)) return FALSE;
     age = prefetch_cache_age_hours(dir);
     if (age < 0.0 || age > (double)max_age_hours) return FALSE;
+    if (stamp && stamp[0]) {
+        char have[128];
+        prefetch_cache_read_stamp(dir, have, sizeof(have));
+        if (strcmp(have, stamp) != 0) {
+            asb_log(L"%s: cached copy of %s is from %S, the branch is at %S - downloading again",
+                    what, key, have[0] ? have : "an unknown revision", stamp);
+            return FALSE;
+        }
+    }
     n = copy_dir_recursive(dir, dst);
     if (n < 0) {
         asb_log(L"%s: cached copy of %s unusable - downloading again", what, key);
         remove_dir_recursive(dir);
         return FALSE;
     }
-    /* The marker is cache bookkeeping, not something to stage into the guest. */
+    /* The markers are cache bookkeeping, not something to stage into the guest. */
     swprintf_s(marker, MAX_PATH, L"%s\\.cache-ok", dst);
     DeleteFileW(marker);
-    asb_log(L"%s: reused cached download (%d file(s), %.1f h old)", what, n, age);
+    swprintf_s(marker, MAX_PATH, L"%s\\.cache-stamp", dst);
+    DeleteFileW(marker);
+    asb_log(L"%s: reused cached download (%d file(s), %.1f h old%s%S)", what, n, age,
+            (stamp && stamp[0]) ? L", " : L"", (stamp && stamp[0]) ? stamp : "");
     return TRUE;
 }
 
-/* After a complete prefetch: snapshot src into the cache entry. */
-static void prefetch_cache_store(const wchar_t *key, const wchar_t *src)
+/* After a complete prefetch: snapshot src into the cache entry, with the
+   stamp it was taken from (NULL / "" = none, age alone decides later). */
+static void prefetch_cache_store(const wchar_t *key, const wchar_t *src, const char *stamp)
 {
     wchar_t dir[MAX_PATH], marker[MAX_PATH];
     HANDLE h;
@@ -855,9 +888,59 @@ static void prefetch_cache_store(const wchar_t *key, const wchar_t *src)
     if (!prefetch_cache_path(key, dir, MAX_PATH)) return;
     remove_dir_recursive(dir);
     if (copy_dir_recursive(src, dir) < 0) { remove_dir_recursive(dir); return; }
+    if (stamp && stamp[0]) {
+        FILE *f = NULL;
+        swprintf_s(marker, MAX_PATH, L"%s\\.cache-stamp", dir);
+        if (_wfopen_s(&f, marker, L"wb") == 0 && f) { fputs(stamp, f); fclose(f); }
+    }
     swprintf_s(marker, MAX_PATH, L"%s\\.cache-ok", dir);
     h = CreateFileW(marker, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+}
+
+/* The head commit of owner/name@branch on GitHub, as a 40-hex SHA
+   (GET api.github.com/repos/<owner>/<name>/commits/<branch> with the
+   "sha" media type answers the bare SHA). FALSE when GitHub cannot be
+   reached or answers anything else: the caller then falls back to the
+   age rule. Unauthenticated, 60 requests an hour - one per VM create. */
+static BOOL github_branch_sha(const wchar_t *repo, const wchar_t *branch, char *out, size_t cap)
+{
+    HINTERNET hs = NULL, hc = NULL, hr = NULL;
+    wchar_t path[512];
+    DWORD status = 0, len = sizeof(status), got = 0;
+    BOOL ok = FALSE;
+    size_t n = 0, i;
+
+    out[0] = '\0';
+    swprintf_s(path, ARRAYSIZE(path), L"/repos/%s/commits/%s", repo, branch);
+    hs = WinHttpOpen(L"Nestbox/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hs) return FALSE;
+    WinHttpSetTimeouts(hs, 5000, 5000, 5000, 10000);
+    hc = WinHttpConnect(hs, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hc) goto done;
+    hr = WinHttpOpenRequest(hc, L"GET", path, NULL, WINHTTP_NO_REFERER,
+                            WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!hr) goto done;
+    if (!WinHttpSendRequest(hr, L"Accept: application/vnd.github.sha\r\nX-GitHub-Api-Version: 2022-11-28\r\n",
+                            (DWORD)-1L, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) goto done;
+    if (!WinHttpReceiveResponse(hr, NULL)) goto done;
+    WinHttpQueryHeaders(hr, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                        WINHTTP_HEADER_NAME_BY_INDEX, &status, &len, WINHTTP_NO_HEADER_INDEX);
+    if (status != 200) goto done;
+    while (n < cap - 1 && WinHttpReadData(hr, out + n, (DWORD)(cap - 1 - n), &got) && got > 0)
+        n += got;
+    out[n] = '\0';
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r' || out[n - 1] == ' ')) out[--n] = '\0';
+    ok = (n == 40);
+    for (i = 0; ok && i < n; i++)
+        if (!((out[i] >= '0' && out[i] <= '9') || (out[i] >= 'a' && out[i] <= 'f'))) ok = FALSE;
+    if (!ok) out[0] = '\0';
+done:
+    if (hr) WinHttpCloseHandle(hr);
+    if (hc) WinHttpCloseHandle(hc);
+    if (hs) WinHttpCloseHandle(hs);
+    return ok;
 }
 
 /* ---- HCS state callback (called from HCS worker thread) ---- */
@@ -2570,12 +2653,21 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
            so the Linux guest builds its agent/driver source (and gets the
            GPU helper scripts) from the SAME code. */
         wchar_t src_repo[128], src_branch[128], repo_key[300];
+        char head_sha[64];
         choose_source_repo(src_repo, ARRAYSIZE(src_repo), src_branch, ARRAYSIZE(src_branch));
         asb_log(L"Prefetch 1/3: cloning %s@%s from GitHub...", src_repo, src_branch);
         swprintf_s(repo_key, ARRAYSIZE(repo_key), L"repo-%s-%s", src_repo, src_branch);
         for (wchar_t *p = repo_key; *p; p++)
             if (*p == L'/' || *p == L'\\' || *p == L':') *p = L'_';
-        if (!prefetch_cache_restore(repo_key, 24, extras, L"Prefetch 1/3")) {
+        /* The cached copy is only good while the branch still points at the
+           commit it was taken from: a push must reach the next VM at once
+           (the agent is built from this source). Without an answer from
+           GitHub the 24 h age rule stands. */
+        if (github_branch_sha(src_repo, src_branch, head_sha, sizeof(head_sha)))
+            asb_log(L"Prefetch 1/3: %s@%s is at %.7S", src_repo, src_branch, head_sha);
+        else
+            asb_log(L"Prefetch 1/3: could not read the head of %s@%s from GitHub; a cached copy up to 24 h old counts", src_repo, src_branch);
+        if (!prefetch_cache_restore(repo_key, head_sha[0] ? 30 * 24 : 24, head_sha, extras, L"Prefetch 1/3")) {
             swprintf_s(args_buf, 2048,
                 L"--prefetch-repo --repo \"%s\" --branch \"%s\" --out-dir \"%s\"",
                 src_repo, src_branch, extras);
@@ -2583,7 +2675,7 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
                                          L"Downloading sources") != 0)
                 asb_log(L"WARN: prefetch-repo failed (agent + DKMS build will fail)");
             else
-                prefetch_cache_store(repo_key, extras);   /* extras holds only repo output here */
+                prefetch_cache_store(repo_key, extras, head_sha);   /* extras holds only repo output here */
         }
 
         /* Prefetch 2: apt build-deps closure from archive.ubuntu.com.
@@ -2597,7 +2689,7 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
             swprintf_s(apt_out, MAX_PATH, L"%s\\local-apt-extras", extras);
             swprintf_s(cache_key, ARRAYSIZE(cache_key), L"build-deps-%s-%s%s", codename, kver,
                        args->config.linux_ga_kernel ? L"-ga" : L"");
-            if (!prefetch_cache_restore(cache_key, 7 * 24, apt_out, L"Prefetch 2/3")) {
+            if (!prefetch_cache_restore(cache_key, 7 * 24, NULL, apt_out, L"Prefetch 2/3")) {
                 wchar_t mirror[512], why[64], mirror_arg[600] = L"";
                 if (choose_apt_mirror(mirror, ARRAYSIZE(mirror), why, ARRAYSIZE(why))) {
                     asb_log(L"Prefetch 2/3: mirror %s (%s)", mirror, why);
@@ -2612,7 +2704,7 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
                                              L"Downloading packages") != 0)
                     asb_log(L"WARN: prefetch-build-deps failed");
                 else
-                    prefetch_cache_store(cache_key, apt_out);
+                    prefetch_cache_store(cache_key, apt_out, NULL);
             }
         } else {
             asb_log(L"WARN: could not detect ISO kernel — skipping build-deps");
@@ -2622,14 +2714,14 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
         asb_log(L"Prefetch 3/3: wsl-deps .so libs...");
         wchar_t wsl_out[MAX_PATH];
         swprintf_s(wsl_out, MAX_PATH, L"%s\\wsl-deps", extras);
-        if (!prefetch_cache_restore(L"wsl-deps", 30 * 24, wsl_out, L"Prefetch 3/3")) {
+        if (!prefetch_cache_restore(L"wsl-deps", 30 * 24, NULL, wsl_out, L"Prefetch 3/3")) {
             swprintf_s(args_buf, 2048,
                 L"--prefetch-wsl-deps --out-dir \"%s\"", wsl_out);
             if (spawn_iso_patch_prefetch(args_buf, args->vm_unique_id, 8, 9,
                                          L"Downloading GPU libraries") != 0)
                 asb_log(L"WARN: prefetch-wsl-deps failed");
             else
-                prefetch_cache_store(L"wsl-deps", wsl_out);
+                prefetch_cache_store(L"wsl-deps", wsl_out, NULL);
         }
     }
 
