@@ -96,8 +96,16 @@ static int send_line(int fd, const char *line)
     return ok ? 0 : -1;
 }
 
+/* Set once the host's link is known to be gone (the heartbeat could not be
+ * written): the reader stops waiting on it even when the socket never sees a
+ * FIN, so the accept loop is free for the host's next connection. */
+static volatile int g_client_dead = 0;
+
 /* Read one line (up to '\n') into buf. Strips '\r'. Null-terminates.
- * Returns: number of chars in buf, 0 on EOF, -1 on error. */
+ * Returns: number of chars in buf, 0 on EOF, -1 on error. The client socket
+ * carries a receive timeout: a quiet host is normal (it only speaks when it
+ * has a command), so a timeout only ends the read once the link is known
+ * dead. */
 static int recv_line(int fd, char *buf, int max)
 {
     int pos = 0;
@@ -107,6 +115,7 @@ static int recv_line(int fd, char *buf, int max)
         if (n == 0) { buf[pos] = '\0'; return 0; }       /* EOF */
         if (n < 0) {
             if (errno == EINTR) continue;
+            if ((errno == EAGAIN || errno == EWOULDBLOCK) && !g_client_dead) continue;
             buf[pos] = '\0';
             return -1;
         }
@@ -565,17 +574,17 @@ static pthread_mutex_t g_jobs_lock = PTHREAD_MUTEX_INITIALIZER;
  * run_sync's rc for the launch itself. */
 static int job_launch(const char *kind, const char *name, const char *sub, const char *cmd)
 {
-    char line[2048], log[128], rcfile[128], pidfile[128];
+    char line[2048], log[128], rcfile[128], jobfile[128];
     int rc, i, slot = -1;
     FILE *f;
 
     snprintf(log, sizeof(log), "/var/log/appsandbox-%s-%s.log", kind, name);
     snprintf(rcfile, sizeof(rcfile), "/run/appsandbox-job-%s-%s.rc", kind, name);
-    snprintf(pidfile, sizeof(pidfile), "/run/appsandbox-job-%s-%s.pid", kind, name);
+    snprintf(jobfile, sizeof(jobfile), "/run/appsandbox-job-%s-%s.job", kind, name);
     unlink(rcfile);
     snprintf(line, sizeof(line),
-             "nohup sh -c '%s; echo $? > %s' >%s 2>&1 </dev/null & echo $! > %s",
-             cmd, rcfile, log, pidfile);
+             "nohup sh -c '%s; echo $? > %s' >%s 2>&1 </dev/null & echo \"$! %s\" > %s",
+             cmd, rcfile, log, sub, jobfile);
     rc = run_sync(line);
     if (rc != 0) return rc;
 
@@ -594,11 +603,63 @@ static int job_launch(const char *kind, const char *name, const char *sub, const
         snprintf(j->log, sizeof(j->log), "%s", log);
         snprintf(j->rcfile, sizeof(j->rcfile), "%s", rcfile);
         j->started = time(NULL);
-        f = fopen(pidfile, "r");
+        f = fopen(jobfile, "r");
         if (f) { int p = 0; if (fscanf(f, "%d", &p) == 1) j->pid = (pid_t)p; fclose(f); }
     }
     pthread_mutex_unlock(&g_jobs_lock);
     return 0;
+}
+
+/* A restarted agent (an update, a crash) forgets what it was watching while
+ * the job itself - detached, KillMode=process - runs on. Take the still-open
+ * ones in /run back, so their progress and their outcome still reach the
+ * host instead of leaving the row on "creating..." until it times out. New
+ * log lines are forwarded from where the log stands now. */
+static void jobs_adopt(void)
+{
+    DIR *d = opendir("/run");
+    struct dirent *e;
+    if (!d) return;
+    while ((e = readdir(d)) != NULL) {
+        char kind[8] = "", name[64] = "", sub[16] = "", path[160], log[128];
+        const char *rest;
+        size_t nl;
+        int i, slot = -1, p = 0;
+        FILE *f;
+        struct stat st;
+        if (strncmp(e->d_name, "appsandbox-job-", 15) != 0) continue;
+        rest = e->d_name + 15;
+        if (strncmp(rest, "seat-", 5) == 0)         { snprintf(kind, sizeof(kind), "seat"); rest += 5; }
+        else if (strncmp(rest, "replica-", 8) == 0) { snprintf(kind, sizeof(kind), "replica"); rest += 8; }
+        else continue;
+        nl = strlen(rest);
+        if (nl <= 4 || strcmp(rest + nl - 4, ".job") != 0 || nl - 4 >= sizeof(name)) continue;
+        memcpy(name, rest, nl - 4); name[nl - 4] = '\0';
+        snprintf(path, sizeof(path), "/run/%s", e->d_name);
+        f = fopen(path, "r");
+        if (!f) continue;
+        if (fscanf(f, "%d %15s", &p, sub) < 1) { fclose(f); continue; }
+        fclose(f);
+        snprintf(log, sizeof(log), "/var/log/appsandbox-%s-%s.log", kind, name);
+        pthread_mutex_lock(&g_jobs_lock);
+        for (i = 0; i < MAX_JOBS; i++) if (!g_jobs[i].active) { slot = i; break; }
+        if (slot >= 0) {
+            struct job *j = &g_jobs[slot];
+            memset(j, 0, sizeof(*j));
+            j->active = 1;
+            snprintf(j->kind, sizeof(j->kind), "%s", kind);
+            snprintf(j->name, sizeof(j->name), "%s", name);
+            snprintf(j->sub, sizeof(j->sub), "%s", sub[0] ? sub : "create");
+            snprintf(j->log, sizeof(j->log), "%s", log);
+            snprintf(j->rcfile, sizeof(j->rcfile), "/run/appsandbox-job-%s-%s.rc", kind, name);
+            j->pid = (pid_t)p;
+            j->started = time(NULL);
+            if (stat(log, &st) == 0) j->off = (long)st.st_size;
+            agent_log("job %s %s %s: adopted (pid %d)", kind, name, j->sub, p);
+        }
+        pthread_mutex_unlock(&g_jobs_lock);
+    }
+    closedir(d);
 }
 
 /* Heartbeat: forward each active job's new log lines; report the ones
@@ -706,6 +767,11 @@ static int jobs_tick(int fd)
         snprintf(msg, sizeof(msg), "%s_result:%s:%s:%s", j->kind, j->name, j->sub, rc == 0 ? "ok" : "failed");
         send_line(fd, msg);
         agent_log("%s %s %s: ended rc=%d", j->kind, j->name, j->sub, rc);
+        {   /* it is over: nothing left for a restarted agent to adopt */
+            char jobfile[160];
+            snprintf(jobfile, sizeof(jobfile), "/run/appsandbox-job-%s-%s.job", j->kind, j->name);
+            unlink(jobfile);
+        }
         j->active = 0;
         ended++;
     }
@@ -1111,7 +1177,13 @@ static void *heartbeat_thread(void *arg)
         int fd = g_client_fd;
         if (fd < 0) break;          /* client disconnected */
         if (send_line(fd, "heartbeat") < 0) {
-            agent_log("heartbeat: send failed, exiting thread");
+            /* The host is gone. Its socket may never deliver a FIN (a
+             * half-open vsock link), so the command reader would sit in
+             * read() forever and the agent would never accept the host's
+             * next connection: shut the socket down to release it. */
+            agent_log("heartbeat: send failed, dropping the client link");
+            g_client_dead = 1;
+            shutdown(fd, SHUT_RDWR);
             break;
         }
         /* Report display readiness to the host (the same idd_status the Windows
@@ -1939,6 +2011,11 @@ static void handle_client(int fd)
     char      line[LINE_BUF_MAX];
 
     g_client_fd = fd;
+    g_client_dead = 0;
+    {   /* so a wedged link cannot block the reader for ever (see recv_line) */
+        struct timeval tv = { 30, 0 };
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
     agent_log("client connected (fd=%d)", fd);
 
     if (send_line(fd, "hello") < 0) {
@@ -2131,6 +2208,7 @@ int main(int argc, char **argv)
      * clients. It'll spawn the helper as soon as the user session is
      * ready, independent of host-driven idd_connect. */
     start_clipboard_monitor();
+    jobs_adopt();   /* jobs still running from a previous agent instance */
 
     while (!g_stop) {
         int c = accept(ls, NULL, NULL);

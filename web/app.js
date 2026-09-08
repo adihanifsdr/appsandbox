@@ -1622,9 +1622,11 @@ function pendingRepRow(vm, key, name, p, cols) {
         specEl.className = 'replica-spec hint';
         specEl.innerHTML = '';
         var noteEl = document.createElement('span');
-        noteEl.textContent = p.note || (seat ? 'packages the first time (~1.5 GB), then seconds; the row appears when the seat is up'
-                                             : 'cloud image, then XFCE + Steam (10–20 min); the row appears when it boots');
-        if (p.note) noteEl.title = 'The latest step from the log below';
+        noteEl.textContent = !vm.agentOnline
+                             ? 'waiting for the guest agent to come back; the work in the sandbox goes on'
+                             : p.note || (seat ? 'packages the first time (~1.5 GB), then seconds; the row appears when the seat is up'
+                                               : 'cloud image, then XFCE + Steam (10–20 min); the row appears when it boots');
+        if (p.note && vm.agentOnline) noteEl.title = 'The latest step from the log below';
         specEl.appendChild(noteEl);
         specEl.appendChild(document.createTextNode(' · '));
         var elEl = document.createElement('span');

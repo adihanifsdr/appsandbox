@@ -57,6 +57,7 @@ typedef struct AgentConn {
     volatile BOOL  cmd_pending;
     HANDLE         cmd_done;     /* Event: signaled when response is ready */
     char           cmd[4400];      /* room for "identity <json>" (4 KB profile) */
+    BOOL           cmd_resend;     /* the queued command is a second attempt after a dropped link */
     char           rsp[256];
     unsigned int   cmd_seq;      /* Monotonic sequence ID for tagged commands */
     int            last_mtu;     /* path MTU last sent to a Linux guest (0 = none) */
@@ -613,6 +614,7 @@ static DWORD WINAPI agent_thread_proc(LPVOID param)
             /* Check for pending command first */
             if (conn->cmd_pending) {
                 char tagged[4480];
+                conn->cmd_resend = 0;
                 conn->cmd_seq++;
                 sprintf_s(tagged, sizeof(tagged), "%u:%s", conn->cmd_seq, conn->cmd);
                 if (send_line(s, tagged) <= 0) break;
@@ -700,7 +702,20 @@ static DWORD WINAPI agent_thread_proc(LPVOID param)
         }
 
         disconnected:
-        /* Connection lost */
+        /* Connection lost. A fire-and-forget command still queued here never
+           reached the guest: hold it for the next connection rather than
+           losing it silently (a seat / replica create the user is waiting on),
+           but only once, and never a shutdown / restart - those ride the guest
+           going away. */
+        if (conn->cmd_pending && !conn->cmd_resend &&
+            strcmp(conn->cmd, "shutdown") != 0 && strcmp(conn->cmd, "restart") != 0) {
+            conn->cmd_resend = 1;
+            ui_log(L"Agent: \"%S\" did not reach \"%s\" before the link dropped; sending it again on the next connection.",
+                   conn->cmd, vm->name);
+        } else if (conn->cmd_pending) {
+            conn->cmd_pending = FALSE;
+            SetEvent(conn->cmd_done);
+        }
         vm->agent_online = FALSE;
         vm->idd_ready = FALSE;
         /* Atomically claim the socket so we never double-close a handle that
