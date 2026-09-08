@@ -479,9 +479,54 @@ static int replica_tool_present(void)
  * "qemu: stock / Build patch" hint on the sandbox row. */
 #define QEMU_STAMP "/opt/appsandbox/qemu-identity.installed"
 #define QEMU_BUILD_LOG "/var/log/appsandbox-qemu-build.log"
+/* Held (flock) by whoever builds the patched QEMU: the "qemu build" command
+ * and the build step of "replica setup". Running = the lock is taken. */
+#define QEMU_BUILD_LOCK "/run/appsandbox-qemu-build.lock"
 static int qemu_build_running(void)
 {
-    return run_sync("pgrep -f 'qemu-identity/build.s[h]' >/dev/null 2>&1") == 0;
+    return run_sync("flock -n " QEMU_BUILD_LOCK " true >/dev/null 2>&1") != 0;
+}
+
+/* Forward the notable lines of the build log (steps "==> ...", apt / make
+ * errors, the final verdict) to the host as "log:" lines, from *off on.
+ * final: the build ended without the stamp - send its last lines too, so
+ * the reason is in the Nestbox log without a trip into the guest. */
+static void forward_build_log(int fd, long *off, int final)
+{
+    FILE *f = fopen(QEMU_BUILD_LOG, "r");
+    char line[512], last[3][200] = {{0}};
+    int sent = 0, nlast = 0;
+    if (!f) return;
+    if (fseek(f, 0, SEEK_END) == 0 && ftell(f) < *off) *off = 0;   /* truncated: a new build */
+    fseek(f, *off, SEEK_SET);
+    while (fgets(line, sizeof(line), f)) {
+        size_t n = strlen(line);
+        if (n == 0 || line[n - 1] != '\n') { break; }               /* partial line: next beat */
+        line[--n] = '\0';
+        while (n > 0 && line[n - 1] == '\r') line[--n] = '\0';
+        *off = ftell(f);
+        if (n == 0) continue;
+        snprintf(last[nlast % 3], sizeof(last[0]), "%s", line); nlast++;
+        if (sent < 8 && (strncmp(line, "==>", 3) == 0 || strncmp(line, "E:", 2) == 0 ||
+                         strncmp(line, "OK:", 3) == 0 || strstr(line, "FAIL") || strstr(line, "rror") ||
+                         strstr(line, "build.sh:"))) {
+            char msg[560];
+            snprintf(msg, sizeof(msg), "log:qemu build: %s", line);
+            send_line(fd, msg);
+            sent++;
+        }
+    }
+    fclose(f);
+    if (final) {
+        int i, from = nlast > 3 ? nlast - 3 : 0;
+        send_line(fd, "log:qemu build: ended without installing the identity-patched QEMU; its last lines:");
+        for (i = from; i < nlast; i++) {
+            char msg[560];
+            snprintf(msg, sizeof(msg), "log:qemu build:   %s", last[i % 3]);
+            send_line(fd, msg);
+        }
+        send_line(fd, "log:qemu build: the whole log is " QEMU_BUILD_LOG " in the guest");
+    }
 }
 
 static const char *qemu_state(void)
@@ -507,12 +552,13 @@ static void handle_qemu(int fd, const char *args)
     else {
         char cmd[512];
         snprintf(cmd, sizeof(cmd),
-            "nohup sh -c '%s install && %s qemu build' >" QEMU_BUILD_LOG " 2>&1 </dev/null &", tool, tool);
+            "nohup flock -n " QEMU_BUILD_LOCK " sh -c '%s install && %s qemu build' >" QEMU_BUILD_LOG " 2>&1 </dev/null &",
+            tool, tool);
         rc = run_sync(cmd);
         agent_log("qemu build: launched rc=%d", rc);
         snprintf(msg, sizeof(msg), "qemu_result:build:%s", rc == 0 ? "started" : "failed");
         send_line(fd, msg);
-        sleep(1);   /* let build.sh appear in the process list before the state is read */
+        usleep(300000);   /* let flock take the lock before the state is read */
     }
     snprintf(msg, sizeof(msg), "qemu:%s", qemu_state());
     send_line(fd, msg);
@@ -676,8 +722,7 @@ static void handle_replica(int fd, const char *args)
             snprintf(cmd, sizeof(cmd),
                 "nohup sh -c '[ -f /var/lib/appsandbox/replica/replicas/%s/replica.conf ] && exit 0; "
                 "[ \"%s\" = replica ] && [ -f /var/lib/appsandbox/replica/replica.conf ] && exit 0; "
-                "%s install && while pgrep -f \"qemu-identity/build.s[h]\" >/dev/null; do sleep 10; done; "
-                "{ [ -f " QEMU_STAMP " ] || %s qemu build; } && "
+                "%s install && flock " QEMU_BUILD_LOCK " sh -c \"[ -f " QEMU_STAMP " ] || %s qemu build\" && "
                 "%s -n %s create%s && %s -n %s desktop' >/var/log/appsandbox-replica-%s.log 2>&1 </dev/null &",
                 name, name, tool, tool, tool, name, sizing, tool, name, name);
         else if (strcmp(sub, "create") == 0)
@@ -830,6 +875,7 @@ static void *heartbeat_thread(void *arg)
     static char replica_last[2100];   /* last reported replica list (JSON); reset per connection so a
                                          reconnecting host gets the list again */
     char qemu_last[16] = "";          /* last reported QEMU state; "" = report on first beat */
+    long build_log_off = 0;           /* how far the build log has been forwarded */
     replica_last[0] = '\0';
     while (!g_stop) {
         /* Sleep first so the very first heartbeat is at +5s, after hello. */
@@ -878,9 +924,13 @@ static void *heartbeat_thread(void *arg)
             }
         }
         /* The replicas' QEMU (stock / building / patched), on change and once
-         * per connection. */
+         * per connection; while a build runs, its notable log lines. */
         {
             const char *q = qemu_state();
+            int building = strcmp(q, "building") == 0;
+            int was_building = strcmp(qemu_last, "building") == 0;
+            if (building || was_building)
+                forward_build_log(fd, &build_log_off, was_building && !building && strcmp(q, "patched") != 0);
             if (strcmp(q, qemu_last) != 0) {
                 char msg[32];
                 snprintf(msg, sizeof(msg), "qemu:%s", q);
@@ -1720,13 +1770,18 @@ static void handle_client(int fd)
             handle_identity(fd, cmd + 9);
         }
         else if (strncmp(cmd, "replica ", 8) == 0) {
+            /* The result travels untagged (replica_result / the list); the
+             * tagged "ok" ends the host's wait for this command's reply. */
             handle_replica(fd, cmd + 8);
+            send_reply(fd, tag, "ok");
         }
         else if (strncmp(cmd, "seat ", 5) == 0) {
             handle_seat(fd, cmd + 5);
+            send_reply(fd, tag, "ok");
         }
         else if (strncmp(cmd, "qemu ", 5) == 0) {
             handle_qemu(fd, cmd + 5);
+            send_reply(fd, tag, "ok");
         }
         else if (strncmp(cmd, "ssh_deploy_key ", 15) == 0) {
             send_reply(fd, tag, deploy_ssh_key(cmd + 15) ? "ssh_key_deployed" : "ssh_key_failed");
@@ -1849,6 +1904,10 @@ int main(int argc, char **argv)
             agent_log("accept failed: %s", strerror(errno));
             break;
         }
+        /* Not for the children: a detached build or replica setup must not
+         * hold the host connection open (or drop it) on our behalf. */
+        fcntl(c, F_SETFD, FD_CLOEXEC);
+        fcntl(ls, F_SETFD, FD_CLOEXEC);
         handle_client(c);
         close(c);
     }

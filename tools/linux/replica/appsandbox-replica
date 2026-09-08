@@ -81,10 +81,23 @@ primary_user() {
     getent passwd | awk -F: '$3>=1000 && $3<65534 && $6 ~ /^\/home\// && $7 !~ /nologin|false/ {print $1; exit}'
 }
 
+# A fresh sandbox has only the installer's local pool in its apt lists: the
+# online archive is configured but never fetched, so "apt-get install" cannot
+# locate qemu / libvirt / the build deps. Fetch the lists once a day.
+apt_fresh() {
+    local stamp=/var/lib/apt/lists/.appsandbox-fresh
+    if [ ! -f "$stamp" ] || [ -n "$(find "$stamp" -mmin +1440 2>/dev/null)" ] \
+       || ! ls /var/lib/apt/lists/*archive.ubuntu.com* >/dev/null 2>&1; then
+        echo "==> apt-get update"
+        apt-get update -q && touch "$stamp"
+    fi
+}
+
 cmd_install() {
     need_root
     [ -e /dev/kvm ] || die "/dev/kvm missing: nested virtualization is not available in this VM"
     export DEBIAN_FRONTEND=noninteractive
+    apt_fresh
     apt-get install -y -q qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients \
         cloud-image-utils genisoimage
     systemctl enable --now libvirtd >/dev/null 2>&1 || true
@@ -529,6 +542,8 @@ cmd_qemu() {
             [ -x "$QEMU_SRC/build.sh" ] || [ -f "$QEMU_SRC/build.sh" ] \
                 || die "no $QEMU_SRC/build.sh (the patches + build script ship in the guest image under /opt/appsandbox)"
             [ -x "$QEMU_BIN" ] || [ -x "$QEMU_DISTRIB" ] || cmd_install
+            export DEBIAN_FRONTEND=noninteractive
+            apt_fresh
             exec bash "$QEMU_SRC/build.sh" "$@" ;;
         restore)
             need_root
