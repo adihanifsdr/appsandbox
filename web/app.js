@@ -1069,6 +1069,43 @@ function pendVm(name, label, ttl, expect) {
     setPending('vm:' + name, { label: label, name: name, ttl: ttl, expect: expect });
 }
 
+/* "qemu: stock [Build patch]" / "building the patch" / "identity-patched ✔":
+   the QEMU the replicas run on, with the button that builds the patched one.
+   On this PC (Linux host) the build runs here; on a Linux sandbox (Windows
+   host) it runs inside the sandbox, through its agent. */
+function qemuHint(vm, i) {
+    var where = vm.isHost ? 'this PC' : vm.name;
+    var qemu = document.createElement('span');
+    qemu.className = 'hint mono qemu-state';
+    if (vm.qemuPatched) {
+        qemu.textContent = 'qemu: identity-patched ✔';
+        qemu.title = 'The identity-patched QEMU is installed in ' + where + ': ACPI / SMBIOS / drive / CPUID strings from the profile reach the replicas';
+    } else if (vm.qemuBuilding) {
+        qemu.innerHTML = 'qemu: building the patch <span class="spinner"></span>';
+        qemu.title = 'appsandbox-replica qemu build is running in ' + where + ' (~10 min); progress is in the log' +
+                     (vm.isHost ? '' : ' (/var/log/appsandbox-qemu-build.log in the sandbox)');
+    } else {
+        qemu.textContent = 'qemu: stock ';
+        var qb = document.createElement('button');
+        qb.className = 'mini';
+        qb.textContent = 'Build patch';
+        qb.title = 'Build QEMU 8.2.2 with the identity patches in ' + where + ' and install it over the distro binary (~10 min, once). ' +
+                   'Without it the replicas run on the stock QEMU: DMI strings and the hidden hypervisor flag still work, ' +
+                   'the ACPI / SMBIOS-manufacturer / drive / CPUID strings are ignored.';
+        qb.onclick = function(e) {
+            e.stopPropagation();
+            showModal('Identity-patched QEMU',
+                'Builds QEMU 8.2.2 with the identity patches in ' + where + ' and installs it over the distro binary ' +
+                '(dpkg-divert, reversible with "appsandbox-replica qemu restore"). Takes about 10 minutes and ' +
+                'downloads build dependencies plus the QEMU source. Running replicas keep the stock QEMU until their next boot.',
+                'Build', { confirmClass: 'primary' })
+            .then(function(ok) { if (ok) sendCmd('qemuBuild', vm.isHost ? {} : {vmIndex: i}); });
+        };
+        qemu.appendChild(qb);
+    }
+    return qemu;
+}
+
 /* Build the list of <td> cells for a row. The status cell is passed in and
    updated in place (rather than recreated) so the spinner animation survives. */
 function buildRowCells(vm, i, statusTd) {
@@ -1134,34 +1171,7 @@ function buildRowCells(vm, i, statusTd) {
         nameTd.appendChild(tag);
         /* The identity-patched QEMU (hypervisor-level identity strings for
            the replicas): built once on this PC, from here. */
-        var qemu = document.createElement('span');
-        qemu.className = 'hint mono qemu-state';
-        if (vm.qemuPatched) {
-            qemu.textContent = 'qemu: identity-patched ✔';
-            qemu.title = 'The identity-patched QEMU is installed: ACPI / SMBIOS / drive / CPUID strings from the profile reach the replicas';
-        } else if (vm.qemuBuilding) {
-            qemu.innerHTML = 'qemu: building the patch <span class="spinner"></span>';
-            qemu.title = 'appsandbox-replica qemu build is running (~10 min); progress is in the log';
-        } else {
-            qemu.textContent = 'qemu: stock ';
-            var qb = document.createElement('button');
-            qb.className = 'mini';
-            qb.textContent = 'Build patch';
-            qb.title = 'Build QEMU 8.2.2 with the identity patches and install it over the distro binary (~10 min, once). ' +
-                       'Without it the replicas run on the stock QEMU: DMI strings and the hidden hypervisor flag still work, ' +
-                       'the ACPI / SMBIOS-manufacturer / drive / CPUID strings are ignored.';
-            qb.onclick = function(e) {
-                e.stopPropagation();
-                showModal('Identity-patched QEMU',
-                    'Builds QEMU 8.2.2 with the identity patches on this PC and installs it over the distro binary ' +
-                    '(dpkg-divert, reversible with "appsandbox-replica qemu restore"). Takes about 10 minutes and ' +
-                    'downloads build dependencies plus the QEMU source. Running replicas keep the stock QEMU until their next boot.',
-                    'Build', { confirmClass: 'primary' })
-                .then(function(ok) { if (ok) sendCmd('qemuBuild', {}); });
-            };
-            qemu.appendChild(qb);
-        }
-        nameTd.appendChild(qemu);
+        nameTd.appendChild(qemuHint(vm, i));
         if (vm.kvm === false) {
             var nokvm = document.createElement('span');
             nokvm.className = 'chip warn';
@@ -1218,8 +1228,12 @@ function buildRowCells(vm, i, statusTd) {
     var editBtn = actBtn('edit', editModeRow === i ? '✔️' : '✏️', !vm.running && !bld && !busy, function() { toggleEditMode(i); },
         editModeRow === i ? 'Done editing' : 'Edit CPU, RAM, GPU and network (the VM must be stopped)');
 
+    /* a Linux sandbox that can host replicas: the QEMU they run on, next to its name */
+    var vmNameTd = makeCell(vm.name, i, 0);
+    if (isLinux && vm.running && vm.agentOnline && !bld && vm.qemuKnown)
+        vmNameTd.appendChild(qemuHint(vm, i));
     var cells = [
-        makeCell(vm.name, i, 0),
+        vmNameTd,
         makeCell(vm.osType, i, 1),
         statusTd,
         makeCell(vm.cpuCores, i, 4, 'Virtual CPU cores of this VM'),
@@ -1332,7 +1346,7 @@ function renderVmTable() {
             vm.installComplete, vm.isTemplate,
             vm.sshEnabled, vm.sshState, vm.sshPort,
             vm.vncPort, vm.replica, vm.replicas, vm.hasIdentity,   /* nested / VNC / identity cells */
-            vm.osType, vm.ramMb, vm.hddGb, vm.cpuCores, vm.isHost, vm.osName, vm.qemuPatched, vm.qemuBuilding, vm.kvm,
+            vm.osType, vm.ramMb, vm.hddGb, vm.cpuCores, vm.isHost, vm.osName, vm.qemuPatched, vm.qemuBuilding, vm.qemuKnown, vm.kvm,
             vm.gpuMode, vm.gpuName, vm.networkMode,
             selectedSnap[i] || 'current',
             pendingSig(vm.name),                                     /* what the page waits on for this VM */
@@ -1694,7 +1708,11 @@ function openAddModal(idx, inRep) {
     g('add-rep-patch').checked = false;
     g('add-rep-note').textContent = onHost
         ? 'Nestbox creates it from the Ubuntu cloud image and installs XFCE + Steam (10–20 min). Its row appears once it boots; every step is in the log.'
-        : 'Nestbox builds the identity-patched QEMU inside ' + vm.name + ' (the first time, ~10 min), creates the replica and installs XFCE + Steam (10–20 min). Its row appears once it boots; every step is in the log.';
+        : vm.qemuPatched
+        ? 'Nestbox creates it inside ' + vm.name + ' on the identity-patched QEMU and installs XFCE + Steam (10–20 min). Its row appears once it boots; every step is in the log.'
+        : vm.qemuBuilding
+        ? 'Nestbox waits for the identity-patched QEMU build running inside ' + vm.name + ', creates the replica and installs XFCE + Steam (10–20 min). Its row appears once it boots; every step is in the log.'
+        : 'Nestbox builds the identity-patched QEMU inside ' + vm.name + ' (the first time, ~10 min; also from "Build patch" on its row), creates the replica and installs XFCE + Steam (10–20 min). Its row appears once it boots; every step is in the log.';
 
     /* seat */
     var last = {};

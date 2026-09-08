@@ -249,7 +249,7 @@ static int append_vm_json(char *out, int cap, int pos, VmInstance *v)
     pos  = append_wstr(out, cap, pos, v->os_type);
     pos += sprintf_s(out + pos, cap - pos,
         ",\"state\":\"%s\",\"running\":%s,\"agentOnline\":%s,\"installComplete\":%s,"
-        "\"building\":%s,\"progress\":%d,\"sshState\":%d,\"sshPort\":%lu,\"vncPort\":%lu,\"hasIdentity\":%s,\"replica\":\"%s\",\"replicas\":%s,\"replicaAuto\":%s,"
+        "\"building\":%s,\"progress\":%d,\"sshState\":%d,\"sshPort\":%lu,\"vncPort\":%lu,\"hasIdentity\":%s,\"replica\":\"%s\",\"replicas\":%s,\"replicaAuto\":%s,\"qemu\":\"%s\","
         "\"ramMb\":%lu,\"hddGb\":%lu,\"cpuCores\":%lu,\"gpuMode\":%d,\"networkMode\":%d,"
         "\"displayOpen\":%s,\"buildStep\":",
         derive_state(v),
@@ -259,7 +259,7 @@ static int append_vm_json(char *out, int cap, int pos, VmInstance *v)
         (v->ssh_key_deployed && v->ssh_state == 2) ? 4 : v->ssh_state,   /* 4 = ready + key deployed */
         (unsigned long)v->ssh_port, (unsigned long)v->vnc_guest_port,
         v->identity[0] ? "true" : "false", v->replica_state,
-        v->replicas[0] ? v->replicas : "[]", v->replica_auto ? "true" : "false",
+        v->replicas[0] ? v->replicas : "[]", v->replica_auto ? "true" : "false", v->qemu_state,
         (unsigned long)v->ram_mb, (unsigned long)v->hdd_gb, (unsigned long)v->cpu_cores,
         v->gpu_mode, v->network_mode,
         display_is_open(v->unique_id) ? "true" : "false");

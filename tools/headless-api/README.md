@@ -190,7 +190,7 @@ methods return `(http_status, body)` so you can branch on the status code.
 | `snapshots_full(name)` | the above **plus** `current: {snapIndex, branchIndex}` |
 
 A **status object** has: `name, osType, state, running, agentOnline,
-installComplete, building, progress, sshState, sshPort, vncPort, replica (Linux: "" / none / stopped / running, the default nested replica), replicas (Linux: every nested replica as `[{name, state, vnc, desktop}]`), replicaAuto, ramMb, hddGb, cpuCores,
+installComplete, building, progress, sshState, sshPort, vncPort, replica (Linux: "" / none / stopped / running, the default nested replica), replicas (Linux: every nested replica as `[{name, state, vnc, desktop}]`), replicaAuto, qemu (Linux: "" / none / stock / building / patched, the QEMU the replicas run on, per the guest agent), ramMb, hddGb, cpuCores,
 gpuMode, networkMode, displayOpen, buildStep` (`buildStep` names the current
 build phase while `building`, e.g. `"Downloading packages 42/182"`).
 

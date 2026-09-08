@@ -112,6 +112,7 @@ typedef struct {
     volatile DWORD vnc_guest_port;       /* guest-side VNC listener reported by the agent (0 = none) */
     char        replica_state[16];       /* Linux: nested replica per the agent: "" / none / stopped / running */
     char        replicas[2048];          /* Linux: every replica and Steam seat as JSON [{name,state,vnc,desktop[,kind]}], "" = unknown */
+    char        qemu_state[16];          /* Linux: the replicas' QEMU per the agent: "" / none / stock / building / patched */
     BOOL        replica_auto;            /* Linux: build the first replica (patched QEMU + XFCE/Steam) once the agent is up */
     wchar_t     identity[4096];          /* Linux: VM identity profile (compact JSON), "" = none */
     DWORD       vnc_port;                /* host 127.0.0.1 port of the VNC tunnel (0 = not started) */

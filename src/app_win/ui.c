@@ -233,6 +233,10 @@ static void build_vm_json(JsonBuilder *jb, int i)
         MultiByteToWideChar(CP_UTF8, 0, v->replicas[0] ? v->replicas : "[]", -1, rl, 2048);
         jb_string(jb, L"replicas", rl);
         jb_bool(jb, L"replicaAuto", v->replica_auto);
+        /* the replicas' QEMU: the same two flags the Linux host sends for its own row */
+        jb_bool(jb, L"qemuPatched", strcmp(v->qemu_state, "patched") == 0);
+        jb_bool(jb, L"qemuBuilding", strcmp(v->qemu_state, "building") == 0);
+        jb_bool(jb, L"qemuKnown", v->qemu_state[0] != '\0' && strcmp(v->qemu_state, "none") != 0);
     }
     jb_bool(jb, L"hasIdentity", v->identity[0] != L'\0');
     jb_int(jb, L"vncTunnelPort", (int)v->vnc_port);     /* host tunnel, 0 = not started */
@@ -1318,6 +1322,20 @@ static void on_webview2_message(const wchar_t *json)
                 ui_log(L"%s \"%S\" of \"%s\": %S requested.", what, name, inst->name, sub);
             } else {
                 ui_log(L"%s: the guest agent of \"%s\" is not online.", what, inst ? inst->name : L"?");
+            }
+        }
+    } else if (wcscmp(action, L"qemuBuild") == 0) {
+        /* The "Build patch" button on a Linux sandbox row: the agent runs
+           appsandbox-replica qemu build detached (~10 min) and reports
+           qemu_result / the new qemu state. */
+        int idx;
+        if (json_get_int(json, L"vmIndex", &idx) && idx >= 0 && idx < asb_vm_count()) {
+            VmInstance *inst = asb_vm_instance(asb_vm_get(idx));
+            if (inst && inst->running && inst->agent_online) {
+                vm_agent_send(inst, "qemu build", NULL, 0, 0);
+                ui_log(L"Identity-patched QEMU of \"%s\": build requested (~10 min; the log is /var/log/appsandbox-qemu-build.log in the guest).", inst->name);
+            } else {
+                ui_log(L"Identity-patched QEMU: the guest agent of \"%s\" is not online.", inst ? inst->name : L"?");
             }
         }
     } else if (wcscmp(action, L"vncConnect") == 0 || wcscmp(action, L"vncOpen") == 0) {

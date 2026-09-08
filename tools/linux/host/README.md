@@ -107,6 +107,13 @@ has the same as a checkbox for the first replica, and `--qemu-patch` on the
 command line does it before any replica is created. Running replicas pick
 the patched QEMU up at their next boot.
 
+On a Windows host the same `qemu: stock` / **Build patch** /
+`identity-patched ✔` hint sits on every running Linux sandbox's row (the
+guest agent reports it as `qemu:<state>`); the button runs
+`appsandbox-replica qemu build` inside that sandbox, with the log in
+`/var/log/appsandbox-qemu-build.log`. Adding a replica there builds the
+patch anyway when it is missing, and waits for a build already running.
+
 ## Not on Linux
 
 Sandbox VMs (the Hyper-V / Virtualization-framework layer), GPU-PV, the IDD

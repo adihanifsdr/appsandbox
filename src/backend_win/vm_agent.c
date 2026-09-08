@@ -366,6 +366,19 @@ static int process_async_message(VmInstance *vm, SOCKET s, const char *buf)
         }
     } else if (strncmp(buf, "replica_result:", 15) == 0) {
         ui_log(L"[%s] Nested replica: %S.", vm->name, buf + 15);
+    } else if (strncmp(buf, "qemu:", 5) == 0) {
+        /* "qemu:none|stock|building|patched" - the QEMU the replicas run on
+           (identity-patched or not), on change; drives the "Build patch"
+           hint on the sandbox row. */
+        if (strcmp(vm->qemu_state, buf + 5) != 0) {
+            strncpy_s(vm->qemu_state, sizeof(vm->qemu_state), buf + 5, _TRUNCATE);
+            ui_log(L"[%s] Replica QEMU: %S.", vm->name, buf + 5);
+            if (g_agent_hwnd)
+                PostMessageW(g_agent_hwnd, WM_VM_VNC_CHANGED, 0, (LPARAM)vm->unique_id);
+        }
+    } else if (strncmp(buf, "qemu_result:", 12) == 0) {
+        /* "qemu_result:build:started|already|building|failed" */
+        ui_log(L"[%s] Identity-patched QEMU: %S.", vm->name, buf + 12);
     } else if (strncmp(buf, "seat_result:", 12) == 0) {
         /* "seat_result:<name>:<sub>:ok|failed|started" - a Steam seat
            (appsandbox-seat); the seats travel in the replicas list. */
@@ -686,6 +699,7 @@ static DWORD WINAPI agent_thread_proc(LPVOID param)
         vm->vnc_guest_port = 0;
         vm->replica_state[0] = '\0';
         vm->replicas[0] = '\0';
+        vm->qemu_state[0] = '\0';
         notify_agent_status(vm);
 
         /* Wake up any blocked command sender */

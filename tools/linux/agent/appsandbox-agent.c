@@ -471,6 +471,53 @@ static int replica_tool_present(void)
     return access("/usr/local/sbin/appsandbox-replica", X_OK) == 0;
 }
 
+/* The QEMU the replicas run on: "patched" (the identity-patched build is
+ * installed, /opt/appsandbox/qemu-identity.installed), "building" (its
+ * build.sh is running, ~10 min), "stock" (the distro binary) or "none"
+ * (no appsandbox-replica here). Reported to the host as "qemu:<state>" on
+ * change (heartbeat) and right after a build is launched, for the
+ * "qemu: stock / Build patch" hint on the sandbox row. */
+#define QEMU_STAMP "/opt/appsandbox/qemu-identity.installed"
+#define QEMU_BUILD_LOG "/var/log/appsandbox-qemu-build.log"
+static int qemu_build_running(void)
+{
+    return run_sync("pgrep -f 'qemu-identity/build.s[h]' >/dev/null 2>&1") == 0;
+}
+
+static const char *qemu_state(void)
+{
+    if (!replica_tool_present()) return "none";
+    if (access(QEMU_STAMP, F_OK) == 0) return "patched";
+    return qemu_build_running() ? "building" : "stock";
+}
+
+/* "qemu build": build the identity-patched QEMU (appsandbox-replica install
+ * + qemu build), detached, log in /var/log/appsandbox-qemu-build.log.
+ * Answers qemu_result:build:started|already|building|failed and the fresh
+ * state, so the row flips to "building" at once. */
+static void handle_qemu(int fd, const char *args)
+{
+    const char *tool = "/usr/local/sbin/appsandbox-replica";
+    char msg[64];
+    int rc;
+    if (strcmp(args, "build") != 0) { send_line(fd, "qemu_result:?:failed"); return; }
+    if (!replica_tool_present()) { send_line(fd, "qemu_result:build:failed"); return; }
+    if (access(QEMU_STAMP, F_OK) == 0) { send_line(fd, "qemu_result:build:already"); }
+    else if (qemu_build_running()) { send_line(fd, "qemu_result:build:building"); }
+    else {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd),
+            "nohup sh -c '%s install && %s qemu build' >" QEMU_BUILD_LOG " 2>&1 </dev/null &", tool, tool);
+        rc = run_sync(cmd);
+        agent_log("qemu build: launched rc=%d", rc);
+        snprintf(msg, sizeof(msg), "qemu_result:build:%s", rc == 0 ? "started" : "failed");
+        send_line(fd, msg);
+        sleep(1);   /* let build.sh appear in the process list before the state is read */
+    }
+    snprintf(msg, sizeof(msg), "qemu:%s", qemu_state());
+    send_line(fd, msg);
+}
+
 /* Steam seats (appsandbox-seat): a Linux user with an Xvnc display, XFCE and
  * Steam, on this VM itself - no nested guest. Listed and driven next to the
  * replicas. */
@@ -629,7 +676,8 @@ static void handle_replica(int fd, const char *args)
             snprintf(cmd, sizeof(cmd),
                 "nohup sh -c '[ -f /var/lib/appsandbox/replica/replicas/%s/replica.conf ] && exit 0; "
                 "[ \"%s\" = replica ] && [ -f /var/lib/appsandbox/replica/replica.conf ] && exit 0; "
-                "%s install && { [ -f /opt/appsandbox/qemu-identity.installed ] || %s qemu build; } && "
+                "%s install && while pgrep -f \"qemu-identity/build.s[h]\" >/dev/null; do sleep 10; done; "
+                "{ [ -f " QEMU_STAMP " ] || %s qemu build; } && "
                 "%s -n %s create%s && %s -n %s desktop' >/var/log/appsandbox-replica-%s.log 2>&1 </dev/null &",
                 name, name, tool, tool, tool, name, sizing, tool, name, name);
         else if (strcmp(sub, "create") == 0)
@@ -781,6 +829,7 @@ static void *heartbeat_thread(void *arg)
     int vnc_last = -1;  /* last reported VNC listener state; -1 = report on first beat */
     static char replica_last[2100];   /* last reported replica list (JSON); reset per connection so a
                                          reconnecting host gets the list again */
+    char qemu_last[16] = "";          /* last reported QEMU state; "" = report on first beat */
     replica_last[0] = '\0';
     while (!g_stop) {
         /* Sleep first so the very first heartbeat is at +5s, after hello. */
@@ -826,6 +875,17 @@ static void *heartbeat_thread(void *arg)
                 send_replica_state(fd);
                 snprintf(replica_last, sizeof(replica_last), "%s", now);
                 if (replica_last[0] == '\0') replica_last[0] = ' ';
+            }
+        }
+        /* The replicas' QEMU (stock / building / patched), on change and once
+         * per connection. */
+        {
+            const char *q = qemu_state();
+            if (strcmp(q, qemu_last) != 0) {
+                char msg[32];
+                snprintf(msg, sizeof(msg), "qemu:%s", q);
+                send_line(fd, msg);
+                snprintf(qemu_last, sizeof(qemu_last), "%s", q);
             }
         }
     }
@@ -1664,6 +1724,9 @@ static void handle_client(int fd)
         }
         else if (strncmp(cmd, "seat ", 5) == 0) {
             handle_seat(fd, cmd + 5);
+        }
+        else if (strncmp(cmd, "qemu ", 5) == 0) {
+            handle_qemu(fd, cmd + 5);
         }
         else if (strncmp(cmd, "ssh_deploy_key ", 15) == 0) {
             send_reply(fd, tag, deploy_ssh_key(cmd + 15) ? "ssh_key_deployed" : "ssh_key_failed");

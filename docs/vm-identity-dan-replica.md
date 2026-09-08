@@ -140,6 +140,7 @@ Kolom di daftar sandbox, dari kiri ke kanan setelah Snapshot:
 | 📺 | Layar **utama** sandbox VM (GPU penuh) |
 | `>_` | Terminal SSH ke sandbox VM |
 | 🪆 | **Replica**: tombol `+` membuat replica baru (boleh lebih dari satu per sandbox). Setiap replica tampil sebagai baris di bawah sandbox-nya dengan tombol start, layar, desktop XFCE, stop, restart, hapus |
+| `qemu: stock` / **Build patch** | Di samping nama sandbox yang sedang jalan: QEMU mana yang dipakai replica-nya. Tombolnya membangun QEMU yang dipatch di dalam sandbox itu (~10 menit, sekali); sesudahnya tertulis `qemu: identity-patched ✔`. Log-nya di `/var/log/appsandbox-qemu-build.log` di dalam sandbox |
 | 🪪 | Editor VM identity (profil JSON) |
 
 Jendela layar replica punya tombol Ctrl+Alt+Del, Fit/1:1, External viewer
@@ -151,7 +152,9 @@ hidup otomatis setiap sandbox VM boot.
 Cara termudah: centang **Nested replica** saat New Sandbox (dikerjakan
 otomatis setelah install selesai), atau klik `+` di kolom 🪆 pada sandbox
 yang sedang jalan. Keduanya menjalankan langkah di bawah ini di latar
-belakang; kemajuannya tampil di log. Cara manual lewat tombol `>_`:
+belakang; kemajuannya tampil di log. QEMU yang dipatch juga bisa dibangun
+sendiri lebih dulu, tanpa replica, lewat tombol **Build patch** di samping
+nama sandbox. Cara manual lewat tombol `>_`:
 
 ```
 sudo appsandbox-replica install       # pasang QEMU + libvirt (sekali)
