@@ -170,11 +170,19 @@ install_tigervnc() {
 }
 have_steam() { command -v steam >/dev/null; }
 
+# An empty *_Packages file (an interrupted fetch) makes apt believe a suite
+# has no packages while "apt-get update" keeps answering "Hit" for it: the
+# install then fails on unmet dependencies. Drop such files before updating.
+apt_update() {
+    find /var/lib/apt/lists -maxdepth 1 -type f -name '*_Packages' -size 0 -print -delete 2>/dev/null | sed 's/^/==> removing empty apt list: /'
+    apt_update
+}
+
 install_desktop() {
     have_desktop && return 0
     echo "==> installing Xvnc (TigerVNC) + XFCE (~300 MB) ..."
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -q
+    apt_update
     apt-get install -y -q tigervnc-standalone-server xfce4 xfce4-terminal dbus-x11 xterm xauth
 }
 
@@ -218,7 +226,7 @@ install_steam() {
     echo "==> installing Steam (i386 multiarch + steam-installer, ~1 GB with its libraries) ..."
     export DEBIAN_FRONTEND=noninteractive
     dpkg --add-architecture i386
-    apt-get update -q
+    apt_update
     echo steam steam/question select "I AGREE" | debconf-set-selections
     echo steam steam/license note '' | debconf-set-selections
     apt-get install -y -q steam-installer || apt-get install -y -q steam

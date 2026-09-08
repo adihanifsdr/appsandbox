@@ -84,8 +84,17 @@ primary_user() {
 # A fresh sandbox has only the installer's local pool in its apt lists: the
 # online archive is configured but never fetched, so "apt-get install" cannot
 # locate qemu / libvirt / the build deps. Fetch the lists once a day.
+# An empty *_Packages file (an interrupted fetch) makes apt believe a suite
+# has no packages while "apt-get update" keeps answering "Hit" for it, so
+# installs fail on unmet dependencies until the file is removed by hand.
 apt_fresh() {
-    local stamp=/var/lib/apt/lists/.appsandbox-fresh
+    local stamp=/var/lib/apt/lists/.appsandbox-fresh empty
+    empty=$(find /var/lib/apt/lists -maxdepth 1 -type f -name '*_Packages' -size 0 2>/dev/null)
+    if [ -n "$empty" ]; then
+        echo "==> removing empty apt lists: $(echo "$empty" | xargs -n1 basename | tr '\n' ' ')"
+        echo "$empty" | xargs rm -f
+        rm -f "$stamp"
+    fi
     if [ ! -f "$stamp" ] || [ -n "$(find "$stamp" -mmin +1440 2>/dev/null)" ] \
        || ! ls /var/lib/apt/lists/*archive.ubuntu.com* >/dev/null 2>&1; then
         echo "==> apt-get update"
