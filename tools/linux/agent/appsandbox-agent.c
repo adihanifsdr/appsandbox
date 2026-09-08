@@ -489,10 +489,26 @@ static int qemu_build_running(void)
 
 /* A log line worth the host's log: a step ("==> ..."), an apt / dpkg / make
  * error, a verdict. The rest (package lists, progress) stays in the guest. */
+/* "error" / "Error" as a word - not the "rror" inside libgpg-error0 and co. */
+static int has_error_word(const char *line)
+{
+    const char *p = line;
+    while ((p = strstr(p, "rror")) != NULL) {
+        const char *w = p - 1;
+        if (w >= line && (*w == 'e' || *w == 'E') &&
+            (w == line || !(isalnum((unsigned char)w[-1]) || w[-1] == '-' || w[-1] == '_')) &&
+            !(isalnum((unsigned char)p[4]) || p[4] == '-' || p[4] == '_'))
+            return 1;
+        p += 4;
+    }
+    return 0;
+}
+
 static int notable_line(const char *line)
 {
+    if (line[0] == ' ' || line[0] == '\t') return 0;   /* apt's indented package lists */
     return strncmp(line, "==>", 3) == 0 || strncmp(line, "E:", 2) == 0 ||
-           strncmp(line, "OK:", 3) == 0 || strstr(line, "FAIL") || strstr(line, "rror") ||
+           strncmp(line, "OK:", 3) == 0 || strstr(line, "FAIL") || has_error_word(line) ||
            strstr(line, "build.sh:") || strstr(line, "cannot") || strstr(line, "Unable") ||
            strncmp(line, "Fetched ", 8) == 0 || strstr(line, "newly installed");
 }
