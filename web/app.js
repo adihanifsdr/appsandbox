@@ -77,7 +77,7 @@ function elapsedText(ms) {
 function pendingSig(vmName) {
     return Object.keys(pending).filter(function(k) {
         return k.slice(-vmName.length - 1) === ':' + vmName || k.indexOf(':' + vmName + '/') >= 0;
-    }).map(function(k) { return k + '=' + pending[k].label + (pending[k].failed ? '!' : ''); }).join(';');
+    }).map(function(k) { return k + '=' + pending[k].label + (pending[k].failed ? '!' : '') + (pending[k].note ? '#' + pending[k].note : ''); }).join(';');
 }
 /* A log line that names a pending thing and says it failed ends the wait:
    the hosts report failures only in the log ("…:create:failed.", "[seat2]
@@ -93,6 +93,11 @@ function pendingFromLog(msg) {
             p.failed = msg; p.until = Date.now() + 8000; hit = true;
         } else if (p.doneOnLog && /:ok\.|\] done\./.test(msg)) {
             delete pending[k]; hit = true;
+        } else {
+            /* "[vm] seat name: ==> step" / "downloading 45 MB of 69 MB, 350 kB/s" /
+               "installing: 120 unpacked, 80 set up of 254 packages": the row shows it */
+            var m = msg.match(/: (?:==> )?((?:downloading|installing:|Fetched )[^]*|[^:]*\.\.\.)$/);
+            if (m && m[1] !== p.note) { p.note = m[1]; hit = true; }
         }
     });
     if (hit) renderVmTable();
@@ -1615,9 +1620,18 @@ function pendingRepRow(vm, key, name, p, cols) {
         stEl.className = 'replica-state busy';
         stEl.innerHTML = '<span class="lamp warn"></span>creating… <span class="spinner"></span>';
         specEl.className = 'replica-spec hint';
-        specEl.innerHTML = (seat ? 'packages the first time (~1.5 GB), then seconds; the row appears when the seat is up'
-                                 : 'cloud image, then XFCE + Steam (10–20 min); the row appears when it boots') +
-                           ' · <span class="mono" data-pending-elapsed="' + key + '">' + elapsedText(Date.now() - p.since) + '</span>';
+        specEl.innerHTML = '';
+        var noteEl = document.createElement('span');
+        noteEl.textContent = p.note || (seat ? 'packages the first time (~1.5 GB), then seconds; the row appears when the seat is up'
+                                             : 'cloud image, then XFCE + Steam (10–20 min); the row appears when it boots');
+        if (p.note) noteEl.title = 'The latest step from the log below';
+        specEl.appendChild(noteEl);
+        specEl.appendChild(document.createTextNode(' · '));
+        var elEl = document.createElement('span');
+        elEl.className = 'mono';
+        elEl.setAttribute('data-pending-elapsed', key);
+        elEl.textContent = elapsedText(Date.now() - p.since);
+        specEl.appendChild(elEl);
     }
     tr.appendChild(td);
     var dismiss = actBtn('dismiss', 'x', true, function() { clearPending(key); }, p.failed ? 'Dismiss' : 'Stop waiting (the creation itself goes on; the row appears when the host lists it)');

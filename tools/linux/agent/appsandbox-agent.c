@@ -493,7 +493,28 @@ static int notable_line(const char *line)
 {
     return strncmp(line, "==>", 3) == 0 || strncmp(line, "E:", 2) == 0 ||
            strncmp(line, "OK:", 3) == 0 || strstr(line, "FAIL") || strstr(line, "rror") ||
-           strstr(line, "build.sh:") || strstr(line, "cannot") || strstr(line, "Unable");
+           strstr(line, "build.sh:") || strstr(line, "cannot") || strstr(line, "Unable") ||
+           strncmp(line, "Fetched ", 8) == 0 || strstr(line, "newly installed");
+}
+
+/* "[14.7 kB]" / "[13.5 MB]" / "[212 B]" at the end of an apt Get: line, in
+ * bytes; 0 when there is none. Also "Need to get 69.4 MB/240 MB". */
+static double apt_size(const char *s)
+{
+    double v = 0;
+    char unit[4] = "";
+    if (sscanf(s, "%lf %3s", &v, unit) < 1) return 0;
+    if (unit[0] == 'k') return v * 1000;
+    if (unit[0] == 'M') return v * 1000 * 1000;
+    if (unit[0] == 'G') return v * 1000 * 1000 * 1000;
+    return v;
+}
+
+static void fmt_bytes(double b, char *out, size_t cap)
+{
+    if (b >= 1000 * 1000) snprintf(out, cap, "%.1f MB", b / 1e6);
+    else if (b >= 1000)   snprintf(out, cap, "%.0f kB", b / 1e3);
+    else                  snprintf(out, cap, "%.0f B", b);
 }
 
 /* ---- Detached jobs: seat create, replica create / desktop / setup ----
@@ -514,6 +535,11 @@ struct job {
     pid_t pid;
     char  last[3][200];            /* the log's last three lines (ring) */
     int   nlast;
+    /* progress from apt's output: bytes fetched (Get: lines) against the
+     * "Need to get" target, packages unpacked / set up; reported every 15 s */
+    double dl_bytes, dl_target, dl_rep_bytes;
+    int    unpacked, setup, total_new, rep_unpacked, rep_setup;
+    time_t started, dl_rep_t;
 };
 static struct job g_jobs[MAX_JOBS];
 static pthread_mutex_t g_jobs_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -551,6 +577,7 @@ static int job_launch(const char *kind, const char *name, const char *sub, const
         snprintf(j->sub, sizeof(j->sub), "%s", sub);
         snprintf(j->log, sizeof(j->log), "%s", log);
         snprintf(j->rcfile, sizeof(j->rcfile), "%s", rcfile);
+        j->started = time(NULL);
         f = fopen(pidfile, "r");
         if (f) { int p = 0; if (fscanf(f, "%d", &p) == 1) j->pid = (pid_t)p; fclose(f); }
     }
@@ -586,6 +613,22 @@ static int jobs_tick(int fd)
                 if (n == 0) continue;
                 snprintf(j->last[j->nlast % 3], sizeof(j->last[0]), "%s", line);
                 j->nlast++;
+                /* apt's progress: what it fetches, what it unpacks / sets up */
+                if (strncmp(line, "Get:", 4) == 0) {
+                    const char *br = strrchr(line, '[');
+                    if (br) j->dl_bytes += apt_size(br + 1);
+                } else if (strstr(line, "Need to get ")) {
+                    j->dl_target = apt_size(strstr(line, "Need to get ") + 12);
+                    j->dl_bytes = j->dl_rep_bytes = 0;
+                } else if (strstr(line, "newly installed")) {
+                    int up = 0, nw = 0;
+                    if (sscanf(line, "%d upgraded, %d newly installed", &up, &nw) == 2) j->total_new = up + nw;
+                    j->unpacked = j->setup = j->rep_unpacked = j->rep_setup = 0;
+                } else if (strncmp(line, "Unpacking ", 10) == 0) {
+                    j->unpacked++;
+                } else if (strncmp(line, "Setting up ", 11) == 0) {
+                    j->setup++;
+                }
                 if (sent < 8 && notable_line(line)) {
                     snprintf(msg, sizeof(msg), "log:%s %s: %s", j->kind, j->name, line);
                     send_line(fd, msg);
@@ -593,6 +636,35 @@ static int jobs_tick(int fd)
                 }
             }
             fclose(f);
+        }
+        /* every 15 s: the download so far and its speed, or the install count */
+        {
+            time_t now = time(NULL);
+            if (now - j->dl_rep_t >= 15) {
+                if (j->dl_bytes > j->dl_rep_bytes) {
+                    double dt = difftime(now, j->dl_rep_t ? j->dl_rep_t : j->started);
+                    char a[32], b[32], s[32];
+                    fmt_bytes(j->dl_bytes, a, sizeof(a));
+                    fmt_bytes(j->dl_target, b, sizeof(b));
+                    fmt_bytes(dt > 0 ? (j->dl_bytes - j->dl_rep_bytes) / dt : 0, s, sizeof(s));
+                    if (j->dl_target > 0 && j->dl_bytes <= j->dl_target)
+                        snprintf(msg, sizeof(msg), "log:%s %s: downloading %s of %s, %s/s", j->kind, j->name, a, b, s);
+                    else
+                        snprintf(msg, sizeof(msg), "log:%s %s: downloading %s so far, %s/s", j->kind, j->name, a, s);
+                    send_line(fd, msg);
+                    j->dl_rep_bytes = j->dl_bytes;
+                    j->dl_rep_t = now;
+                } else if (j->unpacked > j->rep_unpacked || j->setup > j->rep_setup) {
+                    if (j->total_new > 0)
+                        snprintf(msg, sizeof(msg), "log:%s %s: installing: %d unpacked, %d set up of %d packages", j->kind, j->name, j->unpacked, j->setup, j->total_new);
+                    else
+                        snprintf(msg, sizeof(msg), "log:%s %s: installing: %d unpacked, %d set up", j->kind, j->name, j->unpacked, j->setup);
+                    send_line(fd, msg);
+                    j->rep_unpacked = j->unpacked;
+                    j->rep_setup = j->setup;
+                    j->dl_rep_t = now;
+                }
+            }
         }
         f = fopen(j->rcfile, "r");
         if (f) {
