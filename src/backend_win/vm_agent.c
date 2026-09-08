@@ -158,13 +158,16 @@ static void free_conn(AgentConn *conn)
 
 /* ---- Line I/O ---- */
 
-/* Read a single line (up to \n) from socket. Returns length, 0 on close, -1 on error. */
+/* Read a single line (up to \n) from socket. Returns length, 0 on close, -1 on
+   error (WSAETIMEDOUT when nothing arrived within the socket's receive
+   timeout; a timeout in the middle of a line is retried a few times first). */
 static int recv_line(SOCKET s, char *buf, int buf_size)
 {
-    int pos = 0;
+    int pos = 0, stalls = 0;
     while (pos < buf_size - 1) {
         char c;
         int n = recv(s, &c, 1, 0);
+        if (n < 0 && pos > 0 && WSAGetLastError() == WSAETIMEDOUT && ++stalls < 12) continue;
         if (n <= 0) return n;
         if (c == '\n') break;
         if (c != '\r') buf[pos++] = c;
@@ -613,9 +616,22 @@ static DWORD WINAPI agent_thread_proc(LPVOID param)
                 conn->cmd_seq++;
                 sprintf_s(tagged, sizeof(tagged), "%u:%s", conn->cmd_seq, conn->cmd);
                 if (send_line(s, tagged) <= 0) break;
-                /* Read lines until we get our tagged response */
+                /* Read lines until we get our tagged response. The socket's
+                   receive timeout (5 s) equals the agent's heartbeat interval,
+                   so a quiet spell here - a handler that answers only with
+                   untagged lines, a slow list command in the guest - is not a
+                   lost connection: keep waiting until a line arrives or the
+                   deadline passes, then give the reply up and carry on. */
+                {
+                ULONGLONG deadline = GetTickCount64() + 60000;
                 for (;;) {
                     n = recv_line(s, conn->rsp, sizeof(conn->rsp));
+                    if (n < 0 && WSAGetLastError() == WSAETIMEDOUT) {
+                        if (GetTickCount64() < deadline && !conn->stop) continue;
+                        ui_log(L"Agent: no reply to \"%S\" from \"%s\" within 60 s; carrying on.", conn->cmd, vm->name);
+                        conn->rsp[0] = '\0';
+                        break;
+                    }
                     if (n <= 0) {
                         conn->rsp[0] = '\0';
                         conn->cmd_pending = FALSE;
@@ -636,6 +652,7 @@ static DWORD WINAPI agent_thread_proc(LPVOID param)
                     }
                     /* Untagged = async message, process inline */
                     process_async_message(vm, s, conn->rsp);
+                }
                 }
                 conn->cmd_pending = FALSE;
                 SetEvent(conn->cmd_done);

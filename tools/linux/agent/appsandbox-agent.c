@@ -1767,21 +1767,24 @@ static void handle_client(int fd)
             handle_ssh_enable(fd, tag);
         }
         else if (strncmp(cmd, "identity ", 9) == 0) {
+            /* The result travels untagged (identity_applied / _failed,
+             * replica_result, the lists...); the tagged "ok" ends the host's
+             * wait for this command's reply. The host also sends identity
+             * untagged right after connecting: nothing to answer then. */
             handle_identity(fd, cmd + 9);
+            if (tag[0]) send_reply(fd, tag, "ok");
         }
         else if (strncmp(cmd, "replica ", 8) == 0) {
-            /* The result travels untagged (replica_result / the list); the
-             * tagged "ok" ends the host's wait for this command's reply. */
             handle_replica(fd, cmd + 8);
-            send_reply(fd, tag, "ok");
+            if (tag[0]) send_reply(fd, tag, "ok");
         }
         else if (strncmp(cmd, "seat ", 5) == 0) {
             handle_seat(fd, cmd + 5);
-            send_reply(fd, tag, "ok");
+            if (tag[0]) send_reply(fd, tag, "ok");
         }
         else if (strncmp(cmd, "qemu ", 5) == 0) {
             handle_qemu(fd, cmd + 5);
-            send_reply(fd, tag, "ok");
+            if (tag[0]) send_reply(fd, tag, "ok");
         }
         else if (strncmp(cmd, "ssh_deploy_key ", 15) == 0) {
             send_reply(fd, tag, deploy_ssh_key(cmd + 15) ? "ssh_key_deployed" : "ssh_key_failed");
