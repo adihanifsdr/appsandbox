@@ -13,6 +13,10 @@ Type=simple
 ExecStart=/usr/local/bin/appsandbox-agent
 Restart=always
 RestartSec=3
+# Only the agent itself is killed on stop / restart: the detached jobs it
+# launched (a seat or replica being created, the QEMU patch build) keep
+# running and report their outcome to the next agent instance's heartbeat.
+KillMode=process
 StandardOutput=journal
 StandardError=journal
 # Need CAP_NET_ADMIN to run `netplan apply` for set_ip, and we shell out

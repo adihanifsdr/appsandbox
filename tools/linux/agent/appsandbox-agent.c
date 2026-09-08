@@ -487,6 +487,144 @@ static int qemu_build_running(void)
     return run_sync("flock -n " QEMU_BUILD_LOCK " true >/dev/null 2>&1") != 0;
 }
 
+/* A log line worth the host's log: a step ("==> ..."), an apt / dpkg / make
+ * error, a verdict. The rest (package lists, progress) stays in the guest. */
+static int notable_line(const char *line)
+{
+    return strncmp(line, "==>", 3) == 0 || strncmp(line, "E:", 2) == 0 ||
+           strncmp(line, "OK:", 3) == 0 || strstr(line, "FAIL") || strstr(line, "rror") ||
+           strstr(line, "build.sh:") || strstr(line, "cannot") || strstr(line, "Unable");
+}
+
+/* ---- Detached jobs: seat create, replica create / desktop / setup ----
+ *
+ * They run for minutes under nohup with a log in /var/log/appsandbox-
+ * <kind>-<name>.log. The agent keeps a note of each; every heartbeat
+ * forwards the notable new lines of its log as "log:<kind> <name>: ..."
+ * and, once the job has written its exit code (or vanished without one),
+ * reports <kind>_result:<name>:<sub>:ok|failed - with the log's last lines
+ * first when it failed, so the reason is in the Nestbox log and the row
+ * does not sit on "creating..." until its timeout. */
+#define MAX_JOBS 8
+struct job {
+    int   active;
+    char  kind[8], name[64], sub[16];
+    char  log[128], rcfile[128];
+    long  off;                     /* how far the log has been forwarded */
+    pid_t pid;
+    char  last[3][200];            /* the log's last three lines (ring) */
+    int   nlast;
+};
+static struct job g_jobs[MAX_JOBS];
+static pthread_mutex_t g_jobs_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Run cmd detached ("<cmd>; echo $? > <rcfile>" under nohup, output to the
+ * job's log) and remember it. cmd must not contain single quotes. Returns
+ * run_sync's rc for the launch itself. */
+static int job_launch(const char *kind, const char *name, const char *sub, const char *cmd)
+{
+    char line[2048], log[128], rcfile[128], pidfile[128];
+    int rc, i, slot = -1;
+    FILE *f;
+
+    snprintf(log, sizeof(log), "/var/log/appsandbox-%s-%s.log", kind, name);
+    snprintf(rcfile, sizeof(rcfile), "/run/appsandbox-job-%s-%s.rc", kind, name);
+    snprintf(pidfile, sizeof(pidfile), "/run/appsandbox-job-%s-%s.pid", kind, name);
+    unlink(rcfile);
+    snprintf(line, sizeof(line),
+             "nohup sh -c '%s; echo $? > %s' >%s 2>&1 </dev/null & echo $! > %s",
+             cmd, rcfile, log, pidfile);
+    rc = run_sync(line);
+    if (rc != 0) return rc;
+
+    pthread_mutex_lock(&g_jobs_lock);
+    for (i = 0; i < MAX_JOBS; i++)
+        if (g_jobs[i].active && strcmp(g_jobs[i].kind, kind) == 0 && strcmp(g_jobs[i].name, name) == 0) { slot = i; break; }
+    if (slot < 0)
+        for (i = 0; i < MAX_JOBS; i++) if (!g_jobs[i].active) { slot = i; break; }
+    if (slot >= 0) {
+        struct job *j = &g_jobs[slot];
+        memset(j, 0, sizeof(*j));
+        j->active = 1;
+        snprintf(j->kind, sizeof(j->kind), "%s", kind);
+        snprintf(j->name, sizeof(j->name), "%s", name);
+        snprintf(j->sub, sizeof(j->sub), "%s", sub);
+        snprintf(j->log, sizeof(j->log), "%s", log);
+        snprintf(j->rcfile, sizeof(j->rcfile), "%s", rcfile);
+        f = fopen(pidfile, "r");
+        if (f) { int p = 0; if (fscanf(f, "%d", &p) == 1) j->pid = (pid_t)p; fclose(f); }
+    }
+    pthread_mutex_unlock(&g_jobs_lock);
+    return 0;
+}
+
+/* Heartbeat: forward each active job's new log lines; report the ones
+ * that ended. Returns the number of jobs that ended (the replica / seat
+ * list is then sent again, so the new row appears at once). */
+static int jobs_tick(int fd)
+{
+    int i, ended = 0;
+    pthread_mutex_lock(&g_jobs_lock);
+    for (i = 0; i < MAX_JOBS; i++) {
+        struct job *j = &g_jobs[i];
+        FILE *f;
+        int done = 0, rc = -1;
+        char msg[600];
+        if (!j->active) continue;
+        f = fopen(j->log, "r");
+        if (f) {
+            char line[512];
+            int sent = 0;
+            if (fseek(f, 0, SEEK_END) == 0 && ftell(f) < j->off) j->off = 0;
+            fseek(f, j->off, SEEK_SET);
+            while (fgets(line, sizeof(line), f)) {
+                size_t n = strlen(line);
+                if (n == 0 || line[n - 1] != '\n') break;          /* partial line: next beat */
+                line[--n] = '\0';
+                while (n > 0 && line[n - 1] == '\r') line[--n] = '\0';
+                j->off = ftell(f);
+                if (n == 0) continue;
+                snprintf(j->last[j->nlast % 3], sizeof(j->last[0]), "%s", line);
+                j->nlast++;
+                if (sent < 8 && notable_line(line)) {
+                    snprintf(msg, sizeof(msg), "log:%s %s: %s", j->kind, j->name, line);
+                    send_line(fd, msg);
+                    sent++;
+                }
+            }
+            fclose(f);
+        }
+        f = fopen(j->rcfile, "r");
+        if (f) {
+            if (fscanf(f, "%d", &rc) != 1) rc = -1;
+            fclose(f);
+            unlink(j->rcfile);
+            done = 1;
+        } else if (j->pid > 0 && kill(j->pid, 0) != 0 && errno == ESRCH) {
+            done = 1;                                             /* gone without an exit code */
+        }
+        if (!done) continue;
+        if (rc != 0) {
+            int k, from = j->nlast > 3 ? j->nlast - 3 : 0;
+            snprintf(msg, sizeof(msg), "log:%s %s: %s ended with rc=%d; the log's last lines:", j->kind, j->name, j->sub, rc);
+            send_line(fd, msg);
+            for (k = from; k < j->nlast; k++) {
+                snprintf(msg, sizeof(msg), "log:%s %s:   %s", j->kind, j->name, j->last[k % 3]);
+                send_line(fd, msg);
+            }
+            snprintf(msg, sizeof(msg), "log:%s %s: the whole log is %s in the guest", j->kind, j->name, j->log);
+            send_line(fd, msg);
+        }
+        snprintf(msg, sizeof(msg), "%s_result:%s:%s:%s", j->kind, j->name, j->sub, rc == 0 ? "ok" : "failed");
+        send_line(fd, msg);
+        agent_log("%s %s %s: ended rc=%d", j->kind, j->name, j->sub, rc);
+        j->active = 0;
+        ended++;
+    }
+    pthread_mutex_unlock(&g_jobs_lock);
+    return ended;
+}
+
 /* Forward the notable lines of the build log (steps "==> ...", apt / make
  * errors, the final verdict) to the host as "log:" lines, from *off on.
  * final: the build ended without the stamp - send its last lines too, so
@@ -718,22 +856,21 @@ static void handle_replica(int fd, const char *args)
     }
 
     if (strcmp(sub, "create") == 0 || strcmp(sub, "desktop") == 0 || strcmp(sub, "setup") == 0) {
+        /* A job (see job_launch): its log lines and its outcome reach the
+           host from the heartbeat. */
         if (strcmp(sub, "setup") == 0)
             snprintf(cmd, sizeof(cmd),
-                "nohup sh -c '[ -f /var/lib/appsandbox/replica/replicas/%s/replica.conf ] && exit 0; "
-                "[ \"%s\" = replica ] && [ -f /var/lib/appsandbox/replica/replica.conf ] && exit 0; "
+                "if [ -f /var/lib/appsandbox/replica/replicas/%s/replica.conf ] || "
+                "{ [ \"%s\" = replica ] && [ -f /var/lib/appsandbox/replica/replica.conf ]; }; then "
+                "echo \"==> replica %s already exists\"; else "
                 "%s install && flock " QEMU_BUILD_LOCK " sh -c \"[ -f " QEMU_STAMP " ] || %s qemu build\" && "
-                "%s -n %s create%s && %s -n %s desktop' >/var/log/appsandbox-replica-%s.log 2>&1 </dev/null &",
-                name, name, tool, tool, tool, name, sizing, tool, name, name);
+                "%s -n %s create%s && %s -n %s desktop; fi",
+                name, name, name, tool, tool, tool, name, sizing, tool, name);
         else if (strcmp(sub, "create") == 0)
-            snprintf(cmd, sizeof(cmd),
-                "nohup sh -c '%s install && %s -n %s create%s' >/var/log/appsandbox-replica-%s.log 2>&1 </dev/null &",
-                tool, tool, name, sizing, name);
+            snprintf(cmd, sizeof(cmd), "%s install && %s -n %s create%s", tool, tool, name, sizing);
         else
-            snprintf(cmd, sizeof(cmd),
-                "nohup %s -n %s desktop >/var/log/appsandbox-replica-%s.log 2>&1 </dev/null &",
-                tool, name, name);
-        rc = run_sync(cmd);
+            snprintf(cmd, sizeof(cmd), "%s -n %s desktop", tool, name);
+        rc = job_launch("replica", name, sub, cmd);
         agent_log("replica %s %s%s: launched rc=%d", name, sub, sizing, rc);
         snprintf(msg, sizeof(msg), "replica_result:%s:%s:%s", name, sub, rc == 0 ? "started" : "failed");
         send_line(fd, msg);
@@ -845,9 +982,10 @@ static void handle_seat(int fd, const char *args)
     if (strcmp(sub, "create") == 0) {
         if (res[0]) snprintf(opts + strlen(opts), sizeof(opts) - strlen(opts), " --resolution %s", res);
         if (!steam) snprintf(opts + strlen(opts), sizeof(opts) - strlen(opts), " --no-steam");
-        snprintf(cmd, sizeof(cmd), "nohup %s -n %s create%s >/var/log/appsandbox-seat-%s.log 2>&1 </dev/null &",
-                 tool, name, opts, name);
-        rc = run_sync(cmd);
+        /* A job (see job_launch): its log lines and its outcome reach the
+           host from the heartbeat. */
+        snprintf(cmd, sizeof(cmd), "%s -n %s create%s", tool, name, opts);
+        rc = job_launch("seat", name, "create", cmd);
         agent_log("seat %s create%s: launched rc=%d", name, opts, rc);
         snprintf(msg, sizeof(msg), "seat_result:%s:%s:%s", name, sub, rc == 0 ? "started" : "failed");
         send_line(fd, msg);
@@ -922,6 +1060,12 @@ static void *heartbeat_thread(void *arg)
                 snprintf(replica_last, sizeof(replica_last), "%s", now);
                 if (replica_last[0] == '\0') replica_last[0] = ' ';
             }
+        }
+        /* Detached jobs (seat / replica creation): their log lines and
+         * outcomes; a finished one sends the list again so its row appears. */
+        if (jobs_tick(fd) > 0) {
+            send_replica_state(fd);
+            replicas_json(replica_last, sizeof(replica_last));
         }
         /* The replicas' QEMU (stock / building / patched), on change and once
          * per connection; while a build runs, its notable log lines. */
